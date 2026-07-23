@@ -1,2 +1,6 @@
 _temp/
 docs/temp/
+
+AGENTS.md
+.claude/
+.agents/
