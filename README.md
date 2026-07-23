@@ -3,16 +3,31 @@
 A modern, open-source, text-first browser for the terminal.
 
 Puma is a native browser designed for reading and navigating web documents from the
-command line. It renders HTML documents as readable terminal text, supports tabs,
-bookmarks, forms, and downloads.
-
-**No JavaScript. No Electron. No Chromium.**
+command line. It renders HTML documents as readable terminal text, with no JavaScript,
+no Electron, and no Chromium.
 
 ```
 HTML → Semantic document → Text layout → Terminal
 ```
 
-## Features
+## Status
+
+Early development. The project is scaffolding: the workspace compiles and the crate
+foundations are in place (error taxonomies, domain identifiers, the composition root
+that wires the core to its adapters), but there is no working browser yet.
+
+Running the binary today reports a placeholder error and exits. Nothing is rendered,
+fetched, or parsed end to end. The features below describe the target product, not the
+current behavior.
+
+```
+$ puma          # terminal mode (default) → reports "Could not render the page"
+$ puma mcp      # MCP stdio mode          → reports NAVIGATION_FAILED
+```
+
+## Planned features
+
+None of these are implemented yet. They describe where the project is headed.
 
 - **Text-first rendering** — HTML5 parsed into a semantic document model, rendered as
   clean terminal text with proper heading hierarchy, lists, tables, and code blocks
@@ -28,21 +43,18 @@ HTML → Semantic document → Text layout → Terminal
 - **Unicode** — full grapheme cluster support; CJK; bidirectional text; emoji-safe layout
 - **Scriptless** — `<script>` elements are detected, reported, and ignored
 
-## Status
-
-Early development.
-
 ## Building
 
-Requires Rust stable (1.80+). Clone and build:
+Requires Rust stable. Clone and build:
 
 ```bash
-git clone https://github.com/your-org/puma-browser
+git clone https://github.com/meerita/puma-browser
 cd puma-browser
 make build
 ```
 
-The binary is at `target/release/puma`.
+The release binary is written to `target/release/puma`. It builds and runs, but only
+reports the placeholder status described under [Status](#status).
 
 ## Development
 
@@ -62,4 +74,4 @@ See [docs/process/README.md](docs/process/README.md) for the full development wo
 
 ## License
 
-Apache-2.0 OR MIT
+MIT
