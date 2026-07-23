@@ -1,0 +1,18 @@
+[package]
+name = "browser-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "puma"
+path = "src/main.rs"
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-terminal = { path = "../browser-terminal" }
+browser-mcp = { path = "../browser-mcp" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

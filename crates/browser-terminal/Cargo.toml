@@ -1,0 +1,17 @@
+[package]
+name = "browser-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+browser-core = { path = "../browser-core" }
+browser-layout = { path = "../browser-layout" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+unicode-width = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

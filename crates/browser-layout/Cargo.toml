@@ -1,0 +1,14 @@
+[package]
+name = "browser-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+browser-html = { path = "../browser-html" }
+browser-css = { path = "../browser-css" }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
