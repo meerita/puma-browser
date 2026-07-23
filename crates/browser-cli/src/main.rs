@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use browser_core::NavigationController;
 use browser_mcp::McpServer;
-use browser_terminal::TerminalApp;
+use browser_terminal::{InitialView, TerminalApp};
 
 /// Which output adapter the binary drives.
 ///
@@ -53,8 +53,9 @@ fn run(run_mode: RunMode, controller: NavigationController) -> Result<()> {
 }
 
 fn run_terminal(controller: NavigationController) -> Result<()> {
-    let mut app = TerminalApp::new(controller);
-    // The adapter is a skeleton in this milestone; surface its safe status message.
+    // Start on a blank view; the composition root does not yet parse a URL to load.
+    let mut app = TerminalApp::new(controller, InitialView::Blank);
+    // Surface only the adapter's safe status message, never raw error detail.
     app.run().map_err(|error| anyhow!(error.user_message()))
 }
 

@@ -255,6 +255,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "browser-core",
+ "browser-css",
  "browser-layout",
  "crossterm",
  "ratatui",
