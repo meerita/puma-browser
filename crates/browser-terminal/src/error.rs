@@ -45,6 +45,7 @@ impl TerminalError {
             CoreError::TabNotFound => "Tab not found",
             CoreError::Network(_) => "Connection failed",
             CoreError::Parse(_) => "Could not read the page",
+            CoreError::Layout(_) => "Could not display the page",
             CoreError::Storage(_) => "Could not access local data",
             CoreError::Privacy(_) => "Blocked by privacy policy",
         }

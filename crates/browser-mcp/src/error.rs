@@ -52,6 +52,9 @@ impl McpError {
             CoreError::Network(_) => "NETWORK_ERROR",
             // A parse failure leaves no document for the client to read.
             CoreError::Parse(_) => "DOCUMENT_NOT_LOADED",
+            // A layout failure is an internal rendering fault, reported generically so
+            // the client never learns which stage of display broke.
+            CoreError::Layout(_) => "NAVIGATION_FAILED",
             // A storage failure surfaces as a generic operation failure; the client
             // never learns that local persistence was involved.
             CoreError::Storage(_) => "NAVIGATION_FAILED",
