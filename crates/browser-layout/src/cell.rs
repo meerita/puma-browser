@@ -91,6 +91,23 @@ impl CellBuffer {
         self.height
     }
 
+    /// Overwrites the cell at `column`, `row`.
+    ///
+    /// A position outside the buffer is ignored rather than an error, so a layout pass
+    /// that writes a wide grapheme near the right edge can never index out of bounds.
+    pub(crate) fn set_cell(&mut self, column: u16, row: u16, cell: Cell) {
+        if column >= self.width {
+            return;
+        }
+        if row >= self.height {
+            return;
+        }
+        let index = usize::from(row) * usize::from(self.width) + usize::from(column);
+        if let Some(slot) = self.cells.get_mut(index) {
+            *slot = cell;
+        }
+    }
+
     /// Returns the cell at `column`, `row`, or `None` when the position lies outside the
     /// buffer's dimensions.
     pub fn cell_at(&self, column: u16, row: u16) -> Option<&Cell> {

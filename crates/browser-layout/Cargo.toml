@@ -12,3 +12,6 @@ unicode-width = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+unicode-width = { workspace = true }
