@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check lint check test test-full build clean help
+.PHONY: fmt fmt-check lint check test test-full audit build clean help
 
 fmt:
 	cargo fmt --all
@@ -18,6 +18,10 @@ test:
 test-full:
 	cargo test --all --all-features
 
+audit:
+	@cargo audit --version >/dev/null 2>&1 || cargo install cargo-audit --quiet
+	cargo audit
+
 build:
 	cargo build --release
 
@@ -33,5 +37,6 @@ help:
 	@echo "  check       cargo check (all targets, all features)"
 	@echo "  test        Run all tests"
 	@echo "  test-full   Run all tests with all features"
+	@echo "  audit       Run cargo-audit; any advisory at warning+ is a failure"
 	@echo "  build       Release build"
 	@echo "  clean       Remove build artifacts"
