@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+browser-network = { path = "../browser-network" }
+browser-html = { path = "../browser-html" }
+browser-css = { path = "../browser-css" }
+browser-layout = { path = "../browser-layout" }
+browser-storage = { path = "../browser-storage" }
+browser-privacy = { path = "../browser-privacy" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

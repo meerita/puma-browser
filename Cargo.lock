@@ -136,6 +136,12 @@ name = "browser-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "browser-css",
+ "browser-html",
+ "browser-layout",
+ "browser-network",
+ "browser-privacy",
+ "browser-storage",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
