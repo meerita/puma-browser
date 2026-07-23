@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 browser-core = { path = "../browser-core" }
+browser-css = { path = "../browser-css" }
 browser-layout = { path = "../browser-layout" }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

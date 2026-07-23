@@ -32,4 +32,10 @@ pub enum NetworkError {
 
     #[error("response too large")]
     ResponseTooLarge,
+
+    #[error("request failed")]
+    RequestFailed,
+
+    #[error("failed to decode response body")]
+    Decode,
 }

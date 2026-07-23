@@ -20,6 +20,7 @@ const DEFAULT_SCHEME_PREFIX: &str = "https://";
 /// The scheme is checked in `parse` before the value can be handed to any network
 /// call. `Debug` and `Display` strip userinfo so embedded credentials never reach
 /// logs or the terminal.
+#[derive(Clone)]
 pub struct BrowserUrl(Url);
 
 impl BrowserUrl {

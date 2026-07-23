@@ -5,6 +5,8 @@
 
 mod cell;
 mod error;
+mod render;
 
 pub use cell::{Cell, CellBuffer};
 pub use error::LayoutError;
+pub use render::render_document;

@@ -4,6 +4,7 @@
 // @created meerita <meerita@icloud.com>
 
 use browser_html::HtmlError;
+use browser_layout::LayoutError;
 use browser_network::NetworkError;
 use browser_privacy::PrivacyError;
 use browser_storage::StorageError;
@@ -28,6 +29,9 @@ pub enum CoreError {
     #[error("document parse error")]
     Parse(#[source] HtmlError),
 
+    #[error("layout error")]
+    Layout(#[source] LayoutError),
+
     #[error("storage error")]
     Storage(#[source] StorageError),
 
@@ -44,6 +48,12 @@ impl From<NetworkError> for CoreError {
 impl From<HtmlError> for CoreError {
     fn from(error: HtmlError) -> Self {
         Self::Parse(error)
+    }
+}
+
+impl From<LayoutError> for CoreError {
+    fn from(error: LayoutError) -> Self {
+        Self::Layout(error)
     }
 }
 

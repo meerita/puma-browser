@@ -12,18 +12,29 @@ HTML → Semantic document → Text layout → Terminal
 
 ## Status
 
-Early development. The project is scaffolding: the workspace compiles and the crate
-foundations are in place (error taxonomies, domain identifiers, the composition root
-that wires the core to its adapters), but there is no working browser yet.
-
-Running the binary today reports a placeholder error and exits. Nothing is rendered,
-fetched, or parsed end to end. The features below describe the target product, not the
-current behavior.
+Early development. A single page renders end to end. `puma <url>` fetches one HTTP or
+HTTPS page, parses it into the semantic document model, lays it out as text, and shows
+it in a scrollable read-only viewport. Two `Esc` presses quit. Everything below under
+[Planned features](#planned-features) is still ahead.
 
 ```
-$ puma          # terminal mode (default) → reports "Could not render the page"
-$ puma mcp      # MCP stdio mode          → reports NAVIGATION_FAILED
+$ puma example.com   # fetch, render, and scroll the page; Esc Esc quits
+$ puma               # terminal mode (default) → opens a blank page; Esc Esc quits
+$ puma mcp           # MCP stdio mode          → placeholder, reports NAVIGATION_FAILED
 ```
+
+## What works
+
+- **Fetch one page** — one `http://` or `https://` URL over real TLS, following
+  redirects up to a limit, with a maximum response size and lossy UTF-8 decoding
+- **Text rendering** — HTML5 parsed into the semantic document model and laid out as
+  terminal text: headings, bullet list items, verbatim code, indented quotes, and
+  word-wrapped paragraphs; `<script>` content is suppressed and counted
+- **Scrollable viewport** — arrows and PageUp/PageDown scroll; a status line shows the
+  page label and scroll position; `Esc Esc` quits and `Ctrl+C` exits immediately
+
+A blank page (`puma` with no URL) and an error page (a load that fails) both open in the
+same viewport and quit the same way.
 
 ## Planned features
 
@@ -53,8 +64,8 @@ cd puma-browser
 make build
 ```
 
-The release binary is written to `target/release/puma`. It builds and runs, but only
-reports the placeholder status described under [Status](#status).
+The release binary is written to `target/release/puma`. Run `puma example.com` to fetch
+and render a page, or `puma` for a blank page; `Esc Esc` quits.
 
 ## Development
 

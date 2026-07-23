@@ -21,13 +21,21 @@ fn all_semantic_node_variants_construct() {
             href: "https://example.com".to_string(),
         },
         SemanticNode::List,
-        SemanticNode::ListItem,
+        SemanticNode::ListItem {
+            text: "First".to_string(),
+        },
         SemanticNode::Table,
         SemanticNode::TableRow,
         SemanticNode::TableCell,
-        SemanticNode::Quote,
-        SemanticNode::CodeBlock,
-        SemanticNode::PreformattedBlock,
+        SemanticNode::Quote {
+            text: "Quoted".to_string(),
+        },
+        SemanticNode::CodeBlock {
+            text: "let x = 1;".to_string(),
+        },
+        SemanticNode::PreformattedBlock {
+            text: "  indented".to_string(),
+        },
         SemanticNode::ImagePlaceholder {
             alt: "Diagram".to_string(),
             title: Some("Architecture".to_string()),
