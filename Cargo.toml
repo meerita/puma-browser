@@ -30,6 +30,7 @@ crossterm = "0.29"
 # HTTP / TLS
 reqwest = { version = "0.13", features = ["rustls", "stream"], default-features = false }
 rustls = "0.23"
+url = "2"
 
 # Document processing
 html5ever = "0.39"
