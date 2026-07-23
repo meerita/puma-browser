@@ -155,7 +155,8 @@ types it defines.
 | ---- | ---------- | ------- |
 | `SemanticNode`, `Document`, `NodeId` | `browser-html` | `browser-css`, `browser-layout`, `browser-terminal`, `browser-mcp` |
 | `TextStyle` | `browser-css` | `browser-layout` |
-| `TabId`, `TabState`, `CookiePolicy` | `browser-core` | `browser-terminal`, `browser-mcp` |
+| `TabId`, `TabState` | `browser-core` | `browser-terminal`, `browser-mcp` |
+| `CookiePolicy` | `browser-privacy` | `browser-core`, `browser-terminal`, `browser-mcp` |
 | `BrowserUrl` | `browser-network` | `browser-core` and all outer crates |
 
 Types flow outward through the crate boundary. An inner crate does not import a type
