@@ -16,30 +16,30 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0 OR MIT"
-repository = "https://github.com/your-org/puma-browser"
+license = "MIT"
+repository = "https://github.com/meerita/puma-browser"
 
 [workspace.dependencies]
 # Async
 tokio = { version = "1", features = ["full"] }
 
 # Terminal UI
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 # HTTP / TLS
-reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+reqwest = { version = "0.13", features = ["rustls", "stream"], default-features = false }
 rustls = "0.23"
 
 # Document processing
-html5ever = "0.29"
-cssparser = "0.34"
+html5ever = "0.39"
+cssparser = "0.37"
 
 # Storage
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Config
-toml = "0.8"
+toml = "1"
 
 # Logging
 tracing = "0.1"
