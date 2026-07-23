@@ -1,6 +1,12 @@
+# Build artifacts
+/target/
+
+# Temp scratch directories and local working docs
 _temp/
 docs/temp/
+docs/plans/
 
+# AI assistant tooling (local only, not for contributors)
 AGENTS.md
 .claude/
 .agents/

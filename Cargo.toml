@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/browser-core",
+    "crates/browser-network",
+    "crates/browser-html",
+    "crates/browser-css",
+    "crates/browser-layout",
+    "crates/browser-storage",
+    "crates/browser-privacy",
+    "crates/browser-terminal",
+    "crates/browser-mcp",
+    "crates/browser-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/your-org/puma-browser"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# HTTP / TLS
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+rustls = "0.23"
+
+# Document processing
+html5ever = "0.29"
+cssparser = "0.34"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Config
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Unicode
+unicode-segmentation = "1"
+unicode-width = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
