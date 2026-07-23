@@ -9,7 +9,7 @@ use browser_html::{Document, DocumentTitle, SemanticNode};
 fn document_exposes_its_nodes_and_title() {
     let nodes = vec![SemanticNode::Document];
     let title = Some(DocumentTitle::new("Example Domain"));
-    let document = Document::new(nodes, title);
+    let document = Document::new(nodes, title, 0);
 
     assert_eq!(document.nodes().len(), 1);
     assert_eq!(
@@ -20,7 +20,13 @@ fn document_exposes_its_nodes_and_title() {
 
 #[test]
 fn document_without_title_reports_none() {
-    let document = Document::new(Vec::new(), None);
+    let document = Document::new(Vec::new(), None, 0);
     assert!(document.title().is_none());
     assert!(document.nodes().is_empty());
+}
+
+#[test]
+fn document_reports_its_suppressed_script_count() {
+    let document = Document::new(Vec::new(), None, 3);
+    assert_eq!(document.script_count(), 3);
 }

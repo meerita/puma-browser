@@ -24,13 +24,21 @@ pub enum SemanticNode {
         href: String,
     },
     List,
-    ListItem,
+    ListItem {
+        text: String,
+    },
     Table,
     TableRow,
     TableCell,
-    Quote,
-    CodeBlock,
-    PreformattedBlock,
+    Quote {
+        text: String,
+    },
+    CodeBlock {
+        text: String,
+    },
+    PreformattedBlock {
+        text: String,
+    },
     ImagePlaceholder {
         alt: String,
         title: Option<String>,
