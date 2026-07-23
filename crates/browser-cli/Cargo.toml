@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 browser-core = { path = "../browser-core" }
+browser-network = { path = "../browser-network" }
 browser-terminal = { path = "../browser-terminal" }
 browser-mcp = { path = "../browser-mcp" }
 tokio = { workspace = true }
