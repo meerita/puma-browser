@@ -45,6 +45,7 @@ impl NavigationController {
     /// parse failures are mapped into [`CoreError`] by `?`.
     pub async fn load(&mut self, url: BrowserUrl) -> Result<(), CoreError> {
         let fetched = browser_network::fetch(&url).await?;
+        let byte_count = fetched.body_bytes().len();
         let document = browser_html::parse_html_with_base(
             fetched.body_bytes(),
             fetched.charset(),
@@ -55,6 +56,7 @@ impl NavigationController {
             fetched.final_url().clone(),
             document,
             title,
+            byte_count,
         ));
         Ok(())
     }
@@ -89,6 +91,13 @@ impl NavigationController {
     /// Whether a page is currently loaded.
     pub fn has_page(&self) -> bool {
         self.current_page.is_some()
+    }
+
+    /// The byte count of the current page's raw response body, or zero when no page is loaded.
+    pub fn page_byte_count(&self) -> usize {
+        self.current_page
+            .as_ref()
+            .map_or(0, CurrentPage::byte_count)
     }
 
     /// How many `<script>` elements the current page suppressed, or zero when no page is

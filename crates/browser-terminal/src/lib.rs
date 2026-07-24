@@ -130,6 +130,7 @@ impl TerminalApp {
                 &label,
                 scroll_percent_val,
                 self.controller.script_count(),
+                self.controller.page_byte_count(),
             )?;
             if let LoopControl::Quit = step_event(
                 &mut scroll,
@@ -189,6 +190,7 @@ impl TerminalApp {
         label: &str,
         scroll_percent: u16,
         script_count: usize,
+        page_byte_count: usize,
     ) -> Result<(), TerminalError> {
         terminal
             .draw(|frame| {
@@ -201,6 +203,7 @@ impl TerminalApp {
                     ui_state,
                     scroll_percent,
                     script_count,
+                    page_byte_count,
                 )
             })
             .map_err(|_| TerminalError::RenderFailed)?;
@@ -331,6 +334,7 @@ fn draw_frame(
     ui_state: &UiState,
     scroll_percent: u16,
     script_count: usize,
+    page_byte_count: usize,
 ) {
     let terminal_width = frame.area().width;
     let chunks = Layout::vertical([
@@ -343,7 +347,13 @@ fn draw_frame(
     ])
     .split(frame.area());
 
-    let title_text = compose_title_bar(label, scroll_percent, script_count, terminal_width);
+    let title_text = compose_title_bar(
+        label,
+        scroll_percent,
+        script_count,
+        page_byte_count,
+        terminal_width,
+    );
     draw_chrome_row(frame, chunks[0], &title_text);
 
     draw_separator(frame, chunks[1]);

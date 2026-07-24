@@ -12,12 +12,13 @@ pub(crate) fn compose_title_bar(
     label: &str,
     scroll_percent: u16,
     script_count: usize,
+    page_byte_count: usize,
     terminal_width: u16,
 ) -> String {
     let width = terminal_width as usize;
     let max_label_cols = width / 2;
     let left = truncate_with_ellipsis(label, max_label_cols);
-    let right = build_right_indicators(scroll_percent, script_count);
+    let right = build_right_indicators(scroll_percent, script_count, page_byte_count);
     let left_width = UnicodeWidthStr::width(left.as_str());
     let available = width.saturating_sub(left_width);
     let right_width = UnicodeWidthStr::width(right.as_str());
@@ -33,8 +34,28 @@ pub(crate) fn compose_title_bar(
     }
 }
 
-fn build_right_indicators(scroll_percent: u16, script_count: usize) -> String {
-    let mut right = format!("{scroll_percent}%");
+/// Formats a byte count as a human-readable string: bytes for values below 1 KB,
+/// one decimal place in KB below 1 MB, one decimal place in MB otherwise.
+pub(crate) fn format_page_size(byte_count: usize) -> String {
+    if byte_count < 1024 {
+        format!("{byte_count} B")
+    } else if byte_count < 1024 * 1024 {
+        format!("{:.1} KB", byte_count as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", byte_count as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn build_right_indicators(
+    scroll_percent: u16,
+    script_count: usize,
+    page_byte_count: usize,
+) -> String {
+    let mut right = String::new();
+    if page_byte_count > 0 {
+        right.push_str(&format!("{} · ", format_page_size(page_byte_count)));
+    }
+    right.push_str(&format!("{scroll_percent}%"));
     if script_count == 1 {
         right.push_str(" · 1 script blocked");
     } else if script_count > 1 {

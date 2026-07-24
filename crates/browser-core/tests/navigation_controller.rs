@@ -108,6 +108,33 @@ fn render_without_a_loaded_page_returns_a_blank_buffer() {
     assert!(controller.current_url().is_none());
 }
 
+#[test]
+fn page_byte_count_is_zero_without_a_loaded_page() {
+    let controller = NavigationController::new();
+
+    assert_eq!(controller.page_byte_count(), 0);
+}
+
+#[tokio::test]
+async fn page_byte_count_reflects_the_response_body_size() {
+    let server = MockServer::start().await;
+    let body = b"<html><body><p>Hello</p></body></html>";
+    let body_len = body.len();
+    Mock::given(method("GET"))
+        .and(path("/size"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body.as_slice(), "text/html"))
+        .mount(&server)
+        .await;
+    let mut controller = NavigationController::new();
+
+    controller
+        .load(url_for(&server, "/size"))
+        .await
+        .expect("loading a valid HTML page must succeed");
+
+    assert_eq!(controller.page_byte_count(), body_len);
+}
+
 #[tokio::test]
 async fn render_at_zero_width_on_a_loaded_page_surfaces_a_layout_error() {
     let server = MockServer::start().await;

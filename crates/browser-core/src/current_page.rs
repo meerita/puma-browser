@@ -9,13 +9,15 @@ use browser_network::BrowserUrl;
 /// The page currently held by the navigation controller.
 ///
 /// This milestone tracks one page at a time, not a set of tabs. It keeps the URL the
-/// fetch finally resolved to (after any redirects), the parsed document, and the
-/// document's title so an adapter can show it without walking the node stream.
+/// fetch finally resolved to (after any redirects), the parsed document, the
+/// document's title so an adapter can show it without walking the node stream, and
+/// the raw byte count of the response body.
 #[derive(Debug)]
 pub(crate) struct CurrentPage {
     final_url: BrowserUrl,
     document: Document,
     title: Option<DocumentTitle>,
+    byte_count: usize,
 }
 
 impl CurrentPage {
@@ -23,11 +25,13 @@ impl CurrentPage {
         final_url: BrowserUrl,
         document: Document,
         title: Option<DocumentTitle>,
+        byte_count: usize,
     ) -> Self {
         Self {
             final_url,
             document,
             title,
+            byte_count,
         }
     }
 
@@ -41,5 +45,9 @@ impl CurrentPage {
 
     pub(crate) fn title(&self) -> Option<&DocumentTitle> {
         self.title.as_ref()
+    }
+
+    pub(crate) fn byte_count(&self) -> usize {
+        self.byte_count
     }
 }
