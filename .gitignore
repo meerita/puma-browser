@@ -1,6 +1,9 @@
 # Build artifacts
 /target/
 
+# OS-generated files
+.DS_Store
+
 # Temp scratch directories and local working docs
 _temp/
 docs/temp/
