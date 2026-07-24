@@ -16,6 +16,7 @@ pub use error::TerminalError;
 pub use initial_view::InitialView;
 
 use std::io::Stdout;
+use std::time::{Duration, Instant};
 
 use browser_core::NavigationController;
 use browser_css::{Color, Emphasis};
@@ -34,7 +35,7 @@ use ratatui::{Frame, Terminal};
 
 use command_bar::compose_command_bar_reading;
 use hints_bar::compose_hints_bar;
-use input::{map_key_event, quit_armed_after, InputAction};
+use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use title_bar::compose_title_bar;
 use ui_state::UiState;
 use viewport::{max_scroll_offset, scroll_percentage, ScrollState};
@@ -108,6 +109,9 @@ impl TerminalApp {
         let mut ui_state = UiState::new();
         let mut cache: Option<CachedPage> = None;
         loop {
+            let now = Instant::now();
+            ui_state.advance_hint_if_due(now);
+            ui_state.clear_transient_if_expired(now);
             let size = terminal.size().map_err(|_| TerminalError::RenderFailed)?;
             let viewport_height = size.height.saturating_sub(CHROME_ROWS);
             let content_width = size.width.saturating_sub(CONTENT_PADDING * 2);
@@ -128,7 +132,7 @@ impl TerminalApp {
                 self.controller.script_count(),
             )?;
             if let LoopControl::Quit =
-                step_event(&mut scroll, &mut ui_state, viewport_height, max_offset)?
+                step_event(&mut scroll, &mut ui_state, viewport_height, max_offset, now)?
             {
                 return Ok(());
             }
@@ -199,13 +203,22 @@ impl TerminalApp {
     }
 }
 
-/// Reads one event and applies it, reporting whether the loop should quit.
+/// Polls for one event and applies it, reporting whether the loop should quit.
+///
+/// Returns immediately with `Continue` when no event arrives within the poll window,
+/// allowing the caller to check timers and redraw between keypresses.
 fn step_event(
     scroll: &mut ScrollState,
     ui_state: &mut UiState,
     viewport_height: u16,
     max_offset: u16,
+    now: Instant,
 ) -> Result<LoopControl, TerminalError> {
+    let poll_available =
+        event::poll(Duration::from_millis(250)).map_err(|_| TerminalError::RenderFailed)?;
+    if !poll_available {
+        return Ok(LoopControl::Continue);
+    }
     let event = event::read().map_err(|_| TerminalError::RenderFailed)?;
     let Event::Key(key) = event else {
         return Ok(LoopControl::Continue);
@@ -213,12 +226,19 @@ fn step_event(
     if key.kind == KeyEventKind::Release {
         return Ok(LoopControl::Continue);
     }
-    let action = map_key_event(key, ui_state.quit_armed);
+    let action = map_key_event(key, ui_state.quit_armed, ui_state.refresh_armed);
     if matches!(action, InputAction::Quit) {
         return Ok(LoopControl::Quit);
     }
+    ui_state.clear_transient();
     apply_scroll(action, scroll, viewport_height, max_offset);
     ui_state.quit_armed = quit_armed_after(action);
+    ui_state.refresh_armed = refresh_armed_after(action);
+    if matches!(action, InputAction::ArmQuit) {
+        ui_state.set_transient_hint("Press Esc again to quit", now);
+    } else if matches!(action, InputAction::ArmRefresh) {
+        ui_state.set_transient_hint("Press r again to refresh", now);
+    }
     Ok(LoopControl::Continue)
 }
 
@@ -235,7 +255,11 @@ fn apply_scroll(
         InputAction::ScrollPageUp => scroll.page_up(viewport_height),
         InputAction::ScrollToTop => scroll.move_to_top(),
         InputAction::ScrollToBottom => scroll.move_to_bottom(max_offset),
-        InputAction::ArmQuit | InputAction::Disarm | InputAction::Quit => {}
+        InputAction::ArmQuit
+        | InputAction::ArmRefresh
+        | InputAction::RefreshArmed
+        | InputAction::Disarm
+        | InputAction::Quit => {}
     }
 }
 
@@ -274,7 +298,7 @@ fn draw_frame(
 
     draw_separator(frame, chunks[1]);
 
-    let cmd_text = compose_command_bar_reading(ui_state.quit_armed, terminal_width);
+    let cmd_text = compose_command_bar_reading(ui_state.current_hint(), terminal_width);
     frame.render_widget(Paragraph::new(cmd_text), chunks[2]);
 
     draw_separator(frame, chunks[3]);

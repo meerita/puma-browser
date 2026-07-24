@@ -5,16 +5,12 @@
 
 use unicode_width::UnicodeWidthStr;
 
-/// Composes the command bar string for reading mode: the prompt and a contextual or
-/// static hint on the left; an optional status message on the right.
-pub(crate) fn compose_command_bar_reading(quit_armed: bool, terminal_width: u16) -> String {
-    let left = if quit_armed {
-        "> Press Esc again to quit"
-    } else {
-        "> Type a URL or press / for commands"
-    };
+/// Composes the command bar string for reading mode: the prompt prefix and the current
+/// hint on the left, padded to fill the terminal width.
+pub(crate) fn compose_command_bar_reading(hint: &str, terminal_width: u16) -> String {
+    let left = format!("> {hint}");
     let width = terminal_width as usize;
-    let left_cols = UnicodeWidthStr::width(left);
+    let left_cols = UnicodeWidthStr::width(left.as_str());
     let padding = width.saturating_sub(left_cols);
     format!("{}{}", left, " ".repeat(padding))
 }
