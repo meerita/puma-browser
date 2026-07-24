@@ -5,6 +5,7 @@
 
 mod document;
 mod error;
+mod inline_run;
 mod node_id;
 mod parser;
 mod sanitize;
@@ -12,6 +13,7 @@ mod semantic_node;
 
 pub use document::{Document, DocumentTitle};
 pub use error::HtmlError;
+pub use inline_run::{InlineEmphasis, InlineRun};
 pub use node_id::NodeId;
 pub use parser::parse_html;
 pub use semantic_node::SemanticNode;

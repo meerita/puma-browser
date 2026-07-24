@@ -1,11 +1,11 @@
 // @file crates/browser-layout/src/render.rs
-// @description Lays a Document's block stream out into a width-correct terminal cell buffer.
+// @description Lays a Document's node tree out into a width-correct terminal cell buffer.
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
 use browser_css::computed_style;
 use browser_css::TextStyle;
-use browser_html::{Document, SemanticNode};
+use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -24,19 +24,26 @@ const SEPARATOR_GRAPHEME: &str = "─";
 /// Lay a document out into a cell buffer sized to `width` columns.
 ///
 /// Each node is styled by [`computed_style`] and turned into laid-out rows: text blocks
-/// word-wrap to the width, code and preformatted blocks render verbatim and clip, and
-/// spacing is applied as blank rows between blocks. The rows are then written into a
-/// blank buffer whose height is the total row count.
+/// word-wrap to the width, code and preformatted blocks render verbatim and clip,
+/// container nodes recurse into their children, and spacing is applied as blank rows
+/// between blocks. The rows are then written into a blank buffer whose height is the
+/// total row count.
 pub fn render_document(document: &Document, width: u16) -> Result<CellBuffer, LayoutError> {
     if width == 0 {
         return Err(LayoutError::ZeroWidth);
     }
     let width_columns = usize::from(width);
-    let mut rows: Vec<Vec<Cell>> = Vec::new();
-    for node in document.nodes() {
-        append_node_rows(&mut rows, node, width_columns);
-    }
+    let rows = render_children(document.children(), width_columns);
     build_buffer(rows, width)
+}
+
+/// Lay a sequence of sibling nodes out into rows, applying each node's own spacing.
+fn render_children(children: &[SemanticNode], width: usize) -> Vec<Vec<Cell>> {
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    for node in children {
+        append_node_rows(&mut rows, node, width);
+    }
+    rows
 }
 
 /// Append a node's spacing and content rows to the running row list.
@@ -61,23 +68,33 @@ fn append_blank_rows(rows: &mut Vec<Vec<Cell>>, count: u16) {
 }
 
 /// Produce the content rows for a single node, before spacing is applied.
+///
+/// Container nodes recurse into their children through [`render_children`]; text blocks
+/// flatten their inline runs into a single string and word-wrap it. Per-run emphasis and
+/// links are a later phase, so a run's `emphasis` and `link` are ignored here.
 fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
     match node {
-        SemanticNode::Heading { text, .. } => wrap_styled_text(text, style, width),
-        SemanticNode::Paragraph { text } => wrap_styled_text(text, style, width),
-        SemanticNode::Quote { text } => render_quote(text, style, width),
-        SemanticNode::ListItem { text } => render_list_item(text, style, width),
+        SemanticNode::Heading { runs, .. } => wrap_runs(runs, style, width),
+        SemanticNode::Paragraph { runs } => wrap_runs(runs, style, width),
+        SemanticNode::Quote { children } => render_quote(children, style, width),
+        SemanticNode::List { children, .. } => render_children(children, width),
+        SemanticNode::ListItem { children } => render_list_item(children, style, width),
         SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
             render_verbatim(text, style, width)
         }
         SemanticNode::Separator => vec![separator_row(style, width)],
-        SemanticNode::Link { text, .. } => single_row(clip_line(text, style, width)),
         SemanticNode::Warning { message } => single_row(clip_line(message, style, width)),
         SemanticNode::ImagePlaceholder { alt, .. } => {
             single_row(clip_line(&image_label(alt), style, width))
         }
         _ => Vec::new(),
     }
+}
+
+/// Concatenate a text block's inline runs and wrap the result to the width.
+fn wrap_runs(runs: &[InlineRun], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+    let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+    wrap_styled_text(&text, style, width)
 }
 
 /// Wrap a run of text into rows no wider than `width` display columns.
@@ -89,12 +106,12 @@ fn wrap_styled_text(text: &str, style: &TextStyle, width: usize) -> Vec<Vec<Cell
     wrapper.finish()
 }
 
-/// Render a block quote: wrap its text into the indented content width, then push each
-/// wrapped row right by the quote indent.
-fn render_quote(text: &str, style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+/// Render a block quote: lay its children out into the indented content width, then push
+/// each resulting row right by the quote indent.
+fn render_quote(children: &[SemanticNode], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
     let indent = quote_indent(width);
     let content_width = width - indent;
-    wrap_styled_text(text, style, content_width)
+    render_children(children, content_width)
         .into_iter()
         .map(|row| indent_row(row, indent, style))
         .collect()
@@ -107,11 +124,11 @@ fn quote_indent(width: usize) -> usize {
     0
 }
 
-/// Render a list item: wrap its text into the content width, then prefix the first row
-/// with a bullet and indent the continuation rows to align under it.
-fn render_list_item(text: &str, style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+/// Render a list item: lay its children out into the content width, then prefix the
+/// first row with a bullet and indent the continuation rows to align under it.
+fn render_list_item(children: &[SemanticNode], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
     let content_width = list_content_width(width);
-    wrap_styled_text(text, style, content_width)
+    render_children(children, content_width)
         .into_iter()
         .enumerate()
         .map(|(index, row)| decorate_list_row(index, row, style))

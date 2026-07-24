@@ -3,32 +3,38 @@
 // @layer html
 // @created meerita <meerita@icloud.com>
 
-use browser_html::SemanticNode;
+use browser_html::{InlineRun, SemanticNode};
 
 #[test]
 fn all_semantic_node_variants_construct() {
     let nodes = vec![
-        SemanticNode::Document,
         SemanticNode::Heading {
             level: 1,
-            text: "Title".to_string(),
+            runs: vec![InlineRun::plain("Title".to_string())],
         },
         SemanticNode::Paragraph {
-            text: "Body".to_string(),
+            runs: vec![InlineRun::plain("Body".to_string())],
         },
-        SemanticNode::Link {
-            text: "Home".to_string(),
-            href: "https://example.com".to_string(),
+        SemanticNode::List {
+            ordered: false,
+            children: vec![SemanticNode::ListItem {
+                children: vec![SemanticNode::Paragraph {
+                    runs: vec![InlineRun::plain("First".to_string())],
+                }],
+            }],
         },
-        SemanticNode::List,
         SemanticNode::ListItem {
-            text: "First".to_string(),
+            children: vec![SemanticNode::Paragraph {
+                runs: vec![InlineRun::plain("First".to_string())],
+            }],
         },
         SemanticNode::Table,
         SemanticNode::TableRow,
         SemanticNode::TableCell,
         SemanticNode::Quote {
-            text: "Quoted".to_string(),
+            children: vec![SemanticNode::Paragraph {
+                runs: vec![InlineRun::plain("Quoted".to_string())],
+            }],
         },
         SemanticNode::CodeBlock {
             text: "let x = 1;".to_string(),
@@ -55,5 +61,5 @@ fn all_semantic_node_variants_construct() {
         },
     ];
 
-    assert_eq!(nodes.len(), 23);
+    assert_eq!(nodes.len(), 21);
 }

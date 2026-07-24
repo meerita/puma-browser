@@ -40,31 +40,33 @@ impl DocumentTitle {
 
 /// The browser's semantic representation of a single page.
 ///
-/// Holds the page's semantic nodes, an optional sanitized title, and the number of
-/// `<script>` elements the parser suppressed. The script count is kept so an adapter
-/// can tell the user how many scripts were ignored without ever seeing their content.
+/// Holds the top-level children of the semantic tree, an optional sanitized title, and
+/// the number of `<script>` elements the parser suppressed. The document is the root of
+/// the tree; its children own their own descendants. The script count is kept so an
+/// adapter can tell the user how many scripts were ignored without ever seeing their
+/// content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
-    nodes: Vec<SemanticNode>,
+    children: Vec<SemanticNode>,
     title: Option<DocumentTitle>,
     script_count: usize,
 }
 
 impl Document {
     pub fn new(
-        nodes: Vec<SemanticNode>,
+        children: Vec<SemanticNode>,
         title: Option<DocumentTitle>,
         script_count: usize,
     ) -> Self {
         Self {
-            nodes,
+            children,
             title,
             script_count,
         }
     }
 
-    pub fn nodes(&self) -> &[SemanticNode] {
-        &self.nodes
+    pub fn children(&self) -> &[SemanticNode] {
+        &self.children
     }
 
     pub fn title(&self) -> Option<&DocumentTitle> {

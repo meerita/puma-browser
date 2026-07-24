@@ -1,15 +1,26 @@
 // @file crates/browser-html/tests/parse_html.rs
-// @description Behavior tests for parse_html: block mapping, sanitization, scripts, and limits.
+// @description Behavior tests for parse_html: tree mapping, sanitization, scripts, and limits.
 // @layer html
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{parse_html, HtmlError, SemanticNode};
+use browser_html::{parse_html, HtmlError, InlineRun, SemanticNode};
 
 fn parse(source: &str) -> Vec<SemanticNode> {
     parse_html(source)
         .expect("well-formed HTML must parse")
-        .nodes()
+        .children()
         .to_vec()
+}
+
+/// The text of a text block that holds exactly one plain run, for terse assertions.
+fn single_run_text(node: &SemanticNode) -> &str {
+    match node {
+        SemanticNode::Heading { runs, .. } | SemanticNode::Paragraph { runs } => {
+            assert_eq!(runs.len(), 1, "expected exactly one run");
+            &runs[0].text
+        }
+        _ => panic!("expected a text block with runs"),
+    }
 }
 
 #[test]
@@ -20,7 +31,7 @@ fn headings_map_to_heading_nodes_with_their_level_and_text() {
     let headings: Vec<(u8, &str)> = nodes
         .iter()
         .filter_map(|node| match node {
-            SemanticNode::Heading { level, text } => Some((*level, text.as_str())),
+            SemanticNode::Heading { level, runs } => Some((*level, runs[0].text.as_str())),
             _ => None,
         })
         .collect();
@@ -46,7 +57,7 @@ fn heading_text_is_stripped_of_control_characters() {
         nodes,
         vec![SemanticNode::Heading {
             level: 1,
-            text: "Clean[31mText".to_string(),
+            runs: vec![InlineRun::plain("Clean[31mText".to_string())],
         }]
     );
 }
@@ -58,37 +69,50 @@ fn paragraph_with_inline_anchor_keeps_the_anchor_text_inside_the_paragraph() {
     assert_eq!(
         nodes,
         vec![SemanticNode::Paragraph {
-            text: "See the docs for details".to_string(),
+            runs: vec![InlineRun::plain("See the docs for details".to_string())],
         }]
     );
 }
 
 #[test]
-fn standalone_anchor_becomes_a_link_with_its_text_and_href() {
+fn standalone_anchor_produces_no_block_node() {
     let nodes = parse(r#"<a href="https://example.com/home">Home</a>"#);
 
-    assert_eq!(
-        nodes,
-        vec![SemanticNode::Link {
-            text: "Home".to_string(),
-            href: "https://example.com/home".to_string(),
-        }]
+    assert!(
+        nodes.is_empty(),
+        "a standalone anchor must not become a block node"
     );
 }
 
 #[test]
-fn list_items_become_list_item_nodes_carrying_their_text() {
+fn list_maps_to_a_list_of_items_each_holding_a_paragraph_run() {
     let nodes = parse("<ul><li>Alpha</li><li>Beta</li></ul>");
 
-    let items: Vec<&str> = nodes
+    let SemanticNode::List { ordered, children } = &nodes[0] else {
+        panic!("expected a list node");
+    };
+    assert!(!ordered, "an unordered list must not be marked ordered");
+    assert_eq!(children.len(), 2);
+
+    let items: Vec<&str> = children
         .iter()
-        .filter_map(|node| match node {
-            SemanticNode::ListItem { text } => Some(text.as_str()),
-            _ => None,
+        .map(|item| match item {
+            SemanticNode::ListItem { children } => single_run_text(&children[0]),
+            _ => panic!("expected a list item"),
         })
         .collect();
 
     assert_eq!(items, vec!["Alpha", "Beta"]);
+}
+
+#[test]
+fn ordered_list_is_marked_ordered() {
+    let nodes = parse("<ol><li>First</li></ol>");
+
+    let SemanticNode::List { ordered, .. } = &nodes[0] else {
+        panic!("expected a list node");
+    };
+    assert!(ordered, "an ordered list must be marked ordered");
 }
 
 #[test]
@@ -116,13 +140,15 @@ fn standalone_code_element_maps_to_a_code_block() {
 }
 
 #[test]
-fn blockquote_maps_to_a_quote_node() {
+fn blockquote_maps_to_a_quote_node_with_a_paragraph_child() {
     let nodes = parse("<blockquote>A remembered line</blockquote>");
 
     assert_eq!(
         nodes,
         vec![SemanticNode::Quote {
-            text: "A remembered line".to_string(),
+            children: vec![SemanticNode::Paragraph {
+                runs: vec![InlineRun::plain("A remembered line".to_string())],
+            }],
         }]
     );
 }
@@ -156,15 +182,16 @@ fn script_element_is_never_emitted_is_counted_and_yields_a_warning() {
     assert_eq!(document.script_count(), 1);
 
     let has_warning = document
-        .nodes()
+        .children()
         .iter()
         .any(|node| matches!(node, SemanticNode::Warning { .. }));
     assert!(has_warning, "a suppressed script must surface a warning");
 
-    let leaks_script = document.nodes().iter().any(|node| match node {
-        SemanticNode::Paragraph { text }
-        | SemanticNode::CodeBlock { text }
-        | SemanticNode::PreformattedBlock { text } => text.contains("alert"),
+    let leaks_script = document.children().iter().any(|node| match node {
+        SemanticNode::Paragraph { runs } => runs.iter().any(|run| run.text.contains("alert")),
+        SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
+            text.contains("alert")
+        }
         _ => false,
     });
     assert!(!leaks_script, "script content must never reach a node");
@@ -182,17 +209,17 @@ fn paragraph_text_and_title_are_stripped_of_escape_and_control_characters() {
     // and block text collapses that newline to a single space. The escape and NUL are
     // gone; what matters is that no control character survives into the node.
     assert_eq!(
-        document.nodes(),
+        document.children(),
         &[SemanticNode::Paragraph {
-            text: "Hello[31m World".to_string(),
+            runs: vec![InlineRun::plain("Hello[31m World".to_string())],
         }]
     );
 
-    let SemanticNode::Paragraph { text } = &document.nodes()[0] else {
+    let SemanticNode::Paragraph { runs } = &document.children()[0] else {
         panic!("expected a single paragraph node");
     };
     assert!(
-        !text.chars().any(|character| character.is_control()),
+        !runs[0].text.chars().any(|character| character.is_control()),
         "no control character may survive sanitization"
     );
 }

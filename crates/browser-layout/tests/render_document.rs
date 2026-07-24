@@ -3,12 +3,24 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{Document, SemanticNode};
+use browser_html::{Document, InlineRun, SemanticNode};
 use browser_layout::{render_document, CellBuffer, LayoutError};
 use unicode_width::UnicodeWidthStr;
 
 fn document_of(nodes: Vec<SemanticNode>) -> Document {
     Document::new(nodes, None, 0)
+}
+
+fn paragraph(text: &str) -> SemanticNode {
+    SemanticNode::Paragraph {
+        runs: vec![InlineRun::plain(text.to_string())],
+    }
+}
+
+fn list_item(text: &str) -> SemanticNode {
+    SemanticNode::ListItem {
+        children: vec![paragraph(text)],
+    }
 }
 
 fn row_text(buffer: &CellBuffer, row: u16) -> String {
@@ -20,9 +32,7 @@ fn row_text(buffer: &CellBuffer, row: u16) -> String {
 
 #[test]
 fn zero_width_returns_zero_width_error() {
-    let document = document_of(vec![SemanticNode::Paragraph {
-        text: String::from("hello"),
-    }]);
+    let document = document_of(vec![paragraph("hello")]);
 
     let outcome = render_document(&document, 0);
 
@@ -33,7 +43,7 @@ fn zero_width_returns_zero_width_error() {
 fn long_paragraph_wraps_so_no_row_exceeds_the_width() {
     let width = 10u16;
     let words = vec!["word"; 40].join(" ");
-    let document = document_of(vec![SemanticNode::Paragraph { text: words }]);
+    let document = document_of(vec![paragraph(&words)]);
 
     let buffer = render_document(&document, width).expect("paragraph must lay out");
 
@@ -53,13 +63,11 @@ fn heading_and_two_list_items_produce_expected_rows_and_bullets() {
     let document = document_of(vec![
         SemanticNode::Heading {
             level: 1,
-            text: String::from("Title"),
+            runs: vec![InlineRun::plain(String::from("Title"))],
         },
-        SemanticNode::ListItem {
-            text: String::from("one"),
-        },
-        SemanticNode::ListItem {
-            text: String::from("two"),
+        SemanticNode::List {
+            ordered: false,
+            children: vec![list_item("one"), list_item("two")],
         },
     ]);
 
@@ -89,9 +97,7 @@ fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
 
 #[test]
 fn combining_mark_grapheme_occupies_a_single_cell() {
-    let document = document_of(vec![SemanticNode::Paragraph {
-        text: String::from("e\u{0301}x"),
-    }]);
+    let document = document_of(vec![paragraph("e\u{0301}x")]);
 
     let buffer = render_document(&document, 10).expect("paragraph must lay out");
 
@@ -104,9 +110,7 @@ fn combining_mark_grapheme_occupies_a_single_cell() {
 
 #[test]
 fn double_width_grapheme_advances_two_columns() {
-    let document = document_of(vec![SemanticNode::Paragraph {
-        text: String::from("x界y"),
-    }]);
+    let document = document_of(vec![paragraph("x界y")]);
 
     let buffer = render_document(&document, 10).expect("paragraph must lay out");
 
@@ -117,6 +121,47 @@ fn double_width_grapheme_advances_two_columns() {
     assert_eq!(
         buffer.cell_at(3, 0).expect("following cell").grapheme(),
         "y"
+    );
+}
+
+#[test]
+fn representative_document_renders_to_the_expected_rows() {
+    let document = document_of(vec![
+        SemanticNode::Heading {
+            level: 1,
+            runs: vec![InlineRun::plain(String::from("Title"))],
+        },
+        paragraph("Body text"),
+        SemanticNode::List {
+            ordered: false,
+            children: vec![list_item("one"), list_item("two")],
+        },
+        SemanticNode::Quote {
+            children: vec![paragraph("Quoted")],
+        },
+        SemanticNode::Separator,
+    ]);
+
+    let buffer = render_document(&document, 20).expect("document must lay out");
+
+    let rows: Vec<String> = (0..buffer.height())
+        .map(|row| row_text(&buffer, row).trim_end().to_string())
+        .collect();
+
+    assert_eq!(
+        rows,
+        vec![
+            String::new(),         // heading spacing before
+            String::from("Title"), // heading
+            String::new(),         // heading spacing after
+            String::from("Body text"),
+            String::from("• one"), // list, no surrounding spacing
+            String::from("• two"),
+            String::new(),                        // quote spacing before
+            String::from("  Quoted"),             // quote indented two columns
+            String::new(),                        // quote spacing after
+            String::from("────────────────────"), // separator fills the width
+        ]
     );
 }
 

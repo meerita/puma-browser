@@ -3,15 +3,17 @@
 // @layer html
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{Document, DocumentTitle, SemanticNode};
+use browser_html::{Document, DocumentTitle, InlineRun, SemanticNode};
 
 #[test]
-fn document_exposes_its_nodes_and_title() {
-    let nodes = vec![SemanticNode::Document];
+fn document_exposes_its_children_and_title() {
+    let children = vec![SemanticNode::Paragraph {
+        runs: vec![InlineRun::plain("Body".to_string())],
+    }];
     let title = Some(DocumentTitle::new("Example Domain"));
-    let document = Document::new(nodes, title, 0);
+    let document = Document::new(children, title, 0);
 
-    assert_eq!(document.nodes().len(), 1);
+    assert_eq!(document.children().len(), 1);
     assert_eq!(
         document.title().map(DocumentTitle::as_str),
         Some("Example Domain")
@@ -22,7 +24,7 @@ fn document_exposes_its_nodes_and_title() {
 fn document_without_title_reports_none() {
     let document = Document::new(Vec::new(), None, 0);
     assert!(document.title().is_none());
-    assert!(document.nodes().is_empty());
+    assert!(document.children().is_empty());
 }
 
 #[test]

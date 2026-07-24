@@ -21,7 +21,6 @@ pub fn computed_style(node: &SemanticNode) -> TextStyle {
         SemanticNode::CodeBlock { .. } | SemanticNode::PreformattedBlock { .. } => {
             preformatted_style()
         }
-        SemanticNode::Link { .. } => link_style(),
         SemanticNode::Quote { .. } => quote_style(),
         _ => TextStyle::default(),
     }
@@ -48,13 +47,6 @@ fn list_item_style() -> TextStyle {
 fn preformatted_style() -> TextStyle {
     TextStyle {
         white_space: WhiteSpace::Pre,
-        ..TextStyle::default()
-    }
-}
-
-fn link_style() -> TextStyle {
-    TextStyle {
-        underline: true,
         ..TextStyle::default()
     }
 }

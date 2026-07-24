@@ -1,5 +1,5 @@
 // @file crates/browser-html/src/parser.rs
-// @description Parses HTML into a flat Document of block nodes with sanitized, script-free text.
+// @description Parses HTML into a recursive Document tree of sanitized, script-free nodes.
 // @layer html
 // @created meerita <meerita@icloud.com>
 
@@ -12,6 +12,7 @@ use html5ever::{parse_document, Attribute, LocalName, Namespace, ParseOpts, Qual
 
 use crate::document::{Document, DocumentTitle};
 use crate::error::HtmlError;
+use crate::inline_run::InlineRun;
 use crate::sanitize::{
     collapse_whitespace, strip_control_characters, strip_control_characters_preserving_layout,
 };
@@ -29,7 +30,7 @@ const MAX_NODE_COUNT: usize = 50_000;
 /// walked, so the parser rejects any document that nests past this depth.
 const MAX_DOM_DEPTH: usize = 256;
 
-/// Parse an HTML source string into a flat [`Document`] of block nodes.
+/// Parse an HTML source string into a recursive [`Document`] tree.
 ///
 /// All text taken from the source is stripped of control characters before it enters a
 /// node or the title, `<script>` elements are counted and never retained, and the node
@@ -44,17 +45,17 @@ pub fn parse_html(source: &str) -> Result<Document, HtmlError> {
     let arena = dom.into_nodes();
     let title = extract_title(&arena).map(|raw| DocumentTitle::new(&raw));
 
-    let mut extractor = BlockExtractor::new(&arena);
-    extractor.walk_children(DOCUMENT_HANDLE);
-    let (mut nodes, script_count) = extractor.finish();
+    let mut extractor = TreeExtractor::new(&arena);
+    let mut children = extractor.walk_children(DOCUMENT_HANDLE);
+    let script_count = extractor.script_count();
 
     if script_count > 0 {
-        nodes.push(SemanticNode::Warning {
+        children.push(SemanticNode::Warning {
             message: suppressed_scripts_message(script_count),
         });
     }
 
-    Ok(Document::new(nodes, title, script_count))
+    Ok(Document::new(children, title, script_count))
 }
 
 /// Handle of the document root node, created first by [`DomBuilder::new`].
@@ -379,105 +380,184 @@ impl TreeSink for DomBuilder {
     }
 }
 
-/// Walks a finished node arena into a flat stream of block [`SemanticNode`]s.
-struct BlockExtractor<'a> {
+/// Walks a finished node arena into a recursive tree of [`SemanticNode`]s.
+///
+/// Each walk method returns the block-level children it produces; container elements
+/// recurse into their own children, so the returned tree owns itself. The script count
+/// accumulates across the whole walk so it can be reported once parsing ends.
+struct TreeExtractor<'a> {
     arena: &'a [Node],
-    blocks: Vec<SemanticNode>,
     script_count: usize,
 }
 
-impl<'a> BlockExtractor<'a> {
-    fn new(arena: &'a [Node]) -> BlockExtractor<'a> {
-        BlockExtractor {
+impl<'a> TreeExtractor<'a> {
+    fn new(arena: &'a [Node]) -> TreeExtractor<'a> {
+        TreeExtractor {
             arena,
-            blocks: Vec::new(),
             script_count: 0,
         }
     }
 
-    fn finish(self) -> (Vec<SemanticNode>, usize) {
-        (self.blocks, self.script_count)
+    fn script_count(&self) -> usize {
+        self.script_count
     }
 
-    fn walk_children(&mut self, container: usize) {
+    fn walk_children(&mut self, container: usize) -> Vec<SemanticNode> {
+        let mut output = Vec::new();
+        self.walk_children_into(container, &mut output);
+        output
+    }
+
+    fn walk_children_into(&mut self, container: usize, output: &mut Vec<SemanticNode>) {
         for child in self.child_handles(container) {
-            self.walk_node(child);
+            self.walk_node(child, output);
         }
     }
 
-    fn walk_node(&mut self, node: usize) {
+    fn walk_node(&mut self, node: usize, output: &mut Vec<SemanticNode>) {
         let entry = &self.arena[node];
         if entry.text.is_some() {
             return;
         }
         if !entry.is_element {
-            self.walk_children(node);
+            self.walk_children_into(node, output);
             return;
         }
-        self.handle_element(node);
+        self.handle_element(node, output);
     }
 
-    fn handle_element(&mut self, element: usize) {
+    fn handle_element(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
         let tag = local_name(&self.arena[element].name).to_string();
         if let Some(level) = heading_level(&tag) {
-            self.push_text_block(element, |text| SemanticNode::Heading { level, text });
+            self.push_heading(element, level, output);
             return;
         }
-        self.map_named_element(element, &tag);
+        self.map_named_element(element, &tag, output);
     }
 
-    fn map_named_element(&mut self, element: usize, tag: &str) {
+    fn map_named_element(&mut self, element: usize, tag: &str, output: &mut Vec<SemanticNode>) {
         match tag {
             "script" => self.script_count += 1,
             "style" | "title" => {}
-            "p" => self.push_text_block(element, |text| SemanticNode::Paragraph { text }),
-            "li" => self.push_text_block(element, |text| SemanticNode::ListItem { text }),
-            "blockquote" => self.push_text_block(element, |text| SemanticNode::Quote { text }),
-            "pre" => {
-                self.push_verbatim_block(element, |text| SemanticNode::PreformattedBlock { text })
+            "p" => self.push_paragraph(element, output),
+            "ul" => self.push_list(element, false, output),
+            "ol" => self.push_list(element, true, output),
+            "blockquote" => self.push_quote(element, output),
+            "pre" => self.push_verbatim_block(element, output, |text| {
+                SemanticNode::PreformattedBlock { text }
+            }),
+            "code" => {
+                self.push_verbatim_block(element, output, |text| SemanticNode::CodeBlock { text })
             }
-            "code" => self.push_verbatim_block(element, |text| SemanticNode::CodeBlock { text }),
-            "hr" => self.blocks.push(SemanticNode::Separator),
-            "img" => self.push_image(element),
-            "a" => self.handle_anchor(element),
-            _ => self.walk_children(element),
+            "hr" => output.push(SemanticNode::Separator),
+            "img" => self.push_image(element, output),
+            _ => self.walk_children_into(element, output),
         }
     }
 
-    fn handle_anchor(&mut self, element: usize) {
-        let Some(href) = self.attribute(element, "href").map(sanitize_reference) else {
-            self.walk_children(element);
+    fn push_heading(&mut self, element: usize, level: u8, output: &mut Vec<SemanticNode>) {
+        let Some(runs) = self.single_run(element) else {
             return;
         };
-        let text = self.block_text(element);
-        self.blocks.push(SemanticNode::Link { text, href });
+        output.push(SemanticNode::Heading { level, runs });
     }
 
-    fn push_image(&mut self, element: usize) {
+    fn push_paragraph(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let Some(runs) = self.single_run(element) else {
+            return;
+        };
+        output.push(SemanticNode::Paragraph { runs });
+    }
+
+    fn push_list(&mut self, element: usize, ordered: bool, output: &mut Vec<SemanticNode>) {
+        let children = self.list_items(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::List { ordered, children });
+    }
+
+    fn push_quote(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Quote { children });
+    }
+
+    fn list_items(&mut self, element: usize) -> Vec<SemanticNode> {
+        let mut items = Vec::new();
+        for child in self.child_handles(element) {
+            self.push_list_item(child, &mut items);
+        }
+        items
+    }
+
+    fn push_list_item(&mut self, node: usize, items: &mut Vec<SemanticNode>) {
+        if !self.is_list_item_element(node) {
+            return;
+        }
+        let children = self.block_children(node);
+        if children.is_empty() {
+            return;
+        }
+        items.push(SemanticNode::ListItem { children });
+    }
+
+    fn is_list_item_element(&self, node: usize) -> bool {
+        let entry = &self.arena[node];
+        entry.is_element && local_name(&entry.name) == "li"
+    }
+
+    /// Gather the block-level children of a container.
+    ///
+    /// When the container holds only inline text with no block wrapper (a `<li>` or
+    /// `<blockquote>` whose content is bare text), that text becomes a single paragraph
+    /// so the content is not lost.
+    fn block_children(&mut self, element: usize) -> Vec<SemanticNode> {
+        let walked = self.walk_children(element);
+        if !walked.is_empty() {
+            return walked;
+        }
+        let Some(runs) = self.single_run(element) else {
+            return Vec::new();
+        };
+        vec![SemanticNode::Paragraph { runs }]
+    }
+
+    /// Gather a text block's content into exactly one plain run.
+    ///
+    /// Multiple runs and inline emphasis are a later phase; every text block produces a
+    /// single unstyled run here. An empty block yields no run so it is dropped upstream.
+    fn single_run(&mut self, element: usize) -> Option<Vec<InlineRun>> {
+        let text = self.block_text(element);
+        if text.is_empty() {
+            return None;
+        }
+        Some(vec![InlineRun::plain(text)])
+    }
+
+    fn push_image(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
         let alt = self
             .attribute(element, "alt")
             .map(sanitize_inline)
             .unwrap_or_default();
         let title = self.attribute(element, "title").map(sanitize_inline);
         let source = self.attribute(element, "src").map(sanitize_reference);
-        self.blocks
-            .push(SemanticNode::ImagePlaceholder { alt, title, source });
+        output.push(SemanticNode::ImagePlaceholder { alt, title, source });
     }
 
-    fn push_text_block(&mut self, element: usize, build: impl FnOnce(String) -> SemanticNode) {
-        let text = self.block_text(element);
-        if text.is_empty() {
-            return;
-        }
-        self.blocks.push(build(text));
-    }
-
-    fn push_verbatim_block(&mut self, element: usize, build: impl FnOnce(String) -> SemanticNode) {
+    fn push_verbatim_block(
+        &mut self,
+        element: usize,
+        output: &mut Vec<SemanticNode>,
+        build: impl FnOnce(String) -> SemanticNode,
+    ) {
         let text = self.verbatim_text(element);
         if text.is_empty() {
             return;
         }
-        self.blocks.push(build(text));
+        output.push(build(text));
     }
 
     fn block_text(&mut self, element: usize) -> String {
