@@ -123,6 +123,80 @@ fn ordered_list_is_marked_ordered() {
     assert!(ordered, "an ordered list must be marked ordered");
 }
 
+/// The block children of a list item, panicking when the node is not a list item.
+fn list_item_children(item: &SemanticNode) -> &[SemanticNode] {
+    match item {
+        SemanticNode::ListItem { children } => children,
+        _ => panic!("expected a list item"),
+    }
+}
+
+/// The single list item of a list holding exactly one item, with the ordered flag.
+fn sole_item(node: &SemanticNode) -> (bool, &SemanticNode) {
+    match node {
+        SemanticNode::List { ordered, children } => {
+            assert_eq!(children.len(), 1, "expected exactly one list item");
+            (*ordered, &children[0])
+        }
+        _ => panic!("expected a list node"),
+    }
+}
+
+#[test]
+fn nested_list_becomes_a_list_child_of_its_list_item() {
+    let nodes = parse("<ul><li>a<ul><li>b</li></ul></li></ul>");
+
+    let (outer_ordered, outer_item) = sole_item(&nodes[0]);
+    assert!(!outer_ordered, "the outer list is unordered");
+
+    let outer_children = list_item_children(outer_item);
+    assert_eq!(
+        outer_children.len(),
+        2,
+        "the item keeps its bare text and the nested list"
+    );
+    assert_eq!(single_run_text(&outer_children[0]), "a");
+
+    let (inner_ordered, inner_item) = sole_item(&outer_children[1]);
+    assert!(!inner_ordered, "the nested list is unordered");
+    assert_eq!(single_run_text(&list_item_children(inner_item)[0]), "b");
+}
+
+#[test]
+fn list_item_with_a_paragraph_and_a_nested_list_keeps_source_order() {
+    let nodes = parse("<ul><li><p>intro</p><ul><li>nested</li></ul></li></ul>");
+
+    let (_, item) = sole_item(&nodes[0]);
+    let children = list_item_children(item);
+
+    assert_eq!(
+        children.len(),
+        2,
+        "the paragraph and the nested list survive"
+    );
+    assert!(
+        matches!(children[0], SemanticNode::Paragraph { .. }),
+        "the paragraph comes first"
+    );
+    assert_eq!(single_run_text(&children[0]), "intro");
+    assert!(
+        matches!(children[1], SemanticNode::List { .. }),
+        "the nested list comes second"
+    );
+}
+
+#[test]
+fn a_nested_ordered_list_keeps_its_own_ordered_flag() {
+    let nodes = parse("<ul><li>x<ol><li>y</li></ol></li></ul>");
+
+    let (outer_ordered, outer_item) = sole_item(&nodes[0]);
+    assert!(!outer_ordered, "the outer list stays unordered");
+
+    let nested_list = &list_item_children(outer_item)[1];
+    let (inner_ordered, _) = sole_item(nested_list);
+    assert!(inner_ordered, "the nested ordered list is marked ordered");
+}
+
 #[test]
 fn preformatted_block_preserves_its_internal_newlines() {
     let nodes = parse("<pre>first\nsecond</pre>");
@@ -246,6 +320,15 @@ fn document_exceeding_the_depth_limit_returns_that_error() {
     let source = "<div>".repeat(300);
 
     let error = parse_html(&source).expect_err("too much nesting must fail");
+
+    assert!(matches!(error, HtmlError::MaxDepthExceeded));
+}
+
+#[test]
+fn pathologically_nested_lists_hit_the_depth_limit() {
+    let source = "<ul><li>".repeat(200);
+
+    let error = parse_html(&source).expect_err("too much list nesting must fail");
 
     assert!(matches!(error, HtmlError::MaxDepthExceeded));
 }

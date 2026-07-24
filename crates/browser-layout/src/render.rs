@@ -11,9 +11,6 @@ use unicode_width::UnicodeWidthStr;
 use crate::cell::{Cell, CellBuffer};
 use crate::error::LayoutError;
 
-/// Columns reserved to the left of a list item's text for its bullet and one space.
-const LIST_MARKER_COLUMNS: usize = 2;
-
 /// Columns a block quote's text is indented from the left margin.
 const QUOTE_INDENT_COLUMNS: usize = 2;
 
@@ -76,8 +73,8 @@ fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Ce
         SemanticNode::Heading { runs, .. } => wrap_runs(runs, style, width),
         SemanticNode::Paragraph { runs } => wrap_runs(runs, style, width),
         SemanticNode::Quote { children } => render_quote(children, style, width),
-        SemanticNode::List { children, .. } => render_children(children, width),
-        SemanticNode::ListItem { children } => render_list_item(children, style, width),
+        SemanticNode::List { ordered, children } => render_list(*ordered, children, width),
+        SemanticNode::ListItem { children } => render_children(children, width),
         SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
             render_verbatim(text, style, width)
         }
@@ -163,29 +160,84 @@ fn quote_indent(width: usize) -> usize {
     0
 }
 
-/// Render a list item: lay its children out into the content width, then prefix the
-/// first row with a bullet and indent the continuation rows to align under it.
-fn render_list_item(children: &[SemanticNode], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
-    let content_width = list_content_width(width);
-    render_children(children, content_width)
-        .into_iter()
-        .enumerate()
-        .map(|(index, row)| decorate_list_row(index, row, style))
-        .collect()
+/// Render a list: give each item a marker (a bullet for an unordered list, a running
+/// `N. ` number for an ordered list), then lay the item's block children out and indent
+/// them under the item text. Ordered numbering is 1-based within this list; a nested
+/// list is rendered by its own call, so its numbering restarts from one.
+fn render_list(ordered: bool, items: &[SemanticNode], width: usize) -> Vec<Vec<Cell>> {
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let mut ordinal = 1usize;
+    for item in items {
+        if !is_list_item(item) {
+            continue;
+        }
+        append_list_item_rows(&mut rows, item, &list_marker(ordered, ordinal), width);
+        ordinal += 1;
+    }
+    rows
 }
 
-fn list_content_width(width: usize) -> usize {
-    if width > LIST_MARKER_COLUMNS {
-        return width - LIST_MARKER_COLUMNS;
+/// Lay one list item out: render its block children into the width left after the marker,
+/// prefix the first row with the marker, and indent continuation and nested rows to align
+/// under the item text.
+fn append_list_item_rows(
+    rows: &mut Vec<Vec<Cell>>,
+    item: &SemanticNode,
+    marker: &str,
+    width: usize,
+) {
+    let SemanticNode::ListItem { children } = item else {
+        return;
+    };
+    let style = computed_style(item);
+    let marker_cells = graphemes_to_cells(marker, &style);
+    let marker_columns = count_columns(&marker_cells);
+    let content_width = list_content_width(width, marker_columns);
+    for (index, row) in render_children(children, content_width)
+        .into_iter()
+        .enumerate()
+    {
+        rows.push(decorate_list_row(
+            index,
+            row,
+            &marker_cells,
+            marker_columns,
+            &style,
+        ));
+    }
+}
+
+fn is_list_item(node: &SemanticNode) -> bool {
+    matches!(node, SemanticNode::ListItem { .. })
+}
+
+/// The marker drawn before a list item: a bullet and a space for an unordered list, or
+/// the item's 1-based position followed by `. ` for an ordered list.
+fn list_marker(ordered: bool, ordinal: usize) -> String {
+    if ordered {
+        return format!("{ordinal}. ");
+    }
+    String::from("• ")
+}
+
+fn list_content_width(width: usize, marker_columns: usize) -> usize {
+    if width > marker_columns {
+        return width - marker_columns;
     }
     width
 }
 
-fn decorate_list_row(index: usize, row: Vec<Cell>, style: &TextStyle) -> Vec<Cell> {
+fn decorate_list_row(
+    index: usize,
+    row: Vec<Cell>,
+    marker_cells: &[Cell],
+    marker_columns: usize,
+    style: &TextStyle,
+) -> Vec<Cell> {
     let mut decorated = if index == 0 {
-        bullet_prefix(style)
+        marker_cells.to_vec()
     } else {
-        space_cells(LIST_MARKER_COLUMNS, style)
+        space_cells(marker_columns, style)
     };
     decorated.extend(row);
     decorated
@@ -226,13 +278,6 @@ fn image_label(alt: &str) -> String {
 
 fn single_row(row: Vec<Cell>) -> Vec<Vec<Cell>> {
     vec![row]
-}
-
-fn bullet_prefix(style: &TextStyle) -> Vec<Cell> {
-    vec![
-        Cell::new(String::from("•"), style),
-        Cell::new(String::from(" "), style),
-    ]
 }
 
 fn indent_row(row: Vec<Cell>, indent: usize, style: &TextStyle) -> Vec<Cell> {

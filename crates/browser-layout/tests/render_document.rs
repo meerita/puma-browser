@@ -83,6 +83,77 @@ fn heading_and_two_list_items_produce_expected_rows_and_bullets() {
 }
 
 #[test]
+fn ordered_list_items_render_running_numbers() {
+    let document = document_of(vec![SemanticNode::List {
+        ordered: true,
+        children: vec![list_item("x"), list_item("y")],
+    }]);
+
+    let buffer = render_document(&document, 40).expect("ordered list must lay out");
+
+    assert_eq!(row_text(&buffer, 0).trim_end(), "1. x");
+    assert_eq!(row_text(&buffer, 1).trim_end(), "2. y");
+}
+
+#[test]
+fn a_nested_unordered_list_indents_one_level_under_its_parent() {
+    let inner = SemanticNode::List {
+        ordered: false,
+        children: vec![list_item("b")],
+    };
+    let document = document_of(vec![SemanticNode::List {
+        ordered: false,
+        children: vec![SemanticNode::ListItem {
+            children: vec![paragraph("a"), inner],
+        }],
+    }]);
+
+    let buffer = render_document(&document, 40).expect("nested list must lay out");
+
+    assert_eq!(row_text(&buffer, 0).trim_end(), "• a");
+    assert_eq!(row_text(&buffer, 1).trim_end(), "  • b");
+}
+
+#[test]
+fn ordered_numbering_restarts_within_each_nested_list() {
+    let inner = SemanticNode::List {
+        ordered: true,
+        children: vec![list_item("b"), list_item("c")],
+    };
+    let document = document_of(vec![SemanticNode::List {
+        ordered: true,
+        children: vec![
+            SemanticNode::ListItem {
+                children: vec![paragraph("a"), inner],
+            },
+            list_item("d"),
+        ],
+    }]);
+
+    let buffer = render_document(&document, 40).expect("nested ordered list must lay out");
+
+    let rows: Vec<String> = (0..buffer.height())
+        .map(|row| row_text(&buffer, row).trim_end().to_string())
+        .collect();
+    // The nested list restarts at 1, and the outer list resumes at 2 after it.
+    assert_eq!(rows, vec!["1. a", "   1. b", "   2. c", "2. d"]);
+}
+
+#[test]
+fn a_wrapped_list_item_aligns_its_continuation_under_the_item_text() {
+    let document = document_of(vec![SemanticNode::List {
+        ordered: false,
+        children: vec![list_item("alpha beta")],
+    }]);
+
+    let buffer = render_document(&document, 7).expect("list must lay out");
+
+    // "• alpha" fills the width; "beta" wraps and indents under the item text, not the marker.
+    assert_eq!(row_text(&buffer, 0).trim_end(), "• alpha");
+    assert_eq!(row_text(&buffer, 1).trim_end(), "  beta");
+}
+
+#[test]
 fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
     let document = document_of(vec![SemanticNode::CodeBlock {
         text: String::from("abcdefghij\nkl"),

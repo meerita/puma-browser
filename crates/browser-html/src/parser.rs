@@ -517,21 +517,69 @@ impl<'a> TreeExtractor<'a> {
         entry.is_element && local_name(&entry.name) == "li"
     }
 
-    /// Gather the block-level children of a container.
+    /// Gather the block-level children of a container, preserving source order.
     ///
-    /// When the container holds only inline text with no block wrapper (a `<li>` or
-    /// `<blockquote>` whose content is bare text), that text becomes a single paragraph
-    /// so the content is not lost.
+    /// Block children (paragraphs, nested lists, quotes, and the like) are walked in
+    /// place. Runs of bare inline content between them (text, links, emphasis directly
+    /// inside the container) are collected into anonymous paragraphs, so a list item that
+    /// holds text followed by a nested list keeps both parts in their original order. A
+    /// container whose whole content is inline yields a single paragraph.
     fn block_children(&mut self, element: usize) -> Vec<SemanticNode> {
-        let walked = self.walk_children(element);
-        if !walked.is_empty() {
-            return walked;
+        let mut output = Vec::new();
+        let mut inline_children: Vec<usize> = Vec::new();
+        for child in self.child_handles(element) {
+            if !self.child_is_block_level(child) {
+                inline_children.push(child);
+                continue;
+            }
+            self.flush_inline_paragraph(&inline_children, &mut output);
+            inline_children.clear();
+            self.walk_node(child, &mut output);
         }
-        let runs = self.block_runs(element);
+        self.flush_inline_paragraph(&inline_children, &mut output);
+        output
+    }
+
+    /// Whether a child, once walked, contributes block-level content rather than inline
+    /// text.
+    ///
+    /// A child is block-level when its subtree holds an element that maps to a block node
+    /// (a paragraph, list, quote, heading, separator, image, or preformatted block). Text
+    /// nodes and inline markup (links, emphasis) are not block-level, so they are gathered
+    /// into anonymous paragraphs instead of being walked as blocks.
+    fn child_is_block_level(&self, node: usize) -> bool {
+        let entry = &self.arena[node];
+        if entry.is_element && is_block_tag(local_name(&entry.name)) {
+            return true;
+        }
+        entry
+            .children
+            .iter()
+            .any(|child| self.child_is_block_level(*child))
+    }
+
+    /// Collapse a run of inline children into one paragraph and push it.
+    ///
+    /// Whitespace-only content collapses to no runs and contributes no paragraph, matching
+    /// how a plain text block drops surrounding whitespace.
+    fn flush_inline_paragraph(
+        &mut self,
+        inline_children: &[usize],
+        output: &mut Vec<SemanticNode>,
+    ) {
+        if inline_children.is_empty() {
+            return;
+        }
+        let context = InlineContext::root();
+        let mut segments = Vec::new();
+        for child in inline_children {
+            self.gather_segments(*child, &context, &mut segments);
+        }
+        let runs = collapse_segments(segments);
         if runs.is_empty() {
-            return Vec::new();
+            return;
         }
-        vec![SemanticNode::Paragraph { runs }]
+        output.push(SemanticNode::Paragraph { runs });
     }
 
     /// Gather a text block's content into a sequence of styled inline runs.
@@ -920,6 +968,15 @@ fn gather_plain_text(arena: &[Node], node: usize, buffer: &mut String) {
     for child in &entry.children {
         gather_plain_text(arena, *child, buffer);
     }
+}
+
+/// Whether a tag maps to a block-level semantic node.
+///
+/// Inline `<code>` is intentionally absent: inside a text block it folds into an inline
+/// run's emphasis rather than standing alone, so it is treated as inline content here.
+fn is_block_tag(tag: &str) -> bool {
+    matches!(tag, "p" | "ul" | "ol" | "blockquote" | "pre" | "hr" | "img")
+        || heading_level(tag).is_some()
 }
 
 fn heading_level(tag: &str) -> Option<u8> {
