@@ -32,9 +32,16 @@ pub enum SemanticNode {
     ListItem {
         children: Vec<SemanticNode>,
     },
-    Table,
-    TableRow,
-    TableCell,
+    Table {
+        children: Vec<SemanticNode>,
+    },
+    TableRow {
+        children: Vec<SemanticNode>,
+    },
+    TableCell {
+        header: bool,
+        children: Vec<SemanticNode>,
+    },
     Quote {
         children: Vec<SemanticNode>,
     },

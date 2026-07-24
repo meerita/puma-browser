@@ -6,6 +6,7 @@
 mod cell;
 mod error;
 mod render;
+mod table;
 
 pub use cell::{Cell, CellBuffer};
 pub use error::LayoutError;

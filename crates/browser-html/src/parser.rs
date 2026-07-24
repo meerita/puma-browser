@@ -31,6 +31,18 @@ const MAX_NODE_COUNT: usize = 50_000;
 /// walked, so the parser rejects any document that nests past this depth.
 const MAX_DOM_DEPTH: usize = 256;
 
+/// Upper bound on the number of rows retained from a single table.
+///
+/// A table with far more rows than this is a memory hazard from untrusted markup and
+/// cannot render usefully, so it is truncated to this many rows and a warning is emitted.
+const MAX_TABLE_ROWS: usize = 1_000;
+
+/// Upper bound on the number of columns (cells) retained from a single table row.
+///
+/// A row far wider than the terminal cannot render as columns and only inflates the node
+/// count, so each row is truncated to this many cells and a warning is emitted.
+const MAX_TABLE_COLUMNS: usize = 64;
+
 /// Parse an HTML source string into a recursive [`Document`] tree.
 ///
 /// All text taken from the source is stripped of control characters before it enters a
@@ -455,6 +467,7 @@ impl<'a> TreeExtractor<'a> {
             "code" => {
                 self.push_verbatim_block(element, output, |text| SemanticNode::CodeBlock { text })
             }
+            "table" => self.push_table(element, output),
             "hr" => output.push(SemanticNode::Separator),
             "img" => self.push_image(element, output),
             _ => self.walk_children_into(element, output),
@@ -491,6 +504,79 @@ impl<'a> TreeExtractor<'a> {
             return;
         }
         output.push(SemanticNode::Quote { children });
+    }
+
+    /// Map a `<table>` into a `Table` of `TableRow`s of `TableCell`s.
+    ///
+    /// Rows exceeding [`MAX_TABLE_ROWS`] and cells exceeding [`MAX_TABLE_COLUMNS`] per row
+    /// are dropped and a `Warning` describing the truncation follows the table, so
+    /// untrusted markup cannot expand a table without bound.
+    fn push_table(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let mut rows = Vec::new();
+        self.collect_table_rows(element, &mut rows);
+        let rows_truncated = rows.len() > MAX_TABLE_ROWS;
+        rows.truncate(MAX_TABLE_ROWS);
+        let columns_truncated = truncate_row_columns(&mut rows);
+        if rows.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Table { children: rows });
+        if rows_truncated || columns_truncated {
+            output.push(SemanticNode::Warning {
+                message: table_truncation_message(rows_truncated, columns_truncated),
+            });
+        }
+    }
+
+    /// Gather a table's rows in source order, flattening `<thead>`/`<tbody>`/`<tfoot>`
+    /// wrappers so their rows join the sequence at the table's own level.
+    fn collect_table_rows(&mut self, container: usize, rows: &mut Vec<SemanticNode>) {
+        for child in self.child_handles(container) {
+            self.collect_row_or_section(child, rows);
+        }
+    }
+
+    fn collect_row_or_section(&mut self, node: usize, rows: &mut Vec<SemanticNode>) {
+        let entry = &self.arena[node];
+        if !entry.is_element {
+            return;
+        }
+        let tag = local_name(&entry.name).to_string();
+        if tag == "tr" {
+            self.push_table_row(node, rows);
+            return;
+        }
+        if is_table_section(&tag) {
+            self.collect_table_rows(node, rows);
+        }
+    }
+
+    fn push_table_row(&mut self, node: usize, rows: &mut Vec<SemanticNode>) {
+        let mut cells = Vec::new();
+        for child in self.child_handles(node) {
+            self.push_table_cell(child, &mut cells);
+        }
+        if cells.is_empty() {
+            return;
+        }
+        rows.push(SemanticNode::TableRow { children: cells });
+    }
+
+    fn push_table_cell(&mut self, node: usize, cells: &mut Vec<SemanticNode>) {
+        let entry = &self.arena[node];
+        if !entry.is_element {
+            return;
+        }
+        let tag = local_name(&entry.name).to_string();
+        let header = tag == "th";
+        if !header && tag != "td" {
+            return;
+        }
+        // colspan and rowspan are ignored: each cell occupies exactly one column
+        // position, so a spanned cell is rendered as a single cell rather than widened.
+        // Honoring spans needs a grid model that a later table milestone will add.
+        let children = self.block_children(node);
+        cells.push(SemanticNode::TableCell { header, children });
     }
 
     fn list_items(&mut self, element: usize) -> Vec<SemanticNode> {
@@ -975,8 +1061,46 @@ fn gather_plain_text(arena: &[Node], node: usize, buffer: &mut String) {
 /// Inline `<code>` is intentionally absent: inside a text block it folds into an inline
 /// run's emphasis rather than standing alone, so it is treated as inline content here.
 fn is_block_tag(tag: &str) -> bool {
-    matches!(tag, "p" | "ul" | "ol" | "blockquote" | "pre" | "hr" | "img")
-        || heading_level(tag).is_some()
+    matches!(
+        tag,
+        "p" | "ul" | "ol" | "blockquote" | "pre" | "hr" | "img" | "table"
+    ) || heading_level(tag).is_some()
+}
+
+fn is_table_section(tag: &str) -> bool {
+    matches!(tag, "thead" | "tbody" | "tfoot")
+}
+
+/// Truncate every row to [`MAX_TABLE_COLUMNS`] cells, reporting whether any row was cut.
+fn truncate_row_columns(rows: &mut [SemanticNode]) -> bool {
+    let mut truncated = false;
+    for row in rows.iter_mut() {
+        truncated |= truncate_one_row(row);
+    }
+    truncated
+}
+
+fn truncate_one_row(row: &mut SemanticNode) -> bool {
+    let SemanticNode::TableRow { children } = row else {
+        return false;
+    };
+    if children.len() <= MAX_TABLE_COLUMNS {
+        return false;
+    }
+    children.truncate(MAX_TABLE_COLUMNS);
+    true
+}
+
+fn table_truncation_message(rows_truncated: bool, columns_truncated: bool) -> String {
+    if rows_truncated && columns_truncated {
+        return format!(
+            "A large table was truncated to its first {MAX_TABLE_ROWS} rows and {MAX_TABLE_COLUMNS} columns"
+        );
+    }
+    if rows_truncated {
+        return format!("A large table was truncated to its first {MAX_TABLE_ROWS} rows");
+    }
+    format!("A large table was truncated to its first {MAX_TABLE_COLUMNS} columns")
 }
 
 fn heading_level(tag: &str) -> Option<u8> {

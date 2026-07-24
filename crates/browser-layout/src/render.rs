@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::cell::{Cell, CellBuffer};
 use crate::error::LayoutError;
+use crate::table::render_table;
 
 /// Columns a block quote's text is indented from the left margin.
 const QUOTE_INDENT_COLUMNS: usize = 2;
@@ -75,6 +76,7 @@ fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Ce
         SemanticNode::Quote { children } => render_quote(children, style, width),
         SemanticNode::List { ordered, children } => render_list(*ordered, children, width),
         SemanticNode::ListItem { children } => render_children(children, width),
+        SemanticNode::Table { children } => render_table(children, style, width),
         SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
             render_verbatim(text, style, width)
         }
@@ -97,7 +99,7 @@ fn wrap_runs(runs: &[InlineRun], base: &TextStyle, width: usize) -> Vec<Vec<Cell
     wrap_cells(runs_to_cells(runs, base), width)
 }
 
-fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
+pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
     let mut cells: Vec<Cell> = Vec::new();
     for run in runs {
         let style = computed_run_style(*base, run);
@@ -107,7 +109,7 @@ fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
 }
 
 /// Wrap a block's styled cells into rows no wider than `width` display columns.
-fn wrap_cells(cells: Vec<Cell>, width: usize) -> Vec<Vec<Cell>> {
+pub(crate) fn wrap_cells(cells: Vec<Cell>, width: usize) -> Vec<Vec<Cell>> {
     let mut wrapper = LineWrapper::new(width);
     for token in tokenize_line(cells) {
         wrapper.push_token(token);
@@ -286,19 +288,19 @@ fn indent_row(row: Vec<Cell>, indent: usize, style: &TextStyle) -> Vec<Cell> {
     indented
 }
 
-fn space_cells(count: usize, style: &TextStyle) -> Vec<Cell> {
+pub(crate) fn space_cells(count: usize, style: &TextStyle) -> Vec<Cell> {
     (0..count)
         .map(|_| Cell::new(String::from(" "), style))
         .collect()
 }
 
-fn graphemes_to_cells(text: &str, style: &TextStyle) -> Vec<Cell> {
+pub(crate) fn graphemes_to_cells(text: &str, style: &TextStyle) -> Vec<Cell> {
     text.graphemes(true)
         .map(|grapheme| Cell::new(grapheme.to_string(), style))
         .collect()
 }
 
-fn count_columns(cells: &[Cell]) -> usize {
+pub(crate) fn count_columns(cells: &[Cell]) -> usize {
     cells
         .iter()
         .map(|cell| grapheme_columns(cell.grapheme()))
@@ -309,7 +311,7 @@ fn count_columns(cells: &[Cell]) -> usize {
 ///
 /// A combining mark contributes zero, so a base-plus-mark cluster stays one column; a
 /// CJK or other wide grapheme advances two.
-fn grapheme_columns(grapheme: &str) -> usize {
+pub(crate) fn grapheme_columns(grapheme: &str) -> usize {
     UnicodeWidthStr::width(grapheme)
 }
 

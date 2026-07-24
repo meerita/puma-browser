@@ -28,9 +28,30 @@ fn all_semantic_node_variants_construct() {
                 runs: vec![InlineRun::plain("First".to_string())],
             }],
         },
-        SemanticNode::Table,
-        SemanticNode::TableRow,
-        SemanticNode::TableCell,
+        SemanticNode::Table {
+            children: vec![SemanticNode::TableRow {
+                children: vec![SemanticNode::TableCell {
+                    header: true,
+                    children: vec![SemanticNode::Paragraph {
+                        runs: vec![InlineRun::plain("Name".to_string())],
+                    }],
+                }],
+            }],
+        },
+        SemanticNode::TableRow {
+            children: vec![SemanticNode::TableCell {
+                header: false,
+                children: vec![SemanticNode::Paragraph {
+                    runs: vec![InlineRun::plain("Alice".to_string())],
+                }],
+            }],
+        },
+        SemanticNode::TableCell {
+            header: false,
+            children: vec![SemanticNode::Paragraph {
+                runs: vec![InlineRun::plain("Madrid".to_string())],
+            }],
+        },
         SemanticNode::Quote {
             children: vec![SemanticNode::Paragraph {
                 runs: vec![InlineRun::plain("Quoted".to_string())],
