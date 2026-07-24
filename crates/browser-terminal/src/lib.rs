@@ -3,10 +3,13 @@
 //! @layer terminal
 //! @created meerita <meerita@icloud.com>
 
+mod command_bar;
 mod error;
+mod hints_bar;
 mod initial_view;
 mod input;
-mod status_line;
+mod title_bar;
+mod ui_state;
 mod viewport;
 
 pub use error::TerminalError;
@@ -24,17 +27,23 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color as TerminalColor, Modifier, Style};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
+use command_bar::compose_command_bar_reading;
+use hints_bar::compose_hints_bar;
 use input::{map_key_event, quit_armed_after, InputAction};
-use status_line::compose_status_line;
+use title_bar::compose_title_bar;
+use ui_state::UiState;
 use viewport::{max_scroll_offset, scroll_percentage, ScrollState};
 
-/// The number of bottom rows reserved for the status line.
-const STATUS_LINE_ROWS: u16 = 1;
+/// Rows consumed by the five fixed chrome zones (title + sep + cmd + sep + hints).
+const CHROME_ROWS: u16 = 5;
+
+/// Terminal columns of left and right padding on the content area.
+const CONTENT_PADDING: u16 = 2;
 
 /// The body text shown when the terminal opens with no page.
 const BLANK_PLACEHOLDER: &str = "(blank page)";
@@ -55,8 +64,8 @@ pub struct TerminalApp {
     initial_view: InitialView,
 }
 
-/// A cell buffer cached alongside the width it was laid out for, so the page is
-/// re-rendered only when the terminal width changes.
+/// A cell buffer cached alongside the content width it was laid out for, so the page
+/// is re-rendered only when the content area width changes.
 struct CachedPage {
     width: u16,
     buffer: CellBuffer,
@@ -96,27 +105,37 @@ impl TerminalApp {
 
     fn drive(&self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
         let mut scroll = ScrollState::new();
-        let mut quit_armed = false;
+        let mut ui_state = UiState::new();
         let mut cache: Option<CachedPage> = None;
         loop {
             let size = terminal.size().map_err(|_| TerminalError::RenderFailed)?;
-            let viewport_height = size.height.saturating_sub(STATUS_LINE_ROWS);
-            self.refresh_page_cache(&mut cache, size.width)?;
+            let viewport_height = size.height.saturating_sub(CHROME_ROWS);
+            let content_width = size.width.saturating_sub(CONTENT_PADDING * 2);
+            self.refresh_page_cache(&mut cache, content_width)?;
             let content_rows = cache.as_ref().map_or(0, |cached| cached.buffer.height());
             let max_offset = max_scroll_offset(content_rows, viewport_height);
             scroll.clamp(max_offset);
-            let status_text = self.status_text(scroll.offset(), max_offset, quit_armed);
+            let label = self.status_label();
+            let scroll_percent_val = scroll_percentage(scroll.offset(), max_offset);
             let page = cache.as_ref().map(|cached| &cached.buffer);
-            self.draw(terminal, page, scroll.offset(), &status_text)?;
+            self.draw(
+                terminal,
+                page,
+                scroll.offset(),
+                &ui_state,
+                &label,
+                scroll_percent_val,
+                self.controller.script_count(),
+            )?;
             if let LoopControl::Quit =
-                step_event(&mut scroll, &mut quit_armed, viewport_height, max_offset)?
+                step_event(&mut scroll, &mut ui_state, viewport_height, max_offset)?
             {
                 return Ok(());
             }
         }
     }
 
-    /// Lays the page out again only when there is a page to show and the width changed.
+    /// Lays the page out again only when there is a page and the content width changed.
     fn refresh_page_cache(
         &self,
         cache: &mut Option<CachedPage>,
@@ -131,12 +150,6 @@ impl TerminalApp {
         let buffer = render_page(&self.controller, width)?;
         *cache = Some(CachedPage { width, buffer });
         Ok(())
-    }
-
-    fn status_text(&self, offset: u16, max_offset: u16, quit_armed: bool) -> String {
-        let label = self.status_label();
-        let percent = scroll_percentage(offset, max_offset);
-        compose_status_line(&label, percent, self.controller.script_count(), quit_armed)
     }
 
     fn status_label(&self) -> String {
@@ -157,15 +170,30 @@ impl TerminalApp {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw(
         &self,
         terminal: &mut AppTerminal,
         page: Option<&CellBuffer>,
         scroll_offset: u16,
-        status_text: &str,
+        ui_state: &UiState,
+        label: &str,
+        scroll_percent: u16,
+        script_count: usize,
     ) -> Result<(), TerminalError> {
         terminal
-            .draw(|frame| draw_frame(frame, &self.initial_view, page, scroll_offset, status_text))
+            .draw(|frame| {
+                draw_frame(
+                    frame,
+                    &self.initial_view,
+                    label,
+                    page,
+                    scroll_offset,
+                    ui_state,
+                    scroll_percent,
+                    script_count,
+                )
+            })
             .map_err(|_| TerminalError::RenderFailed)?;
         Ok(())
     }
@@ -174,7 +202,7 @@ impl TerminalApp {
 /// Reads one event and applies it, reporting whether the loop should quit.
 fn step_event(
     scroll: &mut ScrollState,
-    quit_armed: &mut bool,
+    ui_state: &mut UiState,
     viewport_height: u16,
     max_offset: u16,
 ) -> Result<LoopControl, TerminalError> {
@@ -185,12 +213,12 @@ fn step_event(
     if key.kind == KeyEventKind::Release {
         return Ok(LoopControl::Continue);
     }
-    let action = map_key_event(key, *quit_armed);
+    let action = map_key_event(key, ui_state.quit_armed);
     if matches!(action, InputAction::Quit) {
         return Ok(LoopControl::Quit);
     }
     apply_scroll(action, scroll, viewport_height, max_offset);
-    *quit_armed = quit_armed_after(action);
+    ui_state.quit_armed = quit_armed_after(action);
     Ok(LoopControl::Continue)
 }
 
@@ -219,36 +247,60 @@ fn render_page(controller: &NavigationController, width: u16) -> Result<CellBuff
     Ok(buffer)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_frame(
     frame: &mut Frame,
     view: &InitialView,
+    label: &str,
     page: Option<&CellBuffer>,
     scroll_offset: u16,
-    status_text: &str,
+    ui_state: &UiState,
+    scroll_percent: u16,
+    script_count: usize,
 ) {
-    let (body_area, status_area) = split_status_line(frame.area());
-    draw_body(frame, view, page, body_area, scroll_offset);
-    draw_status_line(frame, status_area, status_text);
+    let terminal_width = frame.area().width;
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // title bar
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // command bar
+        Constraint::Length(1), // separator
+        Constraint::Min(0),    // content area
+        Constraint::Length(1), // hints bar
+    ])
+    .split(frame.area());
+
+    let title_text = compose_title_bar(label, scroll_percent, script_count, terminal_width);
+    draw_chrome_row(frame, chunks[0], &title_text);
+
+    draw_separator(frame, chunks[1]);
+
+    let cmd_text = compose_command_bar_reading(ui_state.quit_armed, terminal_width);
+    frame.render_widget(Paragraph::new(cmd_text), chunks[2]);
+
+    draw_separator(frame, chunks[3]);
+
+    draw_body(frame, view, page, chunks[4], scroll_offset);
+
+    let hints_text = compose_hints_bar(None, terminal_width);
+    draw_chrome_row(frame, chunks[5], &hints_text);
 }
 
-/// Splits the full area into the page body and the reserved status row.
-fn split_status_line(area: Rect) -> (Rect, Rect) {
-    if area.height == 0 {
-        return (area, area);
-    }
-    let status_area = Rect {
-        x: area.x,
-        y: area.y + area.height - STATUS_LINE_ROWS,
-        width: area.width,
-        height: STATUS_LINE_ROWS,
-    };
-    let body_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: area.height - STATUS_LINE_ROWS,
-    };
-    (body_area, status_area)
+/// Renders a reversed-style chrome row (title bar or hints bar).
+fn draw_chrome_row(frame: &mut Frame, area: Rect, text: &str) {
+    frame.render_widget(
+        Paragraph::new(text.to_owned()).style(chrome_row_style()),
+        area,
+    );
+}
+
+/// Renders a horizontal separator line of ─ characters.
+fn draw_separator(frame: &mut Frame, area: Rect) {
+    let line = "─".repeat(area.width as usize);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn chrome_row_style() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
 }
 
 fn draw_body(
@@ -258,21 +310,33 @@ fn draw_body(
     area: Rect,
     scroll_offset: u16,
 ) {
+    let padded = Rect {
+        x: area.x.saturating_add(CONTENT_PADDING),
+        y: area.y,
+        width: area.width.saturating_sub(CONTENT_PADDING * 2),
+        height: area.height,
+    };
     match view {
-        InitialView::Page => draw_page(frame, page, area, scroll_offset),
-        InitialView::Blank => draw_message(frame, area, BLANK_PLACEHOLDER),
-        InitialView::Error(message) => draw_message(frame, area, message),
+        InitialView::Page => draw_page(frame, page, area, padded, scroll_offset),
+        InitialView::Blank => draw_message(frame, padded, BLANK_PLACEHOLDER),
+        InitialView::Error(message) => draw_message(frame, padded, message),
     }
 }
 
-fn draw_page(frame: &mut Frame, page: Option<&CellBuffer>, area: Rect, scroll_offset: u16) {
-    frame.render_widget(Clear, area);
+fn draw_page(
+    frame: &mut Frame,
+    page: Option<&CellBuffer>,
+    clear_area: Rect,
+    blit_area: Rect,
+    scroll_offset: u16,
+) {
+    frame.render_widget(Clear, clear_area);
     let Some(cells) = page else {
         return;
     };
     let buffer = frame.buffer_mut();
-    for row in 0..area.height {
-        blit_row(buffer, area, cells, scroll_offset, row);
+    for row in 0..blit_area.height {
+        blit_row(buffer, blit_area, cells, scroll_offset, row);
     }
 }
 
@@ -353,15 +417,6 @@ fn map_color(color: Color) -> TerminalColor {
 fn draw_message(frame: &mut Frame, area: Rect, message: &str) {
     let paragraph = Paragraph::new(message).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
-}
-
-fn draw_status_line(frame: &mut Frame, area: Rect, status_text: &str) {
-    let paragraph = Paragraph::new(status_text).style(status_line_style());
-    frame.render_widget(paragraph, area);
-}
-
-fn status_line_style() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
 }
 
 fn install_terminal() -> Result<AppTerminal, TerminalError> {
