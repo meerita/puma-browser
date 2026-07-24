@@ -17,12 +17,10 @@ const TRANSIENT_HINT_DURATION: Duration = Duration::from_secs(5);
 
 pub(crate) enum InteractionMode {
     Reading,
-    // Command variant added in Phase 3
+    Command,
 }
 
 pub(crate) struct UiState {
-    // Used in Phase 3 when Command mode is introduced.
-    #[allow(dead_code)]
     pub(crate) interaction_mode: InteractionMode,
     pub(crate) quit_armed: bool,
     pub(crate) refresh_armed: bool,
@@ -30,6 +28,8 @@ pub(crate) struct UiState {
     last_hint_advance: Instant,
     transient_hint: Option<&'static str>,
     transient_set_at: Option<Instant>,
+    command_buffer: String,
+    cursor_byte_offset: usize,
 }
 
 impl UiState {
@@ -42,7 +42,77 @@ impl UiState {
             last_hint_advance: Instant::now(),
             transient_hint: None,
             transient_set_at: None,
+            command_buffer: String::new(),
+            cursor_byte_offset: 0,
         }
+    }
+
+    pub(crate) fn is_in_command_mode(&self) -> bool {
+        matches!(self.interaction_mode, InteractionMode::Command)
+    }
+
+    pub(crate) fn enter_command_mode(&mut self, first_char: char) {
+        self.interaction_mode = InteractionMode::Command;
+        self.command_buffer.clear();
+        self.cursor_byte_offset = 0;
+        self.command_buffer.push(first_char);
+        self.cursor_byte_offset = first_char.len_utf8();
+    }
+
+    pub(crate) fn command_buffer(&self) -> &str {
+        &self.command_buffer
+    }
+
+    pub(crate) fn cursor_byte_offset(&self) -> usize {
+        self.cursor_byte_offset
+    }
+
+    pub(crate) fn command_append_char(&mut self, ch: char) {
+        self.command_buffer.insert(self.cursor_byte_offset, ch);
+        self.cursor_byte_offset += ch.len_utf8();
+    }
+
+    pub(crate) fn command_move_left(&mut self) {
+        if self.cursor_byte_offset == 0 {
+            return;
+        }
+        let before = &self.command_buffer[..self.cursor_byte_offset];
+        let prev_char_len = before.chars().next_back().map_or(0, |c| c.len_utf8());
+        self.cursor_byte_offset -= prev_char_len;
+    }
+
+    pub(crate) fn command_move_right(&mut self) {
+        if self.cursor_byte_offset >= self.command_buffer.len() {
+            return;
+        }
+        let after = &self.command_buffer[self.cursor_byte_offset..];
+        let next_char_len = after.chars().next().map_or(0, |c| c.len_utf8());
+        self.cursor_byte_offset += next_char_len;
+    }
+
+    pub(crate) fn command_delete_before_cursor(&mut self) {
+        if self.cursor_byte_offset == 0 {
+            return;
+        }
+        let before = &self.command_buffer[..self.cursor_byte_offset];
+        let prev_char_len = before.chars().next_back().map_or(0, |c| c.len_utf8());
+        let new_offset = self.cursor_byte_offset - prev_char_len;
+        self.command_buffer
+            .drain(new_offset..self.cursor_byte_offset);
+        self.cursor_byte_offset = new_offset;
+    }
+
+    pub(crate) fn cancel_command_mode(&mut self) {
+        self.interaction_mode = InteractionMode::Reading;
+        self.command_buffer.clear();
+        self.cursor_byte_offset = 0;
+    }
+
+    pub(crate) fn take_command_buffer(&mut self) -> String {
+        let buffer = std::mem::take(&mut self.command_buffer);
+        self.cursor_byte_offset = 0;
+        self.interaction_mode = InteractionMode::Reading;
+        buffer
     }
 
     pub(crate) fn current_hint(&self) -> &str {

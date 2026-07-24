@@ -33,7 +33,7 @@ use ratatui::style::{Color as TerminalColor, Modifier, Style};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-use command_bar::compose_command_bar_reading;
+use command_bar::{command_cursor_col, compose_command_bar_command, compose_command_bar_reading};
 use hints_bar::compose_hints_bar;
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use title_bar::compose_title_bar;
@@ -104,7 +104,7 @@ impl TerminalApp {
         outcome
     }
 
-    fn drive(&self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
+    fn drive(&mut self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
         let mut scroll = ScrollState::new();
         let mut ui_state = UiState::new();
         let mut cache: Option<CachedPage> = None;
@@ -131,9 +131,14 @@ impl TerminalApp {
                 scroll_percent_val,
                 self.controller.script_count(),
             )?;
-            if let LoopControl::Quit =
-                step_event(&mut scroll, &mut ui_state, viewport_height, max_offset, now)?
-            {
+            if let LoopControl::Quit = step_event(
+                &mut scroll,
+                &mut ui_state,
+                &mut self.controller,
+                viewport_height,
+                max_offset,
+                now,
+            )? {
                 return Ok(());
             }
         }
@@ -210,6 +215,7 @@ impl TerminalApp {
 fn step_event(
     scroll: &mut ScrollState,
     ui_state: &mut UiState,
+    controller: &mut NavigationController,
     viewport_height: u16,
     max_offset: u16,
     now: Instant,
@@ -226,12 +232,19 @@ fn step_event(
     if key.kind == KeyEventKind::Release {
         return Ok(LoopControl::Continue);
     }
-    let action = map_key_event(key, ui_state.quit_armed, ui_state.refresh_armed);
+    let in_command_mode = ui_state.is_in_command_mode();
+    let action = map_key_event(
+        key,
+        ui_state.quit_armed,
+        ui_state.refresh_armed,
+        in_command_mode,
+    );
     if matches!(action, InputAction::Quit) {
         return Ok(LoopControl::Quit);
     }
     ui_state.clear_transient();
     apply_scroll(action, scroll, viewport_height, max_offset);
+    apply_command_action(action, ui_state, controller);
     ui_state.quit_armed = quit_armed_after(action);
     ui_state.refresh_armed = refresh_armed_after(action);
     if matches!(action, InputAction::ArmQuit) {
@@ -259,7 +272,44 @@ fn apply_scroll(
         | InputAction::ArmRefresh
         | InputAction::RefreshArmed
         | InputAction::Disarm
-        | InputAction::Quit => {}
+        | InputAction::Quit
+        | InputAction::EnterCommand(_)
+        | InputAction::CommandAppend(_)
+        | InputAction::CommandMoveCursorLeft
+        | InputAction::CommandMoveCursorRight
+        | InputAction::CommandDeleteBack
+        | InputAction::CommandCancel
+        | InputAction::CommandSubmit => {}
+    }
+}
+
+fn apply_command_action(
+    action: InputAction,
+    ui_state: &mut UiState,
+    controller: &mut NavigationController,
+) {
+    match action {
+        InputAction::EnterCommand(ch) => ui_state.enter_command_mode(ch),
+        InputAction::CommandAppend(ch) => ui_state.command_append_char(ch),
+        InputAction::CommandMoveCursorLeft => ui_state.command_move_left(),
+        InputAction::CommandMoveCursorRight => ui_state.command_move_right(),
+        InputAction::CommandDeleteBack => ui_state.command_delete_before_cursor(),
+        InputAction::CommandCancel => ui_state.cancel_command_mode(),
+        InputAction::CommandSubmit => {
+            let url = ui_state.take_command_buffer();
+            let _ = controller.navigate(&url);
+        }
+        InputAction::ScrollLineDown
+        | InputAction::ScrollLineUp
+        | InputAction::ScrollPageDown
+        | InputAction::ScrollPageUp
+        | InputAction::ScrollToTop
+        | InputAction::ScrollToBottom
+        | InputAction::ArmQuit
+        | InputAction::Quit
+        | InputAction::ArmRefresh
+        | InputAction::RefreshArmed
+        | InputAction::Disarm => {}
     }
 }
 
@@ -298,8 +348,17 @@ fn draw_frame(
 
     draw_separator(frame, chunks[1]);
 
-    let cmd_text = compose_command_bar_reading(ui_state.current_hint(), terminal_width);
-    frame.render_widget(Paragraph::new(cmd_text), chunks[2]);
+    if ui_state.is_in_command_mode() {
+        let cmd_text = compose_command_bar_command(ui_state.command_buffer(), terminal_width);
+        frame.render_widget(Paragraph::new(cmd_text), chunks[2]);
+        let cursor_x = chunks[2].x
+            + command_cursor_col(ui_state.command_buffer(), ui_state.cursor_byte_offset());
+        let cursor_y = chunks[2].y;
+        frame.set_cursor_position((cursor_x, cursor_y));
+    } else {
+        let cmd_text = compose_command_bar_reading(ui_state.current_hint(), terminal_width);
+        frame.render_widget(Paragraph::new(cmd_text), chunks[2]);
+    }
 
     draw_separator(frame, chunks[3]);
 
