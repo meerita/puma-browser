@@ -4,6 +4,8 @@
 // @created meerita <meerita@icloud.com>
 
 use crate::inline_run::InlineRun;
+use crate::input_kind::InputKind;
+use crate::landmark_role::LandmarkRole;
 
 /// A single node in the browser's semantic document tree.
 ///
@@ -56,15 +58,40 @@ pub enum SemanticNode {
         title: Option<String>,
         source: Option<String>,
     },
-    Form,
-    Input,
-    Select,
-    Button,
+    Figure {
+        children: Vec<SemanticNode>,
+        caption: Option<Vec<InlineRun>>,
+    },
+    Form {
+        children: Vec<SemanticNode>,
+    },
+    Input {
+        kind: InputKind,
+        label: Option<String>,
+        sensitive: bool,
+    },
+    Select {
+        label: Option<String>,
+        options: Vec<String>,
+    },
+    Button {
+        runs: Vec<InlineRun>,
+    },
     Separator,
-    Landmark,
-    Details,
-    Summary,
-    EmbeddedContent,
+    Landmark {
+        role: LandmarkRole,
+        children: Vec<SemanticNode>,
+    },
+    Details {
+        open: bool,
+        children: Vec<SemanticNode>,
+    },
+    Summary {
+        runs: Vec<InlineRun>,
+    },
+    EmbeddedContent {
+        label: String,
+    },
     Warning {
         message: String,
     },

@@ -18,6 +18,15 @@ const QUOTE_INDENT_COLUMNS: usize = 2;
 /// The character repeated across a full row to draw a horizontal separator.
 const SEPARATOR_GRAPHEME: &str = "─";
 
+/// The blank field drawn for an editable input placeholder.
+const INPUT_BLANK: &str = "____";
+
+/// The masked field drawn for a password input, so a value is never revealed.
+const INPUT_MASK: &str = "••••";
+
+/// The marker drawn after a select placeholder to signal a dropdown control.
+const SELECT_MARKER: &str = "▾";
+
 /// Lay a document out into a cell buffer sized to `width` columns.
 ///
 /// Each node is styled by [`computed_style`] and turned into laid-out rows: text blocks
@@ -82,10 +91,33 @@ fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Ce
         }
         SemanticNode::Separator => vec![separator_row(style, width)],
         SemanticNode::Warning { message } => single_row(clip_line(message, style, width)),
-        SemanticNode::ImagePlaceholder { alt, .. } => {
-            single_row(clip_line(&image_label(alt), style, width))
+        SemanticNode::ImagePlaceholder { alt, title, .. } => {
+            single_row(clip_line(&image_label(alt, title.as_deref()), style, width))
         }
-        _ => Vec::new(),
+        SemanticNode::Figure { children, caption } => {
+            render_figure(children, caption, style, width)
+        }
+        SemanticNode::Details { children, .. } => render_children(children, width),
+        SemanticNode::Summary { runs } => wrap_runs(runs, style, width),
+        SemanticNode::Landmark { children, .. } => render_children(children, width),
+        SemanticNode::Form { children } => render_children(children, width),
+        SemanticNode::Input {
+            label, sensitive, ..
+        } => single_row(clip_line(
+            &input_placeholder(label.as_deref(), *sensitive),
+            style,
+            width,
+        )),
+        SemanticNode::Select { label, options } => single_row(clip_line(
+            &select_placeholder(label.as_deref(), options),
+            style,
+            width,
+        )),
+        SemanticNode::Button { runs } => render_button(runs, style, width),
+        SemanticNode::EmbeddedContent { label } => {
+            single_row(clip_line(&embedded_placeholder(label), style, width))
+        }
+        SemanticNode::TableRow { .. } | SemanticNode::TableCell { .. } => Vec::new(),
     }
 }
 
@@ -274,8 +306,78 @@ fn separator_row(style: &TextStyle, width: usize) -> Vec<Cell> {
         .collect()
 }
 
-fn image_label(alt: &str) -> String {
-    format!("[{alt}]")
+/// The bracketed placeholder for an image.
+///
+/// The alt text names the image; a distinct title is appended in parentheses so both are
+/// visible. An image with neither alt nor a useful title falls back to a generic label.
+fn image_label(alt: &str, title: Option<&str>) -> String {
+    let base = if alt.is_empty() { "image" } else { alt };
+    match title {
+        Some(title) if !title.is_empty() && title != base => format!("[{base} ({title})]"),
+        _ => format!("[{base}]"),
+    }
+}
+
+/// Render a figure: its content rows followed by the caption on its own wrapped lines.
+fn render_figure(
+    children: &[SemanticNode],
+    caption: &Option<Vec<InlineRun>>,
+    style: &TextStyle,
+    width: usize,
+) -> Vec<Vec<Cell>> {
+    let mut rows = render_children(children, width);
+    if let Some(runs) = caption {
+        rows.extend(wrap_runs(runs, style, width));
+    }
+    rows
+}
+
+/// The bracketed placeholder for an inert input control.
+///
+/// A password input renders a fixed mask, never its value; every other input renders a
+/// blank field. The label, when known, precedes the field.
+fn input_placeholder(label: Option<&str>, sensitive: bool) -> String {
+    let field = if sensitive { INPUT_MASK } else { INPUT_BLANK };
+    match label {
+        Some(label) => format!("[{label}: {field}]"),
+        None => format!("[{field}]"),
+    }
+}
+
+/// The bracketed placeholder for an inert select control, showing its first option.
+fn select_placeholder(label: Option<&str>, options: &[String]) -> String {
+    let selected = options.first().map(String::as_str).unwrap_or("");
+    match label {
+        Some(label) => format!("[{label}: {selected} {SELECT_MARKER}]"),
+        None => format!("[{selected} {SELECT_MARKER}]"),
+    }
+}
+
+/// Render a button as its label wrapped in brackets, keeping the label's inline styling.
+fn render_button(runs: &[InlineRun], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+    let mut cells = graphemes_to_cells("[ ", style);
+    cells.extend(runs_to_cells(runs, style));
+    cells.extend(graphemes_to_cells(" ]", style));
+    single_row(clip_cells(cells, width))
+}
+
+fn embedded_placeholder(label: &str) -> String {
+    format!("[Embedded: {label}]")
+}
+
+/// Truncate a styled cell run before the first grapheme that would cross `width`.
+fn clip_cells(cells: Vec<Cell>, width: usize) -> Vec<Cell> {
+    let mut clipped: Vec<Cell> = Vec::new();
+    let mut columns = 0usize;
+    for cell in cells {
+        let advance = grapheme_columns(cell.grapheme());
+        if columns + advance > width {
+            break;
+        }
+        columns += advance;
+        clipped.push(cell);
+    }
+    clipped
 }
 
 fn single_row(row: Vec<Cell>) -> Vec<Vec<Cell>> {

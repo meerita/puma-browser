@@ -14,6 +14,8 @@ use url::Url;
 use crate::document::{Document, DocumentTitle};
 use crate::error::HtmlError;
 use crate::inline_run::{InlineEmphasis, InlineRun};
+use crate::input_kind::InputKind;
+use crate::landmark_role::LandmarkRole;
 use crate::sanitize::{
     collapse_whitespace, strip_control_characters, strip_control_characters_preserving_layout,
 };
@@ -470,8 +472,42 @@ impl<'a> TreeExtractor<'a> {
             "table" => self.push_table(element, output),
             "hr" => output.push(SemanticNode::Separator),
             "img" => self.push_image(element, output),
-            _ => self.walk_children_into(element, output),
+            "figure" => self.push_figure(element, output),
+            "details" => self.push_details(element, output),
+            "summary" => self.push_summary(element, output),
+            "form" => self.push_form(element, output),
+            "input" | "textarea" => self.push_input(element, output),
+            "select" => self.push_select(element, output),
+            "button" => self.push_button(element, output),
+            "iframe" | "object" | "embed" | "video" | "audio" => {
+                output.push(SemanticNode::EmbeddedContent {
+                    label: embedded_label(tag).to_string(),
+                })
+            }
+            "nav" | "main" | "aside" | "footer" | "header" | "section" => {
+                self.push_landmark(element, tag, output)
+            }
+            _ => self.push_landmark_or_walk(element, output),
         }
+    }
+
+    /// Map a container that is not a known block element.
+    ///
+    /// A generic container carrying an ARIA landmark `role` becomes a `Landmark`; any
+    /// other container contributes only its children, so unknown wrappers stay transparent.
+    fn push_landmark_or_walk(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let Some(role) = self
+            .attribute(element, "role")
+            .and_then(|role| LandmarkRole::from_aria_role(&role))
+        else {
+            self.walk_children_into(element, output);
+            return;
+        };
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Landmark { role, children });
     }
 
     fn push_heading(&mut self, element: usize, level: u8, output: &mut Vec<SemanticNode>) {
@@ -769,6 +805,174 @@ impl<'a> TreeExtractor<'a> {
         output.push(SemanticNode::ImagePlaceholder { alt, title, source });
     }
 
+    /// Map a `<figure>` into a `Figure`, lifting a `<figcaption>` out as the caption and
+    /// keeping the remaining content as the figure's children in source order.
+    fn push_figure(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let mut children = Vec::new();
+        let mut caption = None;
+        for child in self.child_handles(element) {
+            if self.is_element_named(child, "figcaption") {
+                caption = self.non_empty_runs(child);
+                continue;
+            }
+            self.walk_node(child, &mut children);
+        }
+        if children.is_empty() && caption.is_none() {
+            return;
+        }
+        output.push(SemanticNode::Figure { children, caption });
+    }
+
+    /// Map a `<details>` into a `Details`. Its `<summary>` child folds into a `Summary`
+    /// node through the block walk, so the summary and the body keep their source order.
+    fn push_details(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let open = self.attribute(element, "open").is_some();
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Details { open, children });
+    }
+
+    fn push_summary(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Summary { runs });
+    }
+
+    fn push_form(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Form { children });
+    }
+
+    fn push_landmark(&mut self, element: usize, tag: &str, output: &mut Vec<SemanticNode>) {
+        let role = self.landmark_role(element, tag);
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Landmark { role, children });
+    }
+
+    /// The landmark role of an element: an explicit ARIA `role` attribute wins over the
+    /// role implied by the element name.
+    fn landmark_role(&self, element: usize, tag: &str) -> LandmarkRole {
+        let aria = self
+            .attribute(element, "role")
+            .and_then(|role| LandmarkRole::from_aria_role(&role));
+        aria.or_else(|| LandmarkRole::from_tag(tag))
+            .unwrap_or(LandmarkRole::Region)
+    }
+
+    /// Map an `<input>` or `<textarea>` into an inert `Input` placeholder.
+    ///
+    /// The control's value is never read: a `type="password"` input is marked sensitive
+    /// and, like every other input, carries no value into the tree.
+    fn push_input(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let kind = InputKind::from_type_attribute(self.attribute(element, "type").as_deref());
+        let sensitive = kind.is_sensitive();
+        let label = self.control_label(element);
+        output.push(SemanticNode::Input {
+            kind,
+            label,
+            sensitive,
+        });
+    }
+
+    fn push_select(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let label = self.control_label(element);
+        let mut options = Vec::new();
+        self.collect_options(element, &mut options);
+        output.push(SemanticNode::Select { label, options });
+    }
+
+    /// Gather a select's option labels in source order, descending through `<optgroup>`
+    /// wrappers so grouped options join the flat list.
+    fn collect_options(&self, node: usize, options: &mut Vec<String>) {
+        for child in self.child_handles(node) {
+            if self.is_element_named(child, "option") {
+                options.push(self.plain_text_of(child));
+                continue;
+            }
+            if !self.arena[child].is_element {
+                continue;
+            }
+            self.collect_options(child, options);
+        }
+    }
+
+    fn push_button(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let runs = self.block_runs(element);
+        output.push(SemanticNode::Button { runs });
+    }
+
+    /// The accessible label of a form control.
+    ///
+    /// An explicit `aria-label` wins, then a `<label for=...>` matching the control's
+    /// `id`, then an ancestor `<label>` that wraps the control. A control with none of
+    /// these has no label.
+    fn control_label(&self, element: usize) -> Option<String> {
+        if let Some(aria) = self.attribute(element, "aria-label") {
+            return non_empty_text(sanitize_inline(aria));
+        }
+        if let Some(text) = self.label_for_control(element) {
+            return non_empty_text(text);
+        }
+        self.wrapping_label_text(element).and_then(non_empty_text)
+    }
+
+    /// The text of a `<label for=id>` associated with the control by its `id`.
+    fn label_for_control(&self, element: usize) -> Option<String> {
+        let id = self.attribute(element, "id")?;
+        for (candidate, node) in self.arena.iter().enumerate() {
+            if !node.is_element || local_name(&node.name) != "label" {
+                continue;
+            }
+            if !attribute_equals(node, "for", &id) {
+                continue;
+            }
+            return Some(self.plain_text_of(candidate));
+        }
+        None
+    }
+
+    /// The text of the nearest ancestor `<label>` that wraps the control, if any.
+    fn wrapping_label_text(&self, element: usize) -> Option<String> {
+        let mut ancestor = self.arena[element].parent;
+        while let Some(node) = ancestor {
+            if self.is_element_named(node, "label") {
+                return Some(self.plain_text_of(node));
+            }
+            ancestor = self.arena[node].parent;
+        }
+        None
+    }
+
+    /// The runs of a text block, or `None` when the block collapses to nothing.
+    fn non_empty_runs(&mut self, element: usize) -> Option<Vec<InlineRun>> {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
+            return None;
+        }
+        Some(runs)
+    }
+
+    fn is_element_named(&self, node: usize, name: &str) -> bool {
+        let entry = &self.arena[node];
+        entry.is_element && local_name(&entry.name) == name
+    }
+
+    fn plain_text_of(&self, node: usize) -> String {
+        let mut raw = String::new();
+        gather_plain_text(self.arena, node, &mut raw);
+        sanitize_inline(raw)
+    }
+
     fn push_verbatim_block(
         &mut self,
         element: usize,
@@ -1063,8 +1267,61 @@ fn gather_plain_text(arena: &[Node], node: usize, buffer: &mut String) {
 fn is_block_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "p" | "ul" | "ol" | "blockquote" | "pre" | "hr" | "img" | "table"
+        "p" | "ul"
+            | "ol"
+            | "blockquote"
+            | "pre"
+            | "hr"
+            | "img"
+            | "table"
+            | "figure"
+            | "details"
+            | "summary"
+            | "form"
+            | "input"
+            | "textarea"
+            | "select"
+            | "button"
+            | "iframe"
+            | "object"
+            | "embed"
+            | "video"
+            | "audio"
+            | "nav"
+            | "main"
+            | "aside"
+            | "footer"
+            | "header"
+            | "section"
     ) || heading_level(tag).is_some()
+}
+
+/// A human-readable name for an embedded-content element, used as its placeholder label.
+fn embedded_label(tag: &str) -> &'static str {
+    match tag {
+        "iframe" => "inline frame",
+        "object" => "object",
+        "embed" => "embedded object",
+        "video" => "video",
+        "audio" => "audio",
+        _ => "embedded content",
+    }
+}
+
+/// Whether an element carries an attribute whose value equals `wanted`.
+fn attribute_equals(entry: &Node, name: &str, wanted: &str) -> bool {
+    entry
+        .attributes
+        .iter()
+        .any(|attribute| local_name(&attribute.name) == name && attribute.value.as_ref() == wanted)
+}
+
+/// The text, or `None` when it is empty, so a blank label collapses to no label.
+fn non_empty_text(text: String) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
 }
 
 fn is_table_section(tag: &str) -> bool {
