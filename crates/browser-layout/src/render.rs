@@ -3,8 +3,7 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
-use browser_css::computed_style;
-use browser_css::TextStyle;
+use browser_css::{computed_run_style, computed_style, TextStyle};
 use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -70,8 +69,8 @@ fn append_blank_rows(rows: &mut Vec<Vec<Cell>>, count: u16) {
 /// Produce the content rows for a single node, before spacing is applied.
 ///
 /// Container nodes recurse into their children through [`render_children`]; text blocks
-/// flatten their inline runs into a single string and word-wrap it. Per-run emphasis and
-/// links are a later phase, so a run's `emphasis` and `link` are ignored here.
+/// lay out each inline run with its own emphasis and link styling and word-wrap the
+/// result.
 fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
     match node {
         SemanticNode::Heading { runs, .. } => wrap_runs(runs, style, width),
@@ -91,19 +90,59 @@ fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Ce
     }
 }
 
-/// Concatenate a text block's inline runs and wrap the result to the width.
-fn wrap_runs(runs: &[InlineRun], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
-    let text: String = runs.iter().map(|run| run.text.as_str()).collect();
-    wrap_styled_text(&text, style, width)
+/// Turn a text block's inline runs into styled cells and wrap them to the width.
+///
+/// Each run's graphemes carry that run's own style, computed from the node's base style
+/// (`base`) folded with the run's emphasis and link. Wrapping then treats the whole
+/// block as one styled stream, so a word split across run boundaries wraps as a single
+/// unit and run boundaries never change where lines break.
+fn wrap_runs(runs: &[InlineRun], base: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+    wrap_cells(runs_to_cells(runs, base), width)
 }
 
-/// Wrap a run of text into rows no wider than `width` display columns.
-fn wrap_styled_text(text: &str, style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
-    let mut wrapper = LineWrapper::new(width, style);
-    for word in text.split_whitespace() {
-        wrapper.push_word(word);
+fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
+    let mut cells: Vec<Cell> = Vec::new();
+    for run in runs {
+        let style = computed_run_style(*base, run);
+        cells.extend(graphemes_to_cells(&run.text, &style));
+    }
+    cells
+}
+
+/// Wrap a block's styled cells into rows no wider than `width` display columns.
+fn wrap_cells(cells: Vec<Cell>, width: usize) -> Vec<Vec<Cell>> {
+    let mut wrapper = LineWrapper::new(width);
+    for token in tokenize_line(cells) {
+        wrapper.push_token(token);
     }
     wrapper.finish()
+}
+
+/// Split a styled cell stream into words and the single spaces that separate them.
+///
+/// A word is a maximal span of non-space cells, which may hold graphemes from several
+/// runs when no whitespace falls between them. Block text is already whitespace-collapsed,
+/// so each separator is exactly one space.
+fn tokenize_line(cells: Vec<Cell>) -> Vec<LineToken> {
+    let mut tokens: Vec<LineToken> = Vec::new();
+    let mut word: Vec<Cell> = Vec::new();
+    for cell in cells {
+        if cell.grapheme() != " " {
+            word.push(cell);
+            continue;
+        }
+        flush_word(&mut word, &mut tokens);
+        tokens.push(LineToken::Space(cell));
+    }
+    flush_word(&mut word, &mut tokens);
+    tokens
+}
+
+fn flush_word(word: &mut Vec<Cell>, tokens: &mut Vec<LineToken>) {
+    if word.is_empty() {
+        return;
+    }
+    tokens.push(LineToken::Word(std::mem::take(word)));
 }
 
 /// Render a block quote: lay its children out into the indented content width, then push
@@ -267,31 +306,46 @@ fn write_cell(buffer: &mut CellBuffer, column: usize, row_position: u16, cell: C
     buffer.set_cell(column_position, row_position, cell);
 }
 
+/// A unit of a text block's wrappable content: a word or the space that separates two.
+enum LineToken {
+    Word(Vec<Cell>),
+    Space(Cell),
+}
+
 /// Greedy word-wrapper: accumulates words into the current row and flushes it when the
-/// next word (plus its separating space) would overflow the target width.
-struct LineWrapper<'style> {
+/// next word (plus its separating space) would overflow the target width. A word carries
+/// its graphemes' own styles, so wrapping never restyles content; the separating space is
+/// the source space cell, held back until the following word joins the same row.
+struct LineWrapper {
     width: usize,
-    style: &'style TextStyle,
     rows: Vec<Vec<Cell>>,
     current: Vec<Cell>,
     current_columns: usize,
+    pending_space: Option<Cell>,
 }
 
-impl<'style> LineWrapper<'style> {
-    fn new(width: usize, style: &'style TextStyle) -> Self {
+impl LineWrapper {
+    fn new(width: usize) -> LineWrapper {
         LineWrapper {
             width,
-            style,
             rows: Vec::new(),
             current: Vec::new(),
             current_columns: 0,
+            pending_space: None,
         }
     }
 
-    fn push_word(&mut self, word: &str) {
-        let cells = graphemes_to_cells(word, self.style);
+    fn push_token(&mut self, token: LineToken) {
+        match token {
+            LineToken::Word(cells) => self.push_word(cells),
+            LineToken::Space(cell) => self.pending_space = Some(cell),
+        }
+    }
+
+    fn push_word(&mut self, cells: Vec<Cell>) {
         let columns = count_columns(&cells);
         if columns > self.width {
+            self.pending_space = None;
             self.push_broken_word(cells);
             return;
         }
@@ -326,11 +380,14 @@ impl<'style> LineWrapper<'style> {
     fn start_row(&mut self, cells: Vec<Cell>, columns: usize) {
         self.current = cells;
         self.current_columns = columns;
+        self.pending_space = None;
     }
 
     fn append_with_space(&mut self, cells: Vec<Cell>, columns: usize) {
-        self.current.push(Cell::new(String::from(" "), self.style));
-        self.current_columns += 1;
+        if let Some(space) = self.pending_space.take() {
+            self.current.push(space);
+            self.current_columns += 1;
+        }
         self.current.extend(cells);
         self.current_columns += columns;
     }
@@ -347,6 +404,7 @@ impl<'style> LineWrapper<'style> {
         let row = std::mem::take(&mut self.current);
         self.rows.push(row);
         self.current_columns = 0;
+        self.pending_space = None;
     }
 
     fn finish(mut self) -> Vec<Vec<Cell>> {

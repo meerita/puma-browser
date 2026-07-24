@@ -18,17 +18,19 @@ pub struct Cell {
     foreground: Option<Color>,
     background: Option<Color>,
     emphasis: Emphasis,
+    underline: bool,
 }
 
 impl Cell {
     /// Builds a cell for one grapheme cluster, taking its display attributes from the
-    /// computed style of the node the grapheme belongs to.
+    /// computed style of the node or run the grapheme belongs to.
     pub fn new(grapheme: String, style: &TextStyle) -> Cell {
         Cell {
             grapheme,
             foreground: style.foreground,
             background: style.background,
             emphasis: style.emphasis,
+            underline: style.underline,
         }
     }
 
@@ -39,6 +41,7 @@ impl Cell {
             foreground: None,
             background: None,
             emphasis: Emphasis::None,
+            underline: false,
         }
     }
 
@@ -56,6 +59,12 @@ impl Cell {
 
     pub fn emphasis(&self) -> Emphasis {
         self.emphasis
+    }
+
+    /// Whether the grapheme is underlined, used to mark a link so it stays distinguishable
+    /// without relying on color.
+    pub fn underline(&self) -> bool {
+        self.underline
     }
 }
 

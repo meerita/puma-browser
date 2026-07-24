@@ -3,7 +3,8 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{Document, InlineRun, SemanticNode};
+use browser_css::Emphasis;
+use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
 use browser_layout::{render_document, CellBuffer, LayoutError};
 use unicode_width::UnicodeWidthStr;
 
@@ -163,6 +164,103 @@ fn representative_document_renders_to_the_expected_rows() {
             String::from("────────────────────"), // separator fills the width
         ]
     );
+}
+
+fn strong_run(text: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis {
+            strong: true,
+            emphasis: false,
+            code: false,
+        },
+        link: None,
+    }
+}
+
+fn linked_run(text: &str, href: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis::none(),
+        link: Some(href.to_string()),
+    }
+}
+
+#[test]
+fn a_multi_run_paragraph_applies_each_runs_own_emphasis() {
+    let document = document_of(vec![SemanticNode::Paragraph {
+        runs: vec![
+            InlineRun::plain(String::from("word ")),
+            strong_run("bold"),
+            InlineRun::plain(String::from(" tail")),
+        ],
+    }]);
+
+    let buffer = render_document(&document, 40).expect("paragraph must lay out");
+
+    assert_eq!(row_text(&buffer, 0).trim_end(), "word bold tail");
+    // "word " occupies columns 0..5, "bold" columns 5..9, " tail" from column 9.
+    assert_eq!(
+        buffer.cell_at(0, 0).expect("plain cell").emphasis(),
+        Emphasis::None
+    );
+    assert_eq!(
+        buffer.cell_at(5, 0).expect("bold cell").emphasis(),
+        Emphasis::Bold
+    );
+    assert_eq!(
+        buffer.cell_at(8, 0).expect("bold cell").emphasis(),
+        Emphasis::Bold
+    );
+    assert_eq!(
+        buffer.cell_at(10, 0).expect("plain cell").emphasis(),
+        Emphasis::None
+    );
+}
+
+#[test]
+fn a_linked_run_is_underlined_while_plain_text_is_not() {
+    let document = document_of(vec![SemanticNode::Paragraph {
+        runs: vec![
+            InlineRun::plain(String::from("see ")),
+            linked_run("link", "/x"),
+        ],
+    }]);
+
+    let buffer = render_document(&document, 40).expect("paragraph must lay out");
+
+    assert_eq!(row_text(&buffer, 0).trim_end(), "see link");
+    // "see " occupies columns 0..4, "link" columns 4..8.
+    assert!(!buffer.cell_at(0, 0).expect("plain cell").underline());
+    assert!(buffer.cell_at(4, 0).expect("link cell").underline());
+    assert!(buffer.cell_at(7, 0).expect("link cell").underline());
+}
+
+#[test]
+fn run_boundaries_do_not_change_word_wrapping() {
+    let width = 12u16;
+    let plain = document_of(vec![paragraph("hello wonderful world")]);
+    // The same visible text, split into runs mid-word and at a space, must wrap the same.
+    let marked = document_of(vec![SemanticNode::Paragraph {
+        runs: vec![
+            InlineRun::plain(String::from("hello won")),
+            strong_run("der"),
+            InlineRun::plain(String::from("ful world")),
+        ],
+    }]);
+
+    let plain_buffer = render_document(&plain, width).expect("plain paragraph must lay out");
+    let marked_buffer = render_document(&marked, width).expect("marked paragraph must lay out");
+
+    let plain_rows: Vec<String> = (0..plain_buffer.height())
+        .map(|row| row_text(&plain_buffer, row).trim_end().to_string())
+        .collect();
+    let marked_rows: Vec<String> = (0..marked_buffer.height())
+        .map(|row| row_text(&marked_buffer, row).trim_end().to_string())
+        .collect();
+
+    assert_eq!(plain_rows, marked_rows);
+    assert_eq!(plain_rows, vec!["hello", "wonderful", "world"]);
 }
 
 #[test]

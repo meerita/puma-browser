@@ -8,7 +8,7 @@ mod error;
 mod style_properties;
 mod text_style;
 
-pub use computed_style::computed_style;
+pub use computed_style::{computed_run_style, computed_style};
 pub use error::CssError;
 pub use style_properties::{Color, DisplayMode, Emphasis, ListMarker, ReadingOrder, WhiteSpace};
 pub use text_style::TextStyle;

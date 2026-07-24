@@ -9,10 +9,11 @@ use std::cell::{Cell, Ref, RefCell};
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::{parse_document, Attribute, LocalName, Namespace, ParseOpts, QualName};
+use url::Url;
 
 use crate::document::{Document, DocumentTitle};
 use crate::error::HtmlError;
-use crate::inline_run::InlineRun;
+use crate::inline_run::{InlineEmphasis, InlineRun};
 use crate::sanitize::{
     collapse_whitespace, strip_control_characters, strip_control_characters_preserving_layout,
 };
@@ -44,8 +45,9 @@ pub fn parse_html(source: &str) -> Result<Document, HtmlError> {
 
     let arena = dom.into_nodes();
     let title = extract_title(&arena).map(|raw| DocumentTitle::new(&raw));
+    let base_url = extract_base_url(&arena);
 
-    let mut extractor = TreeExtractor::new(&arena);
+    let mut extractor = TreeExtractor::new(&arena, base_url);
     let mut children = extractor.walk_children(DOCUMENT_HANDLE);
     let script_count = extractor.script_count();
 
@@ -384,17 +386,21 @@ impl TreeSink for DomBuilder {
 ///
 /// Each walk method returns the block-level children it produces; container elements
 /// recurse into their own children, so the returned tree owns itself. The script count
-/// accumulates across the whole walk so it can be reported once parsing ends.
+/// accumulates across the whole walk so it can be reported once parsing ends. The base
+/// URL, taken from the document's `<base href>`, resolves relative link and image
+/// references as runs and image placeholders are built.
 struct TreeExtractor<'a> {
     arena: &'a [Node],
     script_count: usize,
+    base_url: Option<Url>,
 }
 
 impl<'a> TreeExtractor<'a> {
-    fn new(arena: &'a [Node]) -> TreeExtractor<'a> {
+    fn new(arena: &'a [Node], base_url: Option<Url>) -> TreeExtractor<'a> {
         TreeExtractor {
             arena,
             script_count: 0,
+            base_url,
         }
     }
 
@@ -456,16 +462,18 @@ impl<'a> TreeExtractor<'a> {
     }
 
     fn push_heading(&mut self, element: usize, level: u8, output: &mut Vec<SemanticNode>) {
-        let Some(runs) = self.single_run(element) else {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
             return;
-        };
+        }
         output.push(SemanticNode::Heading { level, runs });
     }
 
     fn push_paragraph(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
-        let Some(runs) = self.single_run(element) else {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
             return;
-        };
+        }
         output.push(SemanticNode::Paragraph { runs });
     }
 
@@ -519,22 +527,99 @@ impl<'a> TreeExtractor<'a> {
         if !walked.is_empty() {
             return walked;
         }
-        let Some(runs) = self.single_run(element) else {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
             return Vec::new();
-        };
+        }
         vec![SemanticNode::Paragraph { runs }]
     }
 
-    /// Gather a text block's content into exactly one plain run.
+    /// Gather a text block's content into a sequence of styled inline runs.
     ///
-    /// Multiple runs and inline emphasis are a later phase; every text block produces a
-    /// single unstyled run here. An empty block yields no run so it is dropped upstream.
-    fn single_run(&mut self, element: usize) -> Option<Vec<InlineRun>> {
-        let text = self.block_text(element);
-        if text.is_empty() {
+    /// A new run starts at every boundary where the emphasis (`<strong>`/`<b>`,
+    /// `<em>`/`<i>`, inline `<code>`) or the link target changes. Whitespace is collapsed
+    /// across the whole block, exactly as plain block text is collapsed, so wrapping is
+    /// unaffected by where runs begin and end. An empty block yields no run so it is
+    /// dropped upstream.
+    fn block_runs(&mut self, element: usize) -> Vec<InlineRun> {
+        let mut segments = Vec::new();
+        self.gather_segments(element, &InlineContext::root(), &mut segments);
+        collapse_segments(segments)
+    }
+
+    /// Walk a block's descendants in order, recording each text node as a segment tagged
+    /// with the emphasis and link in force at that point.
+    fn gather_segments(
+        &mut self,
+        node: usize,
+        context: &InlineContext,
+        segments: &mut Vec<Segment>,
+    ) {
+        let entry = &self.arena[node];
+        if let Some(text) = &entry.text {
+            segments.push(Segment::new(text, context));
+            return;
+        }
+        if entry.is_element {
+            self.gather_element_segments(node, context, segments);
+            return;
+        }
+        self.gather_children_segments(node, context, segments);
+    }
+
+    fn gather_element_segments(
+        &mut self,
+        element: usize,
+        context: &InlineContext,
+        segments: &mut Vec<Segment>,
+    ) {
+        let tag = local_name(&self.arena[element].name).to_string();
+        if tag == "script" {
+            self.script_count += 1;
+            return;
+        }
+        if tag == "style" {
+            return;
+        }
+        let child_context = self.child_context(element, &tag, context);
+        self.gather_children_segments(element, &child_context, segments);
+    }
+
+    fn gather_children_segments(
+        &mut self,
+        node: usize,
+        context: &InlineContext,
+        segments: &mut Vec<Segment>,
+    ) {
+        for child in self.child_handles(node) {
+            self.gather_segments(child, context, segments);
+        }
+    }
+
+    /// Derive the inline context for an element's children by folding the element's own
+    /// emphasis or link onto the surrounding context.
+    fn child_context(&self, element: usize, tag: &str, context: &InlineContext) -> InlineContext {
+        let mut child = context.clone();
+        match tag {
+            "strong" | "b" => child.emphasis.strong = true,
+            "em" | "i" => child.emphasis.emphasis = true,
+            "code" => child.emphasis.code = true,
+            "a" => child.link = self.anchor_link(element).or_else(|| context.link.clone()),
+            _ => {}
+        }
+        child
+    }
+
+    /// The resolved link target of an anchor, or `None` when it has no usable `href`.
+    ///
+    /// An anchor without an `href` contributes plain text, so its descendants keep the
+    /// surrounding link context rather than gaining one.
+    fn anchor_link(&self, element: usize) -> Option<String> {
+        let reference = sanitize_reference(self.attribute(element, "href")?);
+        if reference.is_empty() {
             return None;
         }
-        Some(vec![InlineRun::plain(text)])
+        Some(resolve_reference(&reference, self.base_url.as_ref()))
     }
 
     fn push_image(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
@@ -543,7 +628,10 @@ impl<'a> TreeExtractor<'a> {
             .map(sanitize_inline)
             .unwrap_or_default();
         let title = self.attribute(element, "title").map(sanitize_inline);
-        let source = self.attribute(element, "src").map(sanitize_reference);
+        let source = self
+            .attribute(element, "src")
+            .map(sanitize_reference)
+            .map(|reference| resolve_reference(&reference, self.base_url.as_ref()));
         output.push(SemanticNode::ImagePlaceholder { alt, title, source });
     }
 
@@ -558,12 +646,6 @@ impl<'a> TreeExtractor<'a> {
             return;
         }
         output.push(build(text));
-    }
-
-    fn block_text(&mut self, element: usize) -> String {
-        let mut raw = String::new();
-        self.gather_text(element, &mut raw);
-        collapse_whitespace(&strip_control_characters_preserving_layout(&raw))
     }
 
     fn verbatim_text(&mut self, element: usize) -> String {
@@ -606,6 +688,207 @@ impl<'a> TreeExtractor<'a> {
     fn child_handles(&self, node: usize) -> Vec<usize> {
         self.arena[node].children.clone()
     }
+}
+
+/// The emphasis and link in force at a point during a block's inline walk.
+#[derive(Clone)]
+struct InlineContext {
+    emphasis: InlineEmphasis,
+    link: Option<String>,
+}
+
+impl InlineContext {
+    fn root() -> InlineContext {
+        InlineContext {
+            emphasis: InlineEmphasis::none(),
+            link: None,
+        }
+    }
+}
+
+/// A contiguous span of a block's text sharing one emphasis and link, before whitespace
+/// is collapsed across the whole block.
+struct Segment {
+    text: String,
+    emphasis: InlineEmphasis,
+    link: Option<String>,
+}
+
+impl Segment {
+    fn new(raw: &str, context: &InlineContext) -> Segment {
+        Segment {
+            text: strip_control_characters_preserving_layout(raw),
+            emphasis: context.emphasis.clone(),
+            link: context.link.clone(),
+        }
+    }
+}
+
+/// Collapse a block's segments into inline runs.
+///
+/// Whitespace is collapsed across the whole block: each run of whitespace becomes a
+/// single space and leading and trailing whitespace is dropped, matching how plain block
+/// text is collapsed. A new run begins wherever the emphasis or link changes.
+fn collapse_segments(segments: Vec<Segment>) -> Vec<InlineRun> {
+    let mut builder = RunBuilder::new();
+    for segment in &segments {
+        builder.push_segment(segment);
+    }
+    builder.finish()
+}
+
+/// Builds inline runs from a block's segments, collapsing whitespace as it goes.
+struct RunBuilder {
+    runs: Vec<InlineRun>,
+    current: Option<InlineRun>,
+    last_was_space: bool,
+}
+
+impl RunBuilder {
+    fn new() -> RunBuilder {
+        RunBuilder {
+            runs: Vec::new(),
+            current: None,
+            // Start as though a space preceded the block so leading whitespace is dropped.
+            last_was_space: true,
+        }
+    }
+
+    fn push_segment(&mut self, segment: &Segment) {
+        for character in segment.text.chars() {
+            self.push_character(character, &segment.emphasis, &segment.link);
+        }
+    }
+
+    fn push_character(
+        &mut self,
+        character: char,
+        emphasis: &InlineEmphasis,
+        link: &Option<String>,
+    ) {
+        if character.is_whitespace() {
+            self.push_space(emphasis, link);
+            return;
+        }
+        self.push_visible(character, emphasis, link);
+    }
+
+    fn push_visible(&mut self, character: char, emphasis: &InlineEmphasis, link: &Option<String>) {
+        self.open_run(emphasis, link);
+        if let Some(run) = self.current.as_mut() {
+            run.text.push(character);
+        }
+        self.last_was_space = false;
+    }
+
+    fn push_space(&mut self, emphasis: &InlineEmphasis, link: &Option<String>) {
+        if self.last_was_space {
+            return;
+        }
+        self.open_run(emphasis, link);
+        if let Some(run) = self.current.as_mut() {
+            run.text.push(' ');
+        }
+        self.last_was_space = true;
+    }
+
+    /// Ensure the current run carries the given emphasis and link, flushing it and
+    /// starting a fresh run when either differs.
+    fn open_run(&mut self, emphasis: &InlineEmphasis, link: &Option<String>) {
+        if self.run_matches(emphasis, link) {
+            return;
+        }
+        self.flush_current();
+        self.current = Some(InlineRun {
+            text: String::new(),
+            emphasis: emphasis.clone(),
+            link: link.clone(),
+        });
+    }
+
+    fn run_matches(&self, emphasis: &InlineEmphasis, link: &Option<String>) -> bool {
+        match &self.current {
+            Some(run) => &run.emphasis == emphasis && &run.link == link,
+            None => false,
+        }
+    }
+
+    fn flush_current(&mut self) {
+        let Some(run) = self.current.take() else {
+            return;
+        };
+        if run.text.is_empty() {
+            return;
+        }
+        self.runs.push(run);
+    }
+
+    fn finish(mut self) -> Vec<InlineRun> {
+        self.trim_trailing_space();
+        self.flush_current();
+        self.runs
+    }
+
+    /// Drop a single trailing space left on the final run, matching how plain block text
+    /// trims its trailing whitespace.
+    fn trim_trailing_space(&mut self) {
+        let Some(run) = self.current.as_mut() else {
+            return;
+        };
+        if run.text.ends_with(' ') {
+            run.text.pop();
+        }
+    }
+}
+
+/// Resolve a reference against the document base URL when one is present.
+///
+/// A reference that cannot be resolved is kept exactly as authored rather than dropped,
+/// so a malformed base or reference never loses the link or image source.
+fn resolve_reference(reference: &str, base_url: Option<&Url>) -> String {
+    let Some(base) = base_url else {
+        return reference.to_string();
+    };
+    match base.join(reference) {
+        Ok(resolved) => resolved.to_string(),
+        Err(_) => reference.to_string(),
+    }
+}
+
+/// Read the document's `<base href>` as an absolute base URL.
+///
+/// The first `<base>` carrying an `href` wins. A relative or malformed value yields no
+/// base, so references are left as authored.
+fn extract_base_url(arena: &[Node]) -> Option<Url> {
+    let href = find_base_href(arena, DOCUMENT_HANDLE)?;
+    Url::parse(&sanitize_reference(href)).ok()
+}
+
+fn find_base_href(arena: &[Node], node: usize) -> Option<String> {
+    let entry = &arena[node];
+    if let Some(href) = base_href_attribute(entry) {
+        return Some(href);
+    }
+    for child in &entry.children {
+        if let Some(found) = find_base_href(arena, *child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn base_href_attribute(entry: &Node) -> Option<String> {
+    if !entry.is_element {
+        return None;
+    }
+    if local_name(&entry.name) != "base" {
+        return None;
+    }
+    entry
+        .attributes
+        .iter()
+        .find(|attribute| local_name(&attribute.name) == "href")
+        .map(|attribute| attribute.value.to_string())
 }
 
 fn extract_title(arena: &[Node]) -> Option<String> {

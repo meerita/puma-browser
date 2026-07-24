@@ -3,7 +3,7 @@
 // @layer html
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{parse_html, HtmlError, InlineRun, SemanticNode};
+use browser_html::{parse_html, HtmlError, InlineEmphasis, InlineRun, SemanticNode};
 
 fn parse(source: &str) -> Vec<SemanticNode> {
     parse_html(source)
@@ -63,13 +63,21 @@ fn heading_text_is_stripped_of_control_characters() {
 }
 
 #[test]
-fn paragraph_with_inline_anchor_keeps_the_anchor_text_inside_the_paragraph() {
+fn paragraph_with_inline_anchor_splits_the_link_into_its_own_run() {
     let nodes = parse(r#"<p>See <a href="/docs">the docs</a> for details</p>"#);
 
     assert_eq!(
         nodes,
         vec![SemanticNode::Paragraph {
-            runs: vec![InlineRun::plain("See the docs for details".to_string())],
+            runs: vec![
+                InlineRun::plain("See ".to_string()),
+                InlineRun {
+                    text: "the docs".to_string(),
+                    emphasis: InlineEmphasis::none(),
+                    link: Some("/docs".to_string()),
+                },
+                InlineRun::plain(" for details".to_string()),
+            ],
         }]
     );
 }

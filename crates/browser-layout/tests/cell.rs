@@ -13,6 +13,17 @@ fn blank_cell_holds_a_space_with_no_attributes() {
     assert_eq!(cell.foreground(), None);
     assert_eq!(cell.background(), None);
     assert_eq!(cell.emphasis(), Emphasis::None);
+    assert!(!cell.underline());
+}
+
+#[test]
+fn new_cell_carries_the_underline_flag_from_style() {
+    let underlined = TextStyle {
+        underline: true,
+        ..TextStyle::default()
+    };
+    assert!(Cell::new(String::from("a"), &underlined).underline());
+    assert!(!Cell::new(String::from("a"), &TextStyle::default()).underline());
 }
 
 #[test]
