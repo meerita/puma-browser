@@ -38,4 +38,16 @@ pub enum NetworkError {
 
     #[error("failed to decode response body")]
     Decode,
+
+    #[error("file not found")]
+    FileNotFound,
+
+    #[error("path is a directory")]
+    PathIsDirectory,
+
+    #[error("file too large")]
+    FileTooLarge,
+
+    #[error("file read failed")]
+    FileReadFailed,
 }
