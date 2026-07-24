@@ -3,32 +3,74 @@
 // @layer html
 // @created meerita <meerita@icloud.com>
 
-use browser_html::SemanticNode;
+use browser_html::{InlineRun, InputKind, LandmarkRole, SemanticNode};
 
 #[test]
 fn all_semantic_node_variants_construct() {
     let nodes = vec![
-        SemanticNode::Document,
         SemanticNode::Heading {
             level: 1,
-            text: "Title".to_string(),
+            runs: vec![InlineRun::plain("Title".to_string())],
+            inline_style: None,
         },
         SemanticNode::Paragraph {
-            text: "Body".to_string(),
+            runs: vec![InlineRun::plain("Body".to_string())],
+            inline_style: None,
         },
-        SemanticNode::Link {
-            text: "Home".to_string(),
-            href: "https://example.com".to_string(),
+        SemanticNode::List {
+            ordered: false,
+            children: vec![SemanticNode::ListItem {
+                children: vec![SemanticNode::Paragraph {
+                    runs: vec![InlineRun::plain("First".to_string())],
+                    inline_style: None,
+                }],
+                inline_style: None,
+            }],
+            inline_style: None,
         },
-        SemanticNode::List,
         SemanticNode::ListItem {
-            text: "First".to_string(),
+            children: vec![SemanticNode::Paragraph {
+                runs: vec![InlineRun::plain("First".to_string())],
+                inline_style: None,
+            }],
+            inline_style: None,
         },
-        SemanticNode::Table,
-        SemanticNode::TableRow,
-        SemanticNode::TableCell,
+        SemanticNode::Table {
+            children: vec![SemanticNode::TableRow {
+                children: vec![SemanticNode::TableCell {
+                    header: true,
+                    children: vec![SemanticNode::Paragraph {
+                        runs: vec![InlineRun::plain("Name".to_string())],
+                        inline_style: None,
+                    }],
+                    inline_style: None,
+                }],
+            }],
+        },
+        SemanticNode::TableRow {
+            children: vec![SemanticNode::TableCell {
+                header: false,
+                children: vec![SemanticNode::Paragraph {
+                    runs: vec![InlineRun::plain("Alice".to_string())],
+                    inline_style: None,
+                }],
+                inline_style: None,
+            }],
+        },
+        SemanticNode::TableCell {
+            header: false,
+            children: vec![SemanticNode::Paragraph {
+                runs: vec![InlineRun::plain("Madrid".to_string())],
+                inline_style: None,
+            }],
+            inline_style: None,
+        },
         SemanticNode::Quote {
-            text: "Quoted".to_string(),
+            children: vec![SemanticNode::Paragraph {
+                runs: vec![InlineRun::plain("Quoted".to_string())],
+                inline_style: None,
+            }],
+            inline_style: None,
         },
         SemanticNode::CodeBlock {
             text: "let x = 1;".to_string(),
@@ -41,19 +83,59 @@ fn all_semantic_node_variants_construct() {
             title: Some("Architecture".to_string()),
             source: Some("https://example.com/diagram.png".to_string()),
         },
-        SemanticNode::Form,
-        SemanticNode::Input,
-        SemanticNode::Select,
-        SemanticNode::Button,
+        SemanticNode::Figure {
+            children: vec![SemanticNode::ImagePlaceholder {
+                alt: "Chart".to_string(),
+                title: None,
+                source: None,
+            }],
+            caption: Some(vec![InlineRun::plain("Figure 1".to_string())]),
+        },
+        SemanticNode::Form {
+            children: vec![SemanticNode::Button {
+                runs: vec![InlineRun::plain("Send".to_string())],
+                inline_style: None,
+            }],
+        },
+        SemanticNode::Input {
+            kind: InputKind::Password,
+            label: Some("Password".to_string()),
+            sensitive: true,
+        },
+        SemanticNode::Select {
+            label: Some("Country".to_string()),
+            options: vec!["Spain".to_string(), "United Kingdom".to_string()],
+        },
+        SemanticNode::Button {
+            runs: vec![InlineRun::plain("Submit".to_string())],
+            inline_style: None,
+        },
         SemanticNode::Separator,
-        SemanticNode::Landmark,
-        SemanticNode::Details,
-        SemanticNode::Summary,
-        SemanticNode::EmbeddedContent,
+        SemanticNode::Landmark {
+            role: LandmarkRole::Navigation,
+            children: vec![SemanticNode::Paragraph {
+                runs: vec![InlineRun::plain("Menu".to_string())],
+                inline_style: None,
+            }],
+        },
+        SemanticNode::Details {
+            open: false,
+            children: vec![SemanticNode::Summary {
+                runs: vec![InlineRun::plain("More".to_string())],
+                inline_style: None,
+            }],
+        },
+        SemanticNode::Summary {
+            runs: vec![InlineRun::plain("Details".to_string())],
+            inline_style: None,
+        },
+        SemanticNode::EmbeddedContent {
+            label: "video".to_string(),
+        },
         SemanticNode::Warning {
             message: "script element ignored".to_string(),
         },
     ];
 
-    assert_eq!(nodes.len(), 23);
+    assert_eq!(nodes.len(), 22);
 }

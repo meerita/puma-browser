@@ -4,13 +4,14 @@
 // @created meerita <meerita@icloud.com>
 
 use browser_css::{computed_style, Emphasis, ListMarker, TextStyle, WhiteSpace};
-use browser_html::SemanticNode;
+use browser_html::{InlineRun, SemanticNode};
 
 #[test]
 fn heading_is_bold_with_surrounding_spacing() {
     let style = computed_style(&SemanticNode::Heading {
         level: 1,
-        text: String::from("Title"),
+        runs: vec![InlineRun::plain(String::from("Title"))],
+        inline_style: None,
     });
 
     assert_eq!(style.emphasis, Emphasis::Bold);
@@ -21,7 +22,11 @@ fn heading_is_bold_with_surrounding_spacing() {
 #[test]
 fn list_item_uses_a_bullet_marker() {
     let style = computed_style(&SemanticNode::ListItem {
-        text: String::from("item"),
+        children: vec![SemanticNode::Paragraph {
+            runs: vec![InlineRun::plain(String::from("item"))],
+            inline_style: None,
+        }],
+        inline_style: None,
     });
 
     assert_eq!(style.list_marker, Some(ListMarker::Disc));
@@ -30,7 +35,8 @@ fn list_item_uses_a_bullet_marker() {
 #[test]
 fn plain_paragraph_uses_the_default_style() {
     let style = computed_style(&SemanticNode::Paragraph {
-        text: String::from("body text"),
+        runs: vec![InlineRun::plain(String::from("body text"))],
+        inline_style: None,
     });
 
     assert_eq!(style, TextStyle::default());
@@ -46,19 +52,13 @@ fn code_block_preserves_whitespace() {
 }
 
 #[test]
-fn link_is_underlined() {
-    let style = computed_style(&SemanticNode::Link {
-        text: String::from("home"),
-        href: String::from("/"),
-    });
-
-    assert!(style.underline);
-}
-
-#[test]
 fn quote_has_surrounding_spacing() {
     let style = computed_style(&SemanticNode::Quote {
-        text: String::from("quoted"),
+        children: vec![SemanticNode::Paragraph {
+            runs: vec![InlineRun::plain(String::from("quoted"))],
+            inline_style: None,
+        }],
+        inline_style: None,
     });
 
     assert_eq!(style.spacing_before, 1);

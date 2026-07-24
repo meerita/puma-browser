@@ -1,5 +1,5 @@
 // @file crates/browser-network/src/fetch.rs
-// @description HTTP/HTTPS fetch: timeout, safe capped redirects, bounded body, lossy UTF-8 decode.
+// @description HTTP/HTTPS fetch: timeout, safe capped redirects, bounded raw body, charset hint.
 // @layer network
 // @created meerita <meerita@icloud.com>
 
@@ -23,12 +23,13 @@ const MAX_REDIRECT_COUNT: usize = 10;
 /// How long a single request may take before it is abandoned.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Fetch `url` over HTTP or HTTPS and return the decoded response.
+/// Fetch `url` over HTTP or HTTPS and return the raw response.
 ///
 /// Redirects are followed manually so each hop can be validated: the target scheme
 /// must stay `http` or `https`, an HTTPS to HTTP downgrade is refused, and the chain
 /// is capped at [`MAX_REDIRECT_COUNT`]. The body is bounded at [`MAX_RESPONSE_BYTES`]
-/// while streaming and decoded to `String` with a lossy UTF-8 fallback.
+/// while streaming and returned undecoded; decoding to Unicode happens at the parse
+/// boundary, where a `<meta charset>` can be honored.
 pub async fn fetch(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
     let client = build_client()?;
     let mut current = Url::parse(url.as_str()).map_err(|_| NetworkError::InvalidUrl)?;
@@ -107,13 +108,14 @@ fn redirect_is_downgrade(current: &Url, next: &Url) -> bool {
 async fn collect_document(response: reqwest::Response) -> Result<FetchedDocument, NetworkError> {
     let final_url = BrowserUrl::parse(response.url().as_str())?;
     let content_type = content_type_of(&response);
+    let charset = charset_from_content_type(&content_type);
     if let Some(length) = response.content_length() {
         if length > MAX_RESPONSE_BYTES {
             return Err(NetworkError::ResponseTooLarge);
         }
     }
     let body = read_bounded_body(response).await?;
-    Ok(FetchedDocument::new(final_url, content_type, body))
+    Ok(FetchedDocument::new(final_url, content_type, charset, body))
 }
 
 fn content_type_of(response: &reqwest::Response) -> String {
@@ -125,9 +127,31 @@ fn content_type_of(response: &reqwest::Response) -> String {
         .to_string()
 }
 
-/// Stream the body into memory, stopping as soon as the size cap is crossed, and
-/// decode it to `String` with a lossy UTF-8 fallback.
-async fn read_bounded_body(response: reqwest::Response) -> Result<String, NetworkError> {
+/// Extract the charset parameter from a `Content-Type` header value, if present.
+///
+/// The value is read after a literal `charset=` up to the next parameter delimiter, with
+/// surrounding quotes removed. The parser resolves and validates the label; the network
+/// layer only surfaces it.
+fn charset_from_content_type(content_type: &str) -> Option<String> {
+    let lowered = content_type.to_ascii_lowercase();
+    let index = lowered.find("charset")?;
+    let after = content_type[index + "charset".len()..].trim_start();
+    let value = after.strip_prefix('=')?.trim();
+    let label = value
+        .trim_matches('"')
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if label.is_empty() {
+        return None;
+    }
+    Some(label.to_string())
+}
+
+/// Stream the body into memory, stopping as soon as the size cap is crossed, and return
+/// the raw bytes undecoded.
+async fn read_bounded_body(response: reqwest::Response) -> Result<Vec<u8>, NetworkError> {
     let mut collected: Vec<u8> = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -137,7 +161,7 @@ async fn read_bounded_body(response: reqwest::Response) -> Result<String, Networ
             return Err(NetworkError::ResponseTooLarge);
         }
     }
-    Ok(String::from_utf8_lossy(&collected).into_owned())
+    Ok(collected)
 }
 
 #[cfg(test)]

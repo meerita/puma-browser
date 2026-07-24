@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "browser-cli"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "browser-core",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "browser-core"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "browser-css",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "browser-css"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "browser-html",
@@ -174,18 +174,20 @@ dependencies = [
 
 [[package]]
 name = "browser-html"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
+ "encoding_rs",
  "html5ever",
  "serde",
  "thiserror 2.0.19",
  "tracing",
+ "url",
 ]
 
 [[package]]
 name = "browser-layout"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "browser-css",
@@ -198,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "browser-mcp"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "browser-core",
@@ -212,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "browser-network"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -228,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "browser-privacy"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "browser-storage",
@@ -239,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "browser-storage"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -252,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "browser-terminal"
-version = "0.2.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "browser-core",
@@ -629,6 +631,15 @@ name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
 
 [[package]]
 name = "equivalent"

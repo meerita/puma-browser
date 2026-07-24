@@ -3,12 +3,27 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{Document, SemanticNode};
-use browser_layout::{render_document, CellBuffer, LayoutError};
+use browser_css::Emphasis;
+use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
+use browser_layout::{render_document, CellBuffer, LayoutError, WidthConfig};
 use unicode_width::UnicodeWidthStr;
 
 fn document_of(nodes: Vec<SemanticNode>) -> Document {
     Document::new(nodes, None, 0)
+}
+
+fn paragraph(text: &str) -> SemanticNode {
+    SemanticNode::Paragraph {
+        runs: vec![InlineRun::plain(text.to_string())],
+        inline_style: None,
+    }
+}
+
+fn list_item(text: &str) -> SemanticNode {
+    SemanticNode::ListItem {
+        children: vec![paragraph(text)],
+        inline_style: None,
+    }
 }
 
 fn row_text(buffer: &CellBuffer, row: u16) -> String {
@@ -20,11 +35,9 @@ fn row_text(buffer: &CellBuffer, row: u16) -> String {
 
 #[test]
 fn zero_width_returns_zero_width_error() {
-    let document = document_of(vec![SemanticNode::Paragraph {
-        text: String::from("hello"),
-    }]);
+    let document = document_of(vec![paragraph("hello")]);
 
-    let outcome = render_document(&document, 0);
+    let outcome = render_document(&document, 0, &WidthConfig::default());
 
     assert!(matches!(outcome, Err(LayoutError::ZeroWidth)));
 }
@@ -33,9 +46,10 @@ fn zero_width_returns_zero_width_error() {
 fn long_paragraph_wraps_so_no_row_exceeds_the_width() {
     let width = 10u16;
     let words = vec!["word"; 40].join(" ");
-    let document = document_of(vec![SemanticNode::Paragraph { text: words }]);
+    let document = document_of(vec![paragraph(&words)]);
 
-    let buffer = render_document(&document, width).expect("paragraph must lay out");
+    let buffer =
+        render_document(&document, width, &WidthConfig::default()).expect("paragraph must lay out");
 
     assert!(
         buffer.height() > 1,
@@ -53,17 +67,18 @@ fn heading_and_two_list_items_produce_expected_rows_and_bullets() {
     let document = document_of(vec![
         SemanticNode::Heading {
             level: 1,
-            text: String::from("Title"),
+            runs: vec![InlineRun::plain(String::from("Title"))],
+            inline_style: None,
         },
-        SemanticNode::ListItem {
-            text: String::from("one"),
-        },
-        SemanticNode::ListItem {
-            text: String::from("two"),
+        SemanticNode::List {
+            ordered: false,
+            children: vec![list_item("one"), list_item("two")],
+            inline_style: None,
         },
     ]);
 
-    let buffer = render_document(&document, 40).expect("document must lay out");
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("document must lay out");
 
     // One blank row before and after the heading, then one row per list item.
     assert_eq!(buffer.height(), 5);
@@ -74,12 +89,95 @@ fn heading_and_two_list_items_produce_expected_rows_and_bullets() {
 }
 
 #[test]
+fn ordered_list_items_render_running_numbers() {
+    let document = document_of(vec![SemanticNode::List {
+        ordered: true,
+        children: vec![list_item("x"), list_item("y")],
+        inline_style: None,
+    }]);
+
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("ordered list must lay out");
+
+    assert_eq!(row_text(&buffer, 0).trim_end(), "1. x");
+    assert_eq!(row_text(&buffer, 1).trim_end(), "2. y");
+}
+
+#[test]
+fn a_nested_unordered_list_indents_one_level_under_its_parent() {
+    let inner = SemanticNode::List {
+        ordered: false,
+        children: vec![list_item("b")],
+        inline_style: None,
+    };
+    let document = document_of(vec![SemanticNode::List {
+        ordered: false,
+        children: vec![SemanticNode::ListItem {
+            children: vec![paragraph("a"), inner],
+            inline_style: None,
+        }],
+        inline_style: None,
+    }]);
+
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("nested list must lay out");
+
+    assert_eq!(row_text(&buffer, 0).trim_end(), "• a");
+    assert_eq!(row_text(&buffer, 1).trim_end(), "  • b");
+}
+
+#[test]
+fn ordered_numbering_restarts_within_each_nested_list() {
+    let inner = SemanticNode::List {
+        ordered: true,
+        children: vec![list_item("b"), list_item("c")],
+        inline_style: None,
+    };
+    let document = document_of(vec![SemanticNode::List {
+        ordered: true,
+        children: vec![
+            SemanticNode::ListItem {
+                children: vec![paragraph("a"), inner],
+                inline_style: None,
+            },
+            list_item("d"),
+        ],
+        inline_style: None,
+    }]);
+
+    let buffer = render_document(&document, 40, &WidthConfig::default())
+        .expect("nested ordered list must lay out");
+
+    let rows: Vec<String> = (0..buffer.height())
+        .map(|row| row_text(&buffer, row).trim_end().to_string())
+        .collect();
+    // The nested list restarts at 1, and the outer list resumes at 2 after it.
+    assert_eq!(rows, vec!["1. a", "   1. b", "   2. c", "2. d"]);
+}
+
+#[test]
+fn a_wrapped_list_item_aligns_its_continuation_under_the_item_text() {
+    let document = document_of(vec![SemanticNode::List {
+        ordered: false,
+        children: vec![list_item("alpha beta")],
+        inline_style: None,
+    }]);
+
+    let buffer = render_document(&document, 7, &WidthConfig::default()).expect("list must lay out");
+
+    // "• alpha" fills the width; "beta" wraps and indents under the item text, not the marker.
+    assert_eq!(row_text(&buffer, 0).trim_end(), "• alpha");
+    assert_eq!(row_text(&buffer, 1).trim_end(), "  beta");
+}
+
+#[test]
 fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
     let document = document_of(vec![SemanticNode::CodeBlock {
         text: String::from("abcdefghij\nkl"),
     }]);
 
-    let buffer = render_document(&document, 5).expect("code block must lay out");
+    let buffer =
+        render_document(&document, 5, &WidthConfig::default()).expect("code block must lay out");
 
     // Two source lines stay two rows; the long line is clipped to the width, not wrapped.
     assert_eq!(buffer.height(), 2);
@@ -89,11 +187,10 @@ fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
 
 #[test]
 fn combining_mark_grapheme_occupies_a_single_cell() {
-    let document = document_of(vec![SemanticNode::Paragraph {
-        text: String::from("e\u{0301}x"),
-    }]);
+    let document = document_of(vec![paragraph("e\u{0301}x")]);
 
-    let buffer = render_document(&document, 10).expect("paragraph must lay out");
+    let buffer =
+        render_document(&document, 10, &WidthConfig::default()).expect("paragraph must lay out");
 
     assert_eq!(
         buffer.cell_at(0, 0).expect("cluster cell").grapheme(),
@@ -104,11 +201,10 @@ fn combining_mark_grapheme_occupies_a_single_cell() {
 
 #[test]
 fn double_width_grapheme_advances_two_columns() {
-    let document = document_of(vec![SemanticNode::Paragraph {
-        text: String::from("x界y"),
-    }]);
+    let document = document_of(vec![paragraph("x界y")]);
 
-    let buffer = render_document(&document, 10).expect("paragraph must lay out");
+    let buffer =
+        render_document(&document, 10, &WidthConfig::default()).expect("paragraph must lay out");
 
     assert_eq!(buffer.cell_at(0, 0).expect("first cell").grapheme(), "x");
     assert_eq!(buffer.cell_at(1, 0).expect("wide cell").grapheme(), "界");
@@ -121,11 +217,160 @@ fn double_width_grapheme_advances_two_columns() {
 }
 
 #[test]
+fn representative_document_renders_to_the_expected_rows() {
+    let document = document_of(vec![
+        SemanticNode::Heading {
+            level: 1,
+            runs: vec![InlineRun::plain(String::from("Title"))],
+            inline_style: None,
+        },
+        paragraph("Body text"),
+        SemanticNode::List {
+            ordered: false,
+            children: vec![list_item("one"), list_item("two")],
+            inline_style: None,
+        },
+        SemanticNode::Quote {
+            children: vec![paragraph("Quoted")],
+            inline_style: None,
+        },
+        SemanticNode::Separator,
+    ]);
+
+    let buffer =
+        render_document(&document, 20, &WidthConfig::default()).expect("document must lay out");
+
+    let rows: Vec<String> = (0..buffer.height())
+        .map(|row| row_text(&buffer, row).trim_end().to_string())
+        .collect();
+
+    assert_eq!(
+        rows,
+        vec![
+            String::new(),         // heading spacing before
+            String::from("Title"), // heading
+            String::new(),         // heading spacing after
+            String::from("Body text"),
+            String::from("• one"), // list, no surrounding spacing
+            String::from("• two"),
+            String::new(),                        // quote spacing before
+            String::from("  Quoted"),             // quote indented two columns
+            String::new(),                        // quote spacing after
+            String::from("────────────────────"), // separator fills the width
+        ]
+    );
+}
+
+fn strong_run(text: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis {
+            strong: true,
+            emphasis: false,
+            code: false,
+        },
+        link: None,
+    }
+}
+
+fn linked_run(text: &str, href: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis::none(),
+        link: Some(href.to_string()),
+    }
+}
+
+#[test]
+fn a_multi_run_paragraph_applies_each_runs_own_emphasis() {
+    let document = document_of(vec![SemanticNode::Paragraph {
+        runs: vec![
+            InlineRun::plain(String::from("word ")),
+            strong_run("bold"),
+            InlineRun::plain(String::from(" tail")),
+        ],
+        inline_style: None,
+    }]);
+
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("paragraph must lay out");
+
+    assert_eq!(row_text(&buffer, 0).trim_end(), "word bold tail");
+    // "word " occupies columns 0..5, "bold" columns 5..9, " tail" from column 9.
+    assert_eq!(
+        buffer.cell_at(0, 0).expect("plain cell").emphasis(),
+        Emphasis::None
+    );
+    assert_eq!(
+        buffer.cell_at(5, 0).expect("bold cell").emphasis(),
+        Emphasis::Bold
+    );
+    assert_eq!(
+        buffer.cell_at(8, 0).expect("bold cell").emphasis(),
+        Emphasis::Bold
+    );
+    assert_eq!(
+        buffer.cell_at(10, 0).expect("plain cell").emphasis(),
+        Emphasis::None
+    );
+}
+
+#[test]
+fn a_linked_run_is_underlined_while_plain_text_is_not() {
+    let document = document_of(vec![SemanticNode::Paragraph {
+        runs: vec![
+            InlineRun::plain(String::from("see ")),
+            linked_run("link", "/x"),
+        ],
+        inline_style: None,
+    }]);
+
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("paragraph must lay out");
+
+    assert_eq!(row_text(&buffer, 0).trim_end(), "see link");
+    // "see " occupies columns 0..4, "link" columns 4..8.
+    assert!(!buffer.cell_at(0, 0).expect("plain cell").underline());
+    assert!(buffer.cell_at(4, 0).expect("link cell").underline());
+    assert!(buffer.cell_at(7, 0).expect("link cell").underline());
+}
+
+#[test]
+fn run_boundaries_do_not_change_word_wrapping() {
+    let width = 12u16;
+    let plain = document_of(vec![paragraph("hello wonderful world")]);
+    // The same visible text, split into runs mid-word and at a space, must wrap the same.
+    let marked = document_of(vec![SemanticNode::Paragraph {
+        runs: vec![
+            InlineRun::plain(String::from("hello won")),
+            strong_run("der"),
+            InlineRun::plain(String::from("ful world")),
+        ],
+        inline_style: None,
+    }]);
+
+    let plain_buffer = render_document(&plain, width, &WidthConfig::default())
+        .expect("plain paragraph must lay out");
+    let marked_buffer = render_document(&marked, width, &WidthConfig::default())
+        .expect("marked paragraph must lay out");
+
+    let plain_rows: Vec<String> = (0..plain_buffer.height())
+        .map(|row| row_text(&plain_buffer, row).trim_end().to_string())
+        .collect();
+    let marked_rows: Vec<String> = (0..marked_buffer.height())
+        .map(|row| row_text(&marked_buffer, row).trim_end().to_string())
+        .collect();
+
+    assert_eq!(plain_rows, marked_rows);
+    assert_eq!(plain_rows, vec!["hello", "wonderful", "world"]);
+}
+
+#[test]
 fn document_taller_than_the_addressable_range_returns_dimension_overflow() {
     let nodes = vec![SemanticNode::Separator; usize::from(u16::MAX) + 1];
     let document = document_of(nodes);
 
-    let outcome = render_document(&document, 4);
+    let outcome = render_document(&document, 4, &WidthConfig::default());
 
     assert!(matches!(outcome, Err(LayoutError::DimensionOverflow)));
 }

@@ -1,5 +1,5 @@
 // @file crates/browser-html/src/parser.rs
-// @description Parses HTML into a flat Document of block nodes with sanitized, script-free text.
+// @description Parses HTML into a recursive Document tree of sanitized, script-free nodes.
 // @layer html
 // @created meerita <meerita@icloud.com>
 
@@ -9,9 +9,14 @@ use std::cell::{Cell, Ref, RefCell};
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::{parse_document, Attribute, LocalName, Namespace, ParseOpts, QualName};
+use url::Url;
 
 use crate::document::{Document, DocumentTitle};
+use crate::encoding::{decode, detect_encoding, DetectedEncoding};
 use crate::error::HtmlError;
+use crate::inline_run::{InlineEmphasis, InlineRun};
+use crate::input_kind::InputKind;
+use crate::landmark_role::LandmarkRole;
 use crate::sanitize::{
     collapse_whitespace, strip_control_characters, strip_control_characters_preserving_layout,
 };
@@ -29,13 +34,31 @@ const MAX_NODE_COUNT: usize = 50_000;
 /// walked, so the parser rejects any document that nests past this depth.
 const MAX_DOM_DEPTH: usize = 256;
 
-/// Parse an HTML source string into a flat [`Document`] of block nodes.
+/// Upper bound on the number of rows retained from a single table.
 ///
-/// All text taken from the source is stripped of control characters before it enters a
-/// node or the title, `<script>` elements are counted and never retained, and the node
-/// count and nesting depth are bounded so untrusted input cannot exhaust memory.
-pub fn parse_html(source: &str) -> Result<Document, HtmlError> {
-    let dom = parse_document(DomBuilder::new(), ParseOpts::default()).one(source);
+/// A table with far more rows than this is a memory hazard from untrusted markup and
+/// cannot render usefully, so it is truncated to this many rows and a warning is emitted.
+const MAX_TABLE_ROWS: usize = 1_000;
+
+/// Upper bound on the number of columns (cells) retained from a single table row.
+///
+/// A row far wider than the terminal cannot render as columns and only inflates the node
+/// count, so each row is truncated to this many cells and a warning is emitted.
+const MAX_TABLE_COLUMNS: usize = 64;
+
+/// Parse HTML document bytes into a recursive [`Document`] tree.
+///
+/// The bytes are decoded to Unicode before parsing: the encoding is detected from a
+/// byte-order mark, then the `Content-Type` charset hint, then a bounded `<meta charset>`
+/// pre-scan, then a UTF-8 fallback, and decoding replaces malformed bytes rather than
+/// failing. All decoded text is stripped of control characters before it enters a node
+/// or the title, `<script>` elements are counted and never retained, and the node count
+/// and nesting depth are bounded so untrusted input cannot exhaust memory.
+pub fn parse_html(source: &[u8], charset_hint: Option<&str>) -> Result<Document, HtmlError> {
+    let (encoding, mark_length) = detect_encoding(source, charset_hint);
+    let decoded = decode(source, encoding, mark_length);
+
+    let dom = parse_document(DomBuilder::new(), ParseOpts::default()).one(decoded.as_str());
 
     if let Some(error) = dom.limit_error() {
         return Err(error);
@@ -43,18 +66,21 @@ pub fn parse_html(source: &str) -> Result<Document, HtmlError> {
 
     let arena = dom.into_nodes();
     let title = extract_title(&arena).map(|raw| DocumentTitle::new(&raw));
+    let base_url = extract_base_url(&arena);
 
-    let mut extractor = BlockExtractor::new(&arena);
-    extractor.walk_children(DOCUMENT_HANDLE);
-    let (mut nodes, script_count) = extractor.finish();
+    let mut extractor = TreeExtractor::new(&arena, base_url);
+    let mut children = extractor.walk_children(DOCUMENT_HANDLE);
+    let script_count = extractor.script_count();
 
     if script_count > 0 {
-        nodes.push(SemanticNode::Warning {
+        children.push(SemanticNode::Warning {
             message: suppressed_scripts_message(script_count),
         });
     }
 
-    Ok(Document::new(nodes, title, script_count))
+    // The detected and active encoding coincide because no override is applied here.
+    let detected = DetectedEncoding::new(encoding, encoding);
+    Ok(Document::new(children, title, script_count).with_encoding(detected))
 }
 
 /// Handle of the document root node, created first by [`DomBuilder::new`].
@@ -379,111 +405,626 @@ impl TreeSink for DomBuilder {
     }
 }
 
-/// Walks a finished node arena into a flat stream of block [`SemanticNode`]s.
-struct BlockExtractor<'a> {
+/// Walks a finished node arena into a recursive tree of [`SemanticNode`]s.
+///
+/// Each walk method returns the block-level children it produces; container elements
+/// recurse into their own children, so the returned tree owns itself. The script count
+/// accumulates across the whole walk so it can be reported once parsing ends. The base
+/// URL, taken from the document's `<base href>`, resolves relative link and image
+/// references as runs and image placeholders are built.
+struct TreeExtractor<'a> {
     arena: &'a [Node],
-    blocks: Vec<SemanticNode>,
     script_count: usize,
+    base_url: Option<Url>,
 }
 
-impl<'a> BlockExtractor<'a> {
-    fn new(arena: &'a [Node]) -> BlockExtractor<'a> {
-        BlockExtractor {
+impl<'a> TreeExtractor<'a> {
+    fn new(arena: &'a [Node], base_url: Option<Url>) -> TreeExtractor<'a> {
+        TreeExtractor {
             arena,
-            blocks: Vec::new(),
             script_count: 0,
+            base_url,
         }
     }
 
-    fn finish(self) -> (Vec<SemanticNode>, usize) {
-        (self.blocks, self.script_count)
+    fn script_count(&self) -> usize {
+        self.script_count
     }
 
-    fn walk_children(&mut self, container: usize) {
+    fn walk_children(&mut self, container: usize) -> Vec<SemanticNode> {
+        let mut output = Vec::new();
+        self.walk_children_into(container, &mut output);
+        output
+    }
+
+    fn walk_children_into(&mut self, container: usize, output: &mut Vec<SemanticNode>) {
         for child in self.child_handles(container) {
-            self.walk_node(child);
+            self.walk_node(child, output);
         }
     }
 
-    fn walk_node(&mut self, node: usize) {
+    fn walk_node(&mut self, node: usize, output: &mut Vec<SemanticNode>) {
         let entry = &self.arena[node];
         if entry.text.is_some() {
             return;
         }
         if !entry.is_element {
-            self.walk_children(node);
+            self.walk_children_into(node, output);
             return;
         }
-        self.handle_element(node);
+        self.handle_element(node, output);
     }
 
-    fn handle_element(&mut self, element: usize) {
+    fn handle_element(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
         let tag = local_name(&self.arena[element].name).to_string();
         if let Some(level) = heading_level(&tag) {
-            self.push_text_block(element, |text| SemanticNode::Heading { level, text });
+            self.push_heading(element, level, output);
             return;
         }
-        self.map_named_element(element, &tag);
+        self.map_named_element(element, &tag, output);
     }
 
-    fn map_named_element(&mut self, element: usize, tag: &str) {
+    fn map_named_element(&mut self, element: usize, tag: &str, output: &mut Vec<SemanticNode>) {
         match tag {
             "script" => self.script_count += 1,
             "style" | "title" => {}
-            "p" => self.push_text_block(element, |text| SemanticNode::Paragraph { text }),
-            "li" => self.push_text_block(element, |text| SemanticNode::ListItem { text }),
-            "blockquote" => self.push_text_block(element, |text| SemanticNode::Quote { text }),
-            "pre" => {
-                self.push_verbatim_block(element, |text| SemanticNode::PreformattedBlock { text })
+            "p" => self.push_paragraph(element, output),
+            "ul" => self.push_list(element, false, output),
+            "ol" => self.push_list(element, true, output),
+            "blockquote" => self.push_quote(element, output),
+            "pre" => self.push_verbatim_block(element, output, |text| {
+                SemanticNode::PreformattedBlock { text }
+            }),
+            "code" => {
+                self.push_verbatim_block(element, output, |text| SemanticNode::CodeBlock { text })
             }
-            "code" => self.push_verbatim_block(element, |text| SemanticNode::CodeBlock { text }),
-            "hr" => self.blocks.push(SemanticNode::Separator),
-            "img" => self.push_image(element),
-            "a" => self.handle_anchor(element),
-            _ => self.walk_children(element),
+            "table" => self.push_table(element, output),
+            "hr" => output.push(SemanticNode::Separator),
+            "img" => self.push_image(element, output),
+            "figure" => self.push_figure(element, output),
+            "details" => self.push_details(element, output),
+            "summary" => self.push_summary(element, output),
+            "form" => self.push_form(element, output),
+            "input" | "textarea" => self.push_input(element, output),
+            "select" => self.push_select(element, output),
+            "button" => self.push_button(element, output),
+            "iframe" | "object" | "embed" | "video" | "audio" => {
+                output.push(SemanticNode::EmbeddedContent {
+                    label: embedded_label(tag).to_string(),
+                })
+            }
+            "nav" | "main" | "aside" | "footer" | "header" | "section" => {
+                self.push_landmark(element, tag, output)
+            }
+            _ => self.push_landmark_or_walk(element, output),
         }
     }
 
-    fn handle_anchor(&mut self, element: usize) {
-        let Some(href) = self.attribute(element, "href").map(sanitize_reference) else {
-            self.walk_children(element);
+    /// Map a container that is not a known block element.
+    ///
+    /// A generic container carrying an ARIA landmark `role` becomes a `Landmark`; any
+    /// other container contributes only its children, so unknown wrappers stay transparent.
+    fn push_landmark_or_walk(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let Some(role) = self
+            .attribute(element, "role")
+            .and_then(|role| LandmarkRole::from_aria_role(&role))
+        else {
+            self.walk_children_into(element, output);
             return;
         };
-        let text = self.block_text(element);
-        self.blocks.push(SemanticNode::Link { text, href });
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Landmark { role, children });
     }
 
-    fn push_image(&mut self, element: usize) {
+    fn push_heading(&mut self, element: usize, level: u8, output: &mut Vec<SemanticNode>) {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Heading {
+            level,
+            runs,
+            inline_style: self.inline_style(element),
+        });
+    }
+
+    fn push_paragraph(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Paragraph {
+            runs,
+            inline_style: self.inline_style(element),
+        });
+    }
+
+    fn push_list(&mut self, element: usize, ordered: bool, output: &mut Vec<SemanticNode>) {
+        let children = self.list_items(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::List {
+            ordered,
+            children,
+            inline_style: self.inline_style(element),
+        });
+    }
+
+    fn push_quote(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Quote {
+            children,
+            inline_style: self.inline_style(element),
+        });
+    }
+
+    /// Map a `<table>` into a `Table` of `TableRow`s of `TableCell`s.
+    ///
+    /// Rows exceeding [`MAX_TABLE_ROWS`] and cells exceeding [`MAX_TABLE_COLUMNS`] per row
+    /// are dropped and a `Warning` describing the truncation follows the table, so
+    /// untrusted markup cannot expand a table without bound.
+    fn push_table(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let mut rows = Vec::new();
+        self.collect_table_rows(element, &mut rows);
+        let rows_truncated = rows.len() > MAX_TABLE_ROWS;
+        rows.truncate(MAX_TABLE_ROWS);
+        let columns_truncated = truncate_row_columns(&mut rows);
+        if rows.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Table { children: rows });
+        if rows_truncated || columns_truncated {
+            output.push(SemanticNode::Warning {
+                message: table_truncation_message(rows_truncated, columns_truncated),
+            });
+        }
+    }
+
+    /// Gather a table's rows in source order, flattening `<thead>`/`<tbody>`/`<tfoot>`
+    /// wrappers so their rows join the sequence at the table's own level.
+    fn collect_table_rows(&mut self, container: usize, rows: &mut Vec<SemanticNode>) {
+        for child in self.child_handles(container) {
+            self.collect_row_or_section(child, rows);
+        }
+    }
+
+    fn collect_row_or_section(&mut self, node: usize, rows: &mut Vec<SemanticNode>) {
+        let entry = &self.arena[node];
+        if !entry.is_element {
+            return;
+        }
+        let tag = local_name(&entry.name).to_string();
+        if tag == "tr" {
+            self.push_table_row(node, rows);
+            return;
+        }
+        if is_table_section(&tag) {
+            self.collect_table_rows(node, rows);
+        }
+    }
+
+    fn push_table_row(&mut self, node: usize, rows: &mut Vec<SemanticNode>) {
+        let mut cells = Vec::new();
+        for child in self.child_handles(node) {
+            self.push_table_cell(child, &mut cells);
+        }
+        if cells.is_empty() {
+            return;
+        }
+        rows.push(SemanticNode::TableRow { children: cells });
+    }
+
+    fn push_table_cell(&mut self, node: usize, cells: &mut Vec<SemanticNode>) {
+        let entry = &self.arena[node];
+        if !entry.is_element {
+            return;
+        }
+        let tag = local_name(&entry.name).to_string();
+        let header = tag == "th";
+        if !header && tag != "td" {
+            return;
+        }
+        // colspan and rowspan are ignored: each cell occupies exactly one column
+        // position, so a spanned cell is rendered as a single cell rather than widened.
+        // Honoring spans needs a grid model that a later table milestone will add.
+        let children = self.block_children(node);
+        cells.push(SemanticNode::TableCell {
+            header,
+            children,
+            inline_style: self.inline_style(node),
+        });
+    }
+
+    fn list_items(&mut self, element: usize) -> Vec<SemanticNode> {
+        let mut items = Vec::new();
+        for child in self.child_handles(element) {
+            self.push_list_item(child, &mut items);
+        }
+        items
+    }
+
+    fn push_list_item(&mut self, node: usize, items: &mut Vec<SemanticNode>) {
+        if !self.is_list_item_element(node) {
+            return;
+        }
+        let children = self.block_children(node);
+        if children.is_empty() {
+            return;
+        }
+        items.push(SemanticNode::ListItem {
+            children,
+            inline_style: self.inline_style(node),
+        });
+    }
+
+    fn is_list_item_element(&self, node: usize) -> bool {
+        let entry = &self.arena[node];
+        entry.is_element && local_name(&entry.name) == "li"
+    }
+
+    /// Gather the block-level children of a container, preserving source order.
+    ///
+    /// Block children (paragraphs, nested lists, quotes, and the like) are walked in
+    /// place. Runs of bare inline content between them (text, links, emphasis directly
+    /// inside the container) are collected into anonymous paragraphs, so a list item that
+    /// holds text followed by a nested list keeps both parts in their original order. A
+    /// container whose whole content is inline yields a single paragraph.
+    fn block_children(&mut self, element: usize) -> Vec<SemanticNode> {
+        let mut output = Vec::new();
+        let mut inline_children: Vec<usize> = Vec::new();
+        for child in self.child_handles(element) {
+            if !self.child_is_block_level(child) {
+                inline_children.push(child);
+                continue;
+            }
+            self.flush_inline_paragraph(&inline_children, &mut output);
+            inline_children.clear();
+            self.walk_node(child, &mut output);
+        }
+        self.flush_inline_paragraph(&inline_children, &mut output);
+        output
+    }
+
+    /// Whether a child, once walked, contributes block-level content rather than inline
+    /// text.
+    ///
+    /// A child is block-level when its subtree holds an element that maps to a block node
+    /// (a paragraph, list, quote, heading, separator, image, or preformatted block). Text
+    /// nodes and inline markup (links, emphasis) are not block-level, so they are gathered
+    /// into anonymous paragraphs instead of being walked as blocks.
+    fn child_is_block_level(&self, node: usize) -> bool {
+        let entry = &self.arena[node];
+        if entry.is_element && is_block_tag(local_name(&entry.name)) {
+            return true;
+        }
+        entry
+            .children
+            .iter()
+            .any(|child| self.child_is_block_level(*child))
+    }
+
+    /// Collapse a run of inline children into one paragraph and push it.
+    ///
+    /// Whitespace-only content collapses to no runs and contributes no paragraph, matching
+    /// how a plain text block drops surrounding whitespace.
+    fn flush_inline_paragraph(
+        &mut self,
+        inline_children: &[usize],
+        output: &mut Vec<SemanticNode>,
+    ) {
+        if inline_children.is_empty() {
+            return;
+        }
+        let context = InlineContext::root();
+        let mut segments = Vec::new();
+        for child in inline_children {
+            self.gather_segments(*child, &context, &mut segments);
+        }
+        let runs = collapse_segments(segments);
+        if runs.is_empty() {
+            return;
+        }
+        // An anonymous paragraph gathers bare inline content that has no element of its
+        // own, so it carries no inline style.
+        output.push(SemanticNode::Paragraph {
+            runs,
+            inline_style: None,
+        });
+    }
+
+    /// Gather a text block's content into a sequence of styled inline runs.
+    ///
+    /// A new run starts at every boundary where the emphasis (`<strong>`/`<b>`,
+    /// `<em>`/`<i>`, inline `<code>`) or the link target changes. Whitespace is collapsed
+    /// across the whole block, exactly as plain block text is collapsed, so wrapping is
+    /// unaffected by where runs begin and end. An empty block yields no run so it is
+    /// dropped upstream.
+    fn block_runs(&mut self, element: usize) -> Vec<InlineRun> {
+        let mut segments = Vec::new();
+        self.gather_segments(element, &InlineContext::root(), &mut segments);
+        collapse_segments(segments)
+    }
+
+    /// Walk a block's descendants in order, recording each text node as a segment tagged
+    /// with the emphasis and link in force at that point.
+    fn gather_segments(
+        &mut self,
+        node: usize,
+        context: &InlineContext,
+        segments: &mut Vec<Segment>,
+    ) {
+        let entry = &self.arena[node];
+        if let Some(text) = &entry.text {
+            segments.push(Segment::new(text, context));
+            return;
+        }
+        if entry.is_element {
+            self.gather_element_segments(node, context, segments);
+            return;
+        }
+        self.gather_children_segments(node, context, segments);
+    }
+
+    fn gather_element_segments(
+        &mut self,
+        element: usize,
+        context: &InlineContext,
+        segments: &mut Vec<Segment>,
+    ) {
+        let tag = local_name(&self.arena[element].name).to_string();
+        if tag == "script" {
+            self.script_count += 1;
+            return;
+        }
+        if tag == "style" {
+            return;
+        }
+        let child_context = self.child_context(element, &tag, context);
+        self.gather_children_segments(element, &child_context, segments);
+    }
+
+    fn gather_children_segments(
+        &mut self,
+        node: usize,
+        context: &InlineContext,
+        segments: &mut Vec<Segment>,
+    ) {
+        for child in self.child_handles(node) {
+            self.gather_segments(child, context, segments);
+        }
+    }
+
+    /// Derive the inline context for an element's children by folding the element's own
+    /// emphasis or link onto the surrounding context.
+    fn child_context(&self, element: usize, tag: &str, context: &InlineContext) -> InlineContext {
+        let mut child = context.clone();
+        match tag {
+            "strong" | "b" => child.emphasis.strong = true,
+            "em" | "i" => child.emphasis.emphasis = true,
+            "code" => child.emphasis.code = true,
+            "a" => child.link = self.anchor_link(element).or_else(|| context.link.clone()),
+            _ => {}
+        }
+        child
+    }
+
+    /// The resolved link target of an anchor, or `None` when it has no usable `href`.
+    ///
+    /// An anchor without an `href` contributes plain text, so its descendants keep the
+    /// surrounding link context rather than gaining one.
+    fn anchor_link(&self, element: usize) -> Option<String> {
+        let reference = sanitize_reference(self.attribute(element, "href")?);
+        if reference.is_empty() {
+            return None;
+        }
+        Some(resolve_reference(&reference, self.base_url.as_ref()))
+    }
+
+    fn push_image(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
         let alt = self
             .attribute(element, "alt")
             .map(sanitize_inline)
             .unwrap_or_default();
         let title = self.attribute(element, "title").map(sanitize_inline);
-        let source = self.attribute(element, "src").map(sanitize_reference);
-        self.blocks
-            .push(SemanticNode::ImagePlaceholder { alt, title, source });
+        let source = self
+            .attribute(element, "src")
+            .map(sanitize_reference)
+            .map(|reference| resolve_reference(&reference, self.base_url.as_ref()));
+        output.push(SemanticNode::ImagePlaceholder { alt, title, source });
     }
 
-    fn push_text_block(&mut self, element: usize, build: impl FnOnce(String) -> SemanticNode) {
-        let text = self.block_text(element);
-        if text.is_empty() {
+    /// Map a `<figure>` into a `Figure`, lifting a `<figcaption>` out as the caption and
+    /// keeping the remaining content as the figure's children in source order.
+    fn push_figure(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let mut children = Vec::new();
+        let mut caption = None;
+        for child in self.child_handles(element) {
+            if self.is_element_named(child, "figcaption") {
+                caption = self.non_empty_runs(child);
+                continue;
+            }
+            self.walk_node(child, &mut children);
+        }
+        if children.is_empty() && caption.is_none() {
             return;
         }
-        self.blocks.push(build(text));
+        output.push(SemanticNode::Figure { children, caption });
     }
 
-    fn push_verbatim_block(&mut self, element: usize, build: impl FnOnce(String) -> SemanticNode) {
+    /// Map a `<details>` into a `Details`. Its `<summary>` child folds into a `Summary`
+    /// node through the block walk, so the summary and the body keep their source order.
+    fn push_details(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let open = self.attribute(element, "open").is_some();
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Details { open, children });
+    }
+
+    fn push_summary(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Summary {
+            runs,
+            inline_style: self.inline_style(element),
+        });
+    }
+
+    fn push_form(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Form { children });
+    }
+
+    fn push_landmark(&mut self, element: usize, tag: &str, output: &mut Vec<SemanticNode>) {
+        let role = self.landmark_role(element, tag);
+        let children = self.block_children(element);
+        if children.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::Landmark { role, children });
+    }
+
+    /// The landmark role of an element: an explicit ARIA `role` attribute wins over the
+    /// role implied by the element name.
+    fn landmark_role(&self, element: usize, tag: &str) -> LandmarkRole {
+        let aria = self
+            .attribute(element, "role")
+            .and_then(|role| LandmarkRole::from_aria_role(&role));
+        aria.or_else(|| LandmarkRole::from_tag(tag))
+            .unwrap_or(LandmarkRole::Region)
+    }
+
+    /// Map an `<input>` or `<textarea>` into an inert `Input` placeholder.
+    ///
+    /// The control's value is never read: a `type="password"` input is marked sensitive
+    /// and, like every other input, carries no value into the tree.
+    fn push_input(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let kind = InputKind::from_type_attribute(self.attribute(element, "type").as_deref());
+        let sensitive = kind.is_sensitive();
+        let label = self.control_label(element);
+        output.push(SemanticNode::Input {
+            kind,
+            label,
+            sensitive,
+        });
+    }
+
+    fn push_select(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let label = self.control_label(element);
+        let mut options = Vec::new();
+        self.collect_options(element, &mut options);
+        output.push(SemanticNode::Select { label, options });
+    }
+
+    /// Gather a select's option labels in source order, descending through `<optgroup>`
+    /// wrappers so grouped options join the flat list.
+    fn collect_options(&self, node: usize, options: &mut Vec<String>) {
+        for child in self.child_handles(node) {
+            if self.is_element_named(child, "option") {
+                options.push(self.plain_text_of(child));
+                continue;
+            }
+            if !self.arena[child].is_element {
+                continue;
+            }
+            self.collect_options(child, options);
+        }
+    }
+
+    fn push_button(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let runs = self.block_runs(element);
+        output.push(SemanticNode::Button {
+            runs,
+            inline_style: self.inline_style(element),
+        });
+    }
+
+    /// The accessible label of a form control.
+    ///
+    /// An explicit `aria-label` wins, then a `<label for=...>` matching the control's
+    /// `id`, then an ancestor `<label>` that wraps the control. A control with none of
+    /// these has no label.
+    fn control_label(&self, element: usize) -> Option<String> {
+        if let Some(aria) = self.attribute(element, "aria-label") {
+            return non_empty_text(sanitize_inline(aria));
+        }
+        if let Some(text) = self.label_for_control(element) {
+            return non_empty_text(text);
+        }
+        self.wrapping_label_text(element).and_then(non_empty_text)
+    }
+
+    /// The text of a `<label for=id>` associated with the control by its `id`.
+    fn label_for_control(&self, element: usize) -> Option<String> {
+        let id = self.attribute(element, "id")?;
+        for (candidate, node) in self.arena.iter().enumerate() {
+            if !node.is_element || local_name(&node.name) != "label" {
+                continue;
+            }
+            if !attribute_equals(node, "for", &id) {
+                continue;
+            }
+            return Some(self.plain_text_of(candidate));
+        }
+        None
+    }
+
+    /// The text of the nearest ancestor `<label>` that wraps the control, if any.
+    fn wrapping_label_text(&self, element: usize) -> Option<String> {
+        let mut ancestor = self.arena[element].parent;
+        while let Some(node) = ancestor {
+            if self.is_element_named(node, "label") {
+                return Some(self.plain_text_of(node));
+            }
+            ancestor = self.arena[node].parent;
+        }
+        None
+    }
+
+    /// The runs of a text block, or `None` when the block collapses to nothing.
+    fn non_empty_runs(&mut self, element: usize) -> Option<Vec<InlineRun>> {
+        let runs = self.block_runs(element);
+        if runs.is_empty() {
+            return None;
+        }
+        Some(runs)
+    }
+
+    fn is_element_named(&self, node: usize, name: &str) -> bool {
+        let entry = &self.arena[node];
+        entry.is_element && local_name(&entry.name) == name
+    }
+
+    fn plain_text_of(&self, node: usize) -> String {
+        let mut raw = String::new();
+        gather_plain_text(self.arena, node, &mut raw);
+        sanitize_inline(raw)
+    }
+
+    fn push_verbatim_block(
+        &mut self,
+        element: usize,
+        output: &mut Vec<SemanticNode>,
+        build: impl FnOnce(String) -> SemanticNode,
+    ) {
         let text = self.verbatim_text(element);
         if text.is_empty() {
             return;
         }
-        self.blocks.push(build(text));
-    }
-
-    fn block_text(&mut self, element: usize) -> String {
-        let mut raw = String::new();
-        self.gather_text(element, &mut raw);
-        collapse_whitespace(&strip_control_characters_preserving_layout(&raw))
+        output.push(build(text));
     }
 
     fn verbatim_text(&mut self, element: usize) -> String {
@@ -523,9 +1064,221 @@ impl<'a> BlockExtractor<'a> {
             .map(|attribute| attribute.value.to_string())
     }
 
+    /// The raw `style` attribute of a style-bearing element, control-stripped and kept
+    /// unparsed, or `None` when the element carries no `style`.
+    ///
+    /// Control characters are removed here so no escape sequence from remote markup can
+    /// survive into a node; CSS interpretation stays in the css layer, which parses this
+    /// string during the cascade.
+    fn inline_style(&self, element: usize) -> Option<String> {
+        let raw = self.attribute(element, "style")?;
+        Some(strip_control_characters(&raw))
+    }
+
     fn child_handles(&self, node: usize) -> Vec<usize> {
         self.arena[node].children.clone()
     }
+}
+
+/// The emphasis and link in force at a point during a block's inline walk.
+#[derive(Clone)]
+struct InlineContext {
+    emphasis: InlineEmphasis,
+    link: Option<String>,
+}
+
+impl InlineContext {
+    fn root() -> InlineContext {
+        InlineContext {
+            emphasis: InlineEmphasis::none(),
+            link: None,
+        }
+    }
+}
+
+/// A contiguous span of a block's text sharing one emphasis and link, before whitespace
+/// is collapsed across the whole block.
+struct Segment {
+    text: String,
+    emphasis: InlineEmphasis,
+    link: Option<String>,
+}
+
+impl Segment {
+    fn new(raw: &str, context: &InlineContext) -> Segment {
+        Segment {
+            text: strip_control_characters_preserving_layout(raw),
+            emphasis: context.emphasis.clone(),
+            link: context.link.clone(),
+        }
+    }
+}
+
+/// Collapse a block's segments into inline runs.
+///
+/// Whitespace is collapsed across the whole block: each run of whitespace becomes a
+/// single space and leading and trailing whitespace is dropped, matching how plain block
+/// text is collapsed. A new run begins wherever the emphasis or link changes.
+fn collapse_segments(segments: Vec<Segment>) -> Vec<InlineRun> {
+    let mut builder = RunBuilder::new();
+    for segment in &segments {
+        builder.push_segment(segment);
+    }
+    builder.finish()
+}
+
+/// Builds inline runs from a block's segments, collapsing whitespace as it goes.
+struct RunBuilder {
+    runs: Vec<InlineRun>,
+    current: Option<InlineRun>,
+    last_was_space: bool,
+}
+
+impl RunBuilder {
+    fn new() -> RunBuilder {
+        RunBuilder {
+            runs: Vec::new(),
+            current: None,
+            // Start as though a space preceded the block so leading whitespace is dropped.
+            last_was_space: true,
+        }
+    }
+
+    fn push_segment(&mut self, segment: &Segment) {
+        for character in segment.text.chars() {
+            self.push_character(character, &segment.emphasis, &segment.link);
+        }
+    }
+
+    fn push_character(
+        &mut self,
+        character: char,
+        emphasis: &InlineEmphasis,
+        link: &Option<String>,
+    ) {
+        if character.is_whitespace() {
+            self.push_space(emphasis, link);
+            return;
+        }
+        self.push_visible(character, emphasis, link);
+    }
+
+    fn push_visible(&mut self, character: char, emphasis: &InlineEmphasis, link: &Option<String>) {
+        self.open_run(emphasis, link);
+        if let Some(run) = self.current.as_mut() {
+            run.text.push(character);
+        }
+        self.last_was_space = false;
+    }
+
+    fn push_space(&mut self, emphasis: &InlineEmphasis, link: &Option<String>) {
+        if self.last_was_space {
+            return;
+        }
+        self.open_run(emphasis, link);
+        if let Some(run) = self.current.as_mut() {
+            run.text.push(' ');
+        }
+        self.last_was_space = true;
+    }
+
+    /// Ensure the current run carries the given emphasis and link, flushing it and
+    /// starting a fresh run when either differs.
+    fn open_run(&mut self, emphasis: &InlineEmphasis, link: &Option<String>) {
+        if self.run_matches(emphasis, link) {
+            return;
+        }
+        self.flush_current();
+        self.current = Some(InlineRun {
+            text: String::new(),
+            emphasis: emphasis.clone(),
+            link: link.clone(),
+        });
+    }
+
+    fn run_matches(&self, emphasis: &InlineEmphasis, link: &Option<String>) -> bool {
+        match &self.current {
+            Some(run) => &run.emphasis == emphasis && &run.link == link,
+            None => false,
+        }
+    }
+
+    fn flush_current(&mut self) {
+        let Some(run) = self.current.take() else {
+            return;
+        };
+        if run.text.is_empty() {
+            return;
+        }
+        self.runs.push(run);
+    }
+
+    fn finish(mut self) -> Vec<InlineRun> {
+        self.trim_trailing_space();
+        self.flush_current();
+        self.runs
+    }
+
+    /// Drop a single trailing space left on the final run, matching how plain block text
+    /// trims its trailing whitespace.
+    fn trim_trailing_space(&mut self) {
+        let Some(run) = self.current.as_mut() else {
+            return;
+        };
+        if run.text.ends_with(' ') {
+            run.text.pop();
+        }
+    }
+}
+
+/// Resolve a reference against the document base URL when one is present.
+///
+/// A reference that cannot be resolved is kept exactly as authored rather than dropped,
+/// so a malformed base or reference never loses the link or image source.
+fn resolve_reference(reference: &str, base_url: Option<&Url>) -> String {
+    let Some(base) = base_url else {
+        return reference.to_string();
+    };
+    match base.join(reference) {
+        Ok(resolved) => resolved.to_string(),
+        Err(_) => reference.to_string(),
+    }
+}
+
+/// Read the document's `<base href>` as an absolute base URL.
+///
+/// The first `<base>` carrying an `href` wins. A relative or malformed value yields no
+/// base, so references are left as authored.
+fn extract_base_url(arena: &[Node]) -> Option<Url> {
+    let href = find_base_href(arena, DOCUMENT_HANDLE)?;
+    Url::parse(&sanitize_reference(href)).ok()
+}
+
+fn find_base_href(arena: &[Node], node: usize) -> Option<String> {
+    let entry = &arena[node];
+    if let Some(href) = base_href_attribute(entry) {
+        return Some(href);
+    }
+    for child in &entry.children {
+        if let Some(found) = find_base_href(arena, *child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn base_href_attribute(entry: &Node) -> Option<String> {
+    if !entry.is_element {
+        return None;
+    }
+    if local_name(&entry.name) != "base" {
+        return None;
+    }
+    entry
+        .attributes
+        .iter()
+        .find(|attribute| local_name(&attribute.name) == "href")
+        .map(|attribute| attribute.value.to_string())
 }
 
 fn extract_title(arena: &[Node]) -> Option<String> {
@@ -557,6 +1310,106 @@ fn gather_plain_text(arena: &[Node], node: usize, buffer: &mut String) {
     for child in &entry.children {
         gather_plain_text(arena, *child, buffer);
     }
+}
+
+/// Whether a tag maps to a block-level semantic node.
+///
+/// Inline `<code>` is intentionally absent: inside a text block it folds into an inline
+/// run's emphasis rather than standing alone, so it is treated as inline content here.
+fn is_block_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "p" | "ul"
+            | "ol"
+            | "blockquote"
+            | "pre"
+            | "hr"
+            | "img"
+            | "table"
+            | "figure"
+            | "details"
+            | "summary"
+            | "form"
+            | "input"
+            | "textarea"
+            | "select"
+            | "button"
+            | "iframe"
+            | "object"
+            | "embed"
+            | "video"
+            | "audio"
+            | "nav"
+            | "main"
+            | "aside"
+            | "footer"
+            | "header"
+            | "section"
+    ) || heading_level(tag).is_some()
+}
+
+/// A human-readable name for an embedded-content element, used as its placeholder label.
+fn embedded_label(tag: &str) -> &'static str {
+    match tag {
+        "iframe" => "inline frame",
+        "object" => "object",
+        "embed" => "embedded object",
+        "video" => "video",
+        "audio" => "audio",
+        _ => "embedded content",
+    }
+}
+
+/// Whether an element carries an attribute whose value equals `wanted`.
+fn attribute_equals(entry: &Node, name: &str, wanted: &str) -> bool {
+    entry
+        .attributes
+        .iter()
+        .any(|attribute| local_name(&attribute.name) == name && attribute.value.as_ref() == wanted)
+}
+
+/// The text, or `None` when it is empty, so a blank label collapses to no label.
+fn non_empty_text(text: String) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
+}
+
+fn is_table_section(tag: &str) -> bool {
+    matches!(tag, "thead" | "tbody" | "tfoot")
+}
+
+/// Truncate every row to [`MAX_TABLE_COLUMNS`] cells, reporting whether any row was cut.
+fn truncate_row_columns(rows: &mut [SemanticNode]) -> bool {
+    let mut truncated = false;
+    for row in rows.iter_mut() {
+        truncated |= truncate_one_row(row);
+    }
+    truncated
+}
+
+fn truncate_one_row(row: &mut SemanticNode) -> bool {
+    let SemanticNode::TableRow { children } = row else {
+        return false;
+    };
+    if children.len() <= MAX_TABLE_COLUMNS {
+        return false;
+    }
+    children.truncate(MAX_TABLE_COLUMNS);
+    true
+}
+
+fn table_truncation_message(rows_truncated: bool, columns_truncated: bool) -> String {
+    if rows_truncated && columns_truncated {
+        return format!(
+            "A large table was truncated to its first {MAX_TABLE_ROWS} rows and {MAX_TABLE_COLUMNS} columns"
+        );
+    }
+    if rows_truncated {
+        return format!("A large table was truncated to its first {MAX_TABLE_ROWS} rows");
+    }
+    format!("A large table was truncated to its first {MAX_TABLE_COLUMNS} columns")
 }
 
 fn heading_level(tag: &str) -> Option<u8> {

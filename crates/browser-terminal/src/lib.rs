@@ -315,6 +315,9 @@ fn cell_style(cell: &Cell) -> Style {
     if let Some(modifier) = emphasis_modifier(cell.emphasis()) {
         style = style.add_modifier(modifier);
     }
+    if cell.underline() {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
     style
 }
 

@@ -3,6 +3,7 @@
 // @layer html
 // @created meerita <meerita@icloud.com>
 
+use crate::encoding::{DetectedEncoding, Encoding};
 use crate::sanitize::strip_control_characters;
 use crate::semantic_node::SemanticNode;
 
@@ -40,31 +41,47 @@ impl DocumentTitle {
 
 /// The browser's semantic representation of a single page.
 ///
-/// Holds the page's semantic nodes, an optional sanitized title, and the number of
-/// `<script>` elements the parser suppressed. The script count is kept so an adapter
-/// can tell the user how many scripts were ignored without ever seeing their content.
+/// Holds the top-level children of the semantic tree, an optional sanitized title, and
+/// the number of `<script>` elements the parser suppressed. The document is the root of
+/// the tree; its children own their own descendants. The script count is kept so an
+/// adapter can tell the user how many scripts were ignored without ever seeing their
+/// content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
-    nodes: Vec<SemanticNode>,
+    children: Vec<SemanticNode>,
     title: Option<DocumentTitle>,
     script_count: usize,
+    encoding: DetectedEncoding,
 }
 
 impl Document {
+    /// Build a document whose bytes were already Unicode.
+    ///
+    /// The encoding defaults to UTF-8, matching a document assembled directly from
+    /// Unicode rather than decoded from bytes. The parser records the real detected
+    /// encoding through [`Document::with_encoding`].
     pub fn new(
-        nodes: Vec<SemanticNode>,
+        children: Vec<SemanticNode>,
         title: Option<DocumentTitle>,
         script_count: usize,
     ) -> Self {
+        let utf8 = Encoding::utf8();
         Self {
-            nodes,
+            children,
             title,
             script_count,
+            encoding: DetectedEncoding::new(utf8, utf8),
         }
     }
 
-    pub fn nodes(&self) -> &[SemanticNode] {
-        &self.nodes
+    /// Record the encoding detection resolved for this document's bytes.
+    pub fn with_encoding(mut self, encoding: DetectedEncoding) -> Self {
+        self.encoding = encoding;
+        self
+    }
+
+    pub fn children(&self) -> &[SemanticNode] {
+        &self.children
     }
 
     pub fn title(&self) -> Option<&DocumentTitle> {
@@ -74,5 +91,10 @@ impl Document {
     /// How many `<script>` elements the parser detected and suppressed.
     pub fn script_count(&self) -> usize {
         self.script_count
+    }
+
+    /// The encoding detected for this document and the one used to decode it.
+    pub fn encoding(&self) -> DetectedEncoding {
+        self.encoding
     }
 }
