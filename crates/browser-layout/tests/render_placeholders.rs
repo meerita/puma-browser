@@ -4,7 +4,7 @@
 // @created meerita <meerita@icloud.com>
 
 use browser_html::{Document, InlineRun, InputKind, LandmarkRole, SemanticNode};
-use browser_layout::{render_document, CellBuffer};
+use browser_layout::{render_document, CellBuffer, WidthConfig};
 
 fn document_of(nodes: Vec<SemanticNode>) -> Document {
     Document::new(nodes, None, 0)
@@ -38,7 +38,8 @@ fn text_input_renders_a_labelled_blank_field() {
         label: Some("Name".to_string()),
         sensitive: false,
     };
-    let buffer = render_document(&document_of(vec![input]), 40).expect("input must lay out");
+    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
+        .expect("input must lay out");
     assert!(buffer_text(&buffer).contains("[Name: ____]"));
 }
 
@@ -49,7 +50,8 @@ fn password_input_is_masked_and_never_shows_a_value() {
         label: Some("Password".to_string()),
         sensitive: true,
     };
-    let buffer = render_document(&document_of(vec![input]), 40).expect("input must lay out");
+    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
+        .expect("input must lay out");
     let text = buffer_text(&buffer);
     assert!(text.contains("[Password: ••••]"), "the field is masked");
     assert!(
@@ -64,7 +66,8 @@ fn select_renders_its_first_option_and_a_dropdown_marker() {
         label: Some("Country".to_string()),
         options: vec!["Spain".to_string(), "France".to_string()],
     };
-    let buffer = render_document(&document_of(vec![select]), 40).expect("select must lay out");
+    let buffer = render_document(&document_of(vec![select]), 40, &WidthConfig::default())
+        .expect("select must lay out");
     assert!(buffer_text(&buffer).contains("[Country: Spain ▾]"));
 }
 
@@ -74,7 +77,8 @@ fn button_renders_its_label_in_brackets() {
         runs: vec![InlineRun::plain("Submit".to_string())],
         inline_style: None,
     };
-    let buffer = render_document(&document_of(vec![button]), 40).expect("button must lay out");
+    let buffer = render_document(&document_of(vec![button]), 40, &WidthConfig::default())
+        .expect("button must lay out");
     assert!(buffer_text(&buffer).contains("[ Submit ]"));
 }
 
@@ -83,7 +87,8 @@ fn embedded_content_renders_a_kind_placeholder() {
     let embedded = SemanticNode::EmbeddedContent {
         label: "video".to_string(),
     };
-    let buffer = render_document(&document_of(vec![embedded]), 40).expect("embed must lay out");
+    let buffer = render_document(&document_of(vec![embedded]), 40, &WidthConfig::default())
+        .expect("embed must lay out");
     assert!(buffer_text(&buffer).contains("[Embedded: video]"));
 }
 
@@ -99,7 +104,8 @@ fn details_renders_the_summary_then_the_body_expanded() {
             paragraph("Hidden body text"),
         ],
     };
-    let buffer = render_document(&document_of(vec![details]), 40).expect("details must lay out");
+    let buffer = render_document(&document_of(vec![details]), 40, &WidthConfig::default())
+        .expect("details must lay out");
     let text = buffer_text(&buffer);
     assert!(text.contains("More"), "the summary label renders");
     assert!(
@@ -114,7 +120,8 @@ fn landmark_renders_its_children_structurally() {
         role: LandmarkRole::Navigation,
         children: vec![paragraph("Home")],
     };
-    let buffer = render_document(&document_of(vec![landmark]), 40).expect("landmark must lay out");
+    let buffer = render_document(&document_of(vec![landmark]), 40, &WidthConfig::default())
+        .expect("landmark must lay out");
     assert!(buffer_text(&buffer).contains("Home"));
 }
 
@@ -128,7 +135,8 @@ fn figure_renders_its_content_then_the_caption() {
         }],
         caption: Some(vec![InlineRun::plain("Quarterly sales".to_string())]),
     };
-    let buffer = render_document(&document_of(vec![figure]), 40).expect("figure must lay out");
+    let buffer = render_document(&document_of(vec![figure]), 40, &WidthConfig::default())
+        .expect("figure must lay out");
     let text = buffer_text(&buffer);
     let image_row = text.find("[Chart]").expect("the image label renders");
     let caption_row = text.find("Quarterly sales").expect("the caption renders");
@@ -142,6 +150,7 @@ fn image_placeholder_includes_the_title_when_present() {
         title: Some("Company logo".to_string()),
         source: None,
     };
-    let buffer = render_document(&document_of(vec![image]), 40).expect("image must lay out");
+    let buffer = render_document(&document_of(vec![image]), 40, &WidthConfig::default())
+        .expect("image must lay out");
     assert!(buffer_text(&buffer).contains("[Logo (Company logo)]"));
 }

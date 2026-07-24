@@ -62,7 +62,11 @@ impl NavigationController {
         let Some(page) = &self.current_page else {
             return Ok(CellBuffer::new(width, 0));
         };
-        let buffer = browser_layout::render_document(page.document(), width)?;
+        let buffer = browser_layout::render_document(
+            page.document(),
+            width,
+            &browser_layout::WidthConfig::default(),
+        )?;
         Ok(buffer)
     }
 

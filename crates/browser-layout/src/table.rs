@@ -7,9 +7,8 @@ use browser_css::{cascade, Emphasis, TextStyle};
 use browser_html::{InlineRun, SemanticNode};
 
 use crate::cell::Cell;
-use crate::render::{
-    count_columns, grapheme_columns, graphemes_to_cells, runs_to_cells, space_cells, wrap_cells,
-};
+use crate::render::{count_columns, graphemes_to_cells, runs_to_cells, space_cells, wrap_cells};
+use crate::width::{grapheme_columns, WidthConfig};
 
 /// Blank columns drawn between two native columns so their content stays separated.
 const COLUMN_GAP_COLUMNS: usize = 2;
@@ -34,16 +33,17 @@ pub(crate) fn render_table(
     rows: &[SemanticNode],
     base: &TextStyle,
     width: usize,
+    width_config: &WidthConfig,
 ) -> Vec<Vec<Cell>> {
-    let grid = build_grid(rows, base);
+    let grid = build_grid(rows, base, width_config);
     if grid.is_empty() {
         return Vec::new();
     }
     let widths = column_widths(&grid);
     if table_fits(&widths, width) {
-        return render_columns(&grid, &widths, base);
+        return render_columns(&grid, &widths, base, width_config);
     }
-    render_records(&grid, base, width)
+    render_records(&grid, base, width, width_config)
 }
 
 /// A table cell reduced to a single styled line of content and its display width.
@@ -60,22 +60,28 @@ struct GridRow {
     cells: Vec<GridCell>,
 }
 
-fn build_grid(rows: &[SemanticNode], base: &TextStyle) -> Vec<GridRow> {
-    rows.iter().filter_map(|row| grid_row(row, base)).collect()
+fn build_grid(rows: &[SemanticNode], base: &TextStyle, width_config: &WidthConfig) -> Vec<GridRow> {
+    rows.iter()
+        .filter_map(|row| grid_row(row, base, width_config))
+        .collect()
 }
 
-fn grid_row(node: &SemanticNode, base: &TextStyle) -> Option<GridRow> {
+fn grid_row(node: &SemanticNode, base: &TextStyle, width_config: &WidthConfig) -> Option<GridRow> {
     let SemanticNode::TableRow { children } = node else {
         return None;
     };
     let cells = children
         .iter()
-        .filter_map(|cell| grid_cell(cell, base))
+        .filter_map(|cell| grid_cell(cell, base, width_config))
         .collect();
     Some(GridRow { cells })
 }
 
-fn grid_cell(node: &SemanticNode, base: &TextStyle) -> Option<GridCell> {
+fn grid_cell(
+    node: &SemanticNode,
+    base: &TextStyle,
+    width_config: &WidthConfig,
+) -> Option<GridCell> {
     let SemanticNode::TableCell {
         header, children, ..
     } = node
@@ -84,7 +90,7 @@ fn grid_cell(node: &SemanticNode, base: &TextStyle) -> Option<GridCell> {
     };
     let runs = collect_cell_runs(children);
     let content = runs_to_cells(&runs, &cell_base_style(node, *header, base));
-    let columns = count_columns(&content);
+    let columns = count_columns(&content, width_config);
     Some(GridCell {
         header: *header,
         content,
@@ -182,17 +188,35 @@ fn total_table_width(widths: &[usize]) -> usize {
     content + gaps
 }
 
-fn render_columns(grid: &[GridRow], widths: &[usize], base: &TextStyle) -> Vec<Vec<Cell>> {
+fn render_columns(
+    grid: &[GridRow],
+    widths: &[usize],
+    base: &TextStyle,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
     grid.iter()
-        .map(|row| render_column_row(row, widths, base))
+        .map(|row| render_column_row(row, widths, base, width_config))
         .collect()
 }
 
-fn render_column_row(row: &GridRow, widths: &[usize], base: &TextStyle) -> Vec<Cell> {
+fn render_column_row(
+    row: &GridRow,
+    widths: &[usize],
+    base: &TextStyle,
+    width_config: &WidthConfig,
+) -> Vec<Cell> {
     let mut cells: Vec<Cell> = Vec::new();
     let last_column = widths.len().saturating_sub(1);
     for (index, width) in widths.iter().enumerate() {
-        append_column_cell(&mut cells, row, index, *width, last_column, base);
+        append_column_cell(
+            &mut cells,
+            row,
+            index,
+            *width,
+            last_column,
+            base,
+            width_config,
+        );
     }
     cells
 }
@@ -204,22 +228,35 @@ fn append_column_cell(
     width: usize,
     last_column: usize,
     base: &TextStyle,
+    width_config: &WidthConfig,
 ) {
     if index > 0 {
         cells.extend(space_cells(COLUMN_GAP_COLUMNS, base));
     }
     let content = row.cells.get(index).map(|cell| cell.content.clone());
     let fill = index != last_column;
-    cells.extend(fit_cell(content.unwrap_or_default(), width, fill, base));
+    cells.extend(fit_cell(
+        content.unwrap_or_default(),
+        width,
+        fill,
+        base,
+        width_config,
+    ));
 }
 
 /// Fit a cell's content to its column: clip anything past the column and, for every column
 /// but the last, pad with spaces so the following column starts at a fixed offset.
-fn fit_cell(content: Vec<Cell>, width: usize, fill: bool, base: &TextStyle) -> Vec<Cell> {
+fn fit_cell(
+    content: Vec<Cell>,
+    width: usize,
+    fill: bool,
+    base: &TextStyle,
+    width_config: &WidthConfig,
+) -> Vec<Cell> {
     let mut fitted: Vec<Cell> = Vec::new();
     let mut columns = 0usize;
     for cell in content {
-        let advance = grapheme_columns(cell.grapheme());
+        let advance = grapheme_columns(cell.grapheme(), width_config);
         if columns + advance > width {
             break;
         }
@@ -234,12 +271,25 @@ fn fit_cell(content: Vec<Cell>, width: usize, fill: bool, base: &TextStyle) -> V
 
 /// Render each data row as a record: the first cell as a heading line, then one indented
 /// `Label: value` line per remaining cell.
-fn render_records(grid: &[GridRow], base: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+fn render_records(
+    grid: &[GridRow],
+    base: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
     let labels = header_labels(grid);
     let first_data = if labels.is_some() { 1 } else { 0 };
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for (position, row) in grid.iter().skip(first_data).enumerate() {
-        append_record(&mut rows, row, labels.as_deref(), base, width, position);
+        append_record(
+            &mut rows,
+            row,
+            labels.as_deref(),
+            base,
+            width,
+            position,
+            width_config,
+        );
     }
     rows
 }
@@ -269,17 +319,25 @@ fn append_record(
     base: &TextStyle,
     width: usize,
     position: usize,
+    width_config: &WidthConfig,
 ) {
     if position > 0 {
         rows.push(Vec::new());
     }
     let mut cells = row.cells.iter().enumerate();
     if let Some((_, heading)) = cells.next() {
-        append_wrapped_field(rows, Vec::new(), &heading.content, width, base);
+        append_wrapped_field(
+            rows,
+            Vec::new(),
+            &heading.content,
+            width,
+            base,
+            width_config,
+        );
     }
     for (index, cell) in cells {
         let prefix = field_prefix(index, labels, base);
-        append_wrapped_field(rows, prefix, &cell.content, width, base);
+        append_wrapped_field(rows, prefix, &cell.content, width, base, width_config);
     }
 }
 
@@ -304,10 +362,11 @@ fn append_wrapped_field(
     content: &[Cell],
     width: usize,
     base: &TextStyle,
+    width_config: &WidthConfig,
 ) {
-    let prefix_columns = count_columns(&prefix);
+    let prefix_columns = count_columns(&prefix, width_config);
     let content_width = record_content_width(width, prefix_columns);
-    let wrapped = wrap_cells(content.to_vec(), content_width);
+    let wrapped = wrap_cells(content.to_vec(), content_width, width_config);
     if wrapped.is_empty() {
         rows.push(prefix);
         return;

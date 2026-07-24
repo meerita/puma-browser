@@ -6,11 +6,11 @@
 use browser_css::{cascade, computed_run_style, DisplayMode, TextStyle, TextTransform};
 use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::cell::{Cell, CellBuffer};
 use crate::error::LayoutError;
 use crate::table::render_table;
+use crate::width::{grapheme_columns, WidthConfig};
 
 /// Columns a block quote's text is indented from the left margin.
 const QUOTE_INDENT_COLUMNS: usize = 2;
@@ -34,14 +34,24 @@ const SELECT_MARKER: &str = "▾";
 /// container nodes recurse into their children, and spacing is applied as blank rows
 /// between blocks. The rows are then written into a blank buffer whose height is the
 /// total row count. The root nodes inherit from the default style, so the cascade starts
-/// from a clean context.
-pub fn render_document(document: &Document, width: u16) -> Result<CellBuffer, LayoutError> {
+/// from a clean context. `width_config` governs how every grapheme is measured into
+/// columns, so wrapping and truncation agree on width throughout.
+pub fn render_document(
+    document: &Document,
+    width: u16,
+    width_config: &WidthConfig,
+) -> Result<CellBuffer, LayoutError> {
     if width == 0 {
         return Err(LayoutError::ZeroWidth);
     }
     let width_columns = usize::from(width);
-    let rows = render_children(document.children(), width_columns, &TextStyle::default());
-    build_buffer(rows, width)
+    let rows = render_children(
+        document.children(),
+        width_columns,
+        &TextStyle::default(),
+        width_config,
+    );
+    build_buffer(rows, width, width_config)
 }
 
 /// Lay a sequence of sibling nodes out into rows, applying each node's own spacing.
@@ -52,10 +62,11 @@ fn render_children(
     children: &[SemanticNode],
     width: usize,
     inherited: &TextStyle,
+    width_config: &WidthConfig,
 ) -> Vec<Vec<Cell>> {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for node in children {
-        append_node_rows(&mut rows, node, width, inherited);
+        append_node_rows(&mut rows, node, width, inherited, width_config);
     }
     rows
 }
@@ -71,12 +82,13 @@ fn append_node_rows(
     node: &SemanticNode,
     width: usize,
     inherited: &TextStyle,
+    width_config: &WidthConfig,
 ) {
     let style = cascade(inherited, node);
     if is_hidden(&style) {
         return;
     }
-    let content = node_rows(node, &style, width);
+    let content = node_rows(node, &style, width, width_config);
     if content.is_empty() {
         return;
     }
@@ -104,47 +116,68 @@ fn append_blank_rows(rows: &mut Vec<Vec<Cell>>, count: u16) {
 /// Container nodes recurse into their children through [`render_children`]; text blocks
 /// lay out each inline run with its own emphasis and link styling and word-wrap the
 /// result.
-fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+fn node_rows(
+    node: &SemanticNode,
+    style: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
     match node {
-        SemanticNode::Heading { runs, .. } => wrap_runs(runs, style, width),
-        SemanticNode::Paragraph { runs, .. } => wrap_runs(runs, style, width),
-        SemanticNode::Quote { children, .. } => render_quote(children, style, width),
+        SemanticNode::Heading { runs, .. } => wrap_runs(runs, style, width, width_config),
+        SemanticNode::Paragraph { runs, .. } => wrap_runs(runs, style, width, width_config),
+        SemanticNode::Quote { children, .. } => render_quote(children, style, width, width_config),
         SemanticNode::List {
             ordered, children, ..
-        } => render_list(*ordered, children, width, style),
-        SemanticNode::ListItem { children, .. } => render_children(children, width, style),
-        SemanticNode::Table { children } => render_table(children, style, width),
+        } => render_list(*ordered, children, width, style, width_config),
+        SemanticNode::ListItem { children, .. } => {
+            render_children(children, width, style, width_config)
+        }
+        SemanticNode::Table { children } => render_table(children, style, width, width_config),
         SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
-            render_verbatim(text, style, width)
+            render_verbatim(text, style, width, width_config)
         }
         SemanticNode::Separator => vec![separator_row(style, width)],
-        SemanticNode::Warning { message } => single_row(clip_line(message, style, width)),
-        SemanticNode::ImagePlaceholder { alt, title, .. } => {
-            single_row(clip_line(&image_label(alt, title.as_deref()), style, width))
+        SemanticNode::Warning { message } => {
+            single_row(clip_line(message, style, width, width_config))
         }
+        SemanticNode::ImagePlaceholder { alt, title, .. } => single_row(clip_line(
+            &image_label(alt, title.as_deref()),
+            style,
+            width,
+            width_config,
+        )),
         SemanticNode::Figure { children, caption } => {
-            render_figure(children, caption, style, width)
+            render_figure(children, caption, style, width, width_config)
         }
-        SemanticNode::Details { children, .. } => render_children(children, width, style),
-        SemanticNode::Summary { runs, .. } => wrap_runs(runs, style, width),
-        SemanticNode::Landmark { children, .. } => render_children(children, width, style),
-        SemanticNode::Form { children } => render_children(children, width, style),
+        SemanticNode::Details { children, .. } => {
+            render_children(children, width, style, width_config)
+        }
+        SemanticNode::Summary { runs, .. } => wrap_runs(runs, style, width, width_config),
+        SemanticNode::Landmark { children, .. } => {
+            render_children(children, width, style, width_config)
+        }
+        SemanticNode::Form { children } => render_children(children, width, style, width_config),
         SemanticNode::Input {
             label, sensitive, ..
         } => single_row(clip_line(
             &input_placeholder(label.as_deref(), *sensitive),
             style,
             width,
+            width_config,
         )),
         SemanticNode::Select { label, options } => single_row(clip_line(
             &select_placeholder(label.as_deref(), options),
             style,
             width,
+            width_config,
         )),
-        SemanticNode::Button { runs, .. } => render_button(runs, style, width),
-        SemanticNode::EmbeddedContent { label } => {
-            single_row(clip_line(&embedded_placeholder(label), style, width))
-        }
+        SemanticNode::Button { runs, .. } => render_button(runs, style, width, width_config),
+        SemanticNode::EmbeddedContent { label } => single_row(clip_line(
+            &embedded_placeholder(label),
+            style,
+            width,
+            width_config,
+        )),
         SemanticNode::TableRow { .. } | SemanticNode::TableCell { .. } => Vec::new(),
     }
 }
@@ -155,8 +188,13 @@ fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Ce
 /// (`base`) folded with the run's emphasis and link. Wrapping then treats the whole
 /// block as one styled stream, so a word split across run boundaries wraps as a single
 /// unit and run boundaries never change where lines break.
-fn wrap_runs(runs: &[InlineRun], base: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
-    wrap_cells(runs_to_cells(runs, base), width)
+fn wrap_runs(
+    runs: &[InlineRun],
+    base: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
+    wrap_cells(runs_to_cells(runs, base), width, width_config)
 }
 
 pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
@@ -207,8 +245,12 @@ fn push_cased(output: &mut String, character: char, uppercase: bool) {
 }
 
 /// Wrap a block's styled cells into rows no wider than `width` display columns.
-pub(crate) fn wrap_cells(cells: Vec<Cell>, width: usize) -> Vec<Vec<Cell>> {
-    let mut wrapper = LineWrapper::new(width);
+pub(crate) fn wrap_cells(
+    cells: Vec<Cell>,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
+    let mut wrapper = LineWrapper::new(width, width_config);
     for token in tokenize_line(cells) {
         wrapper.push_token(token);
     }
@@ -244,10 +286,15 @@ fn flush_word(word: &mut Vec<Cell>, tokens: &mut Vec<LineToken>) {
 
 /// Render a block quote: lay its children out into the indented content width, then push
 /// each resulting row right by the quote indent.
-fn render_quote(children: &[SemanticNode], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+fn render_quote(
+    children: &[SemanticNode],
+    style: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
     let indent = quote_indent(width);
     let content_width = width - indent;
-    render_children(children, content_width, style)
+    render_children(children, content_width, style, width_config)
         .into_iter()
         .map(|row| indent_row(row, indent, style))
         .collect()
@@ -269,6 +316,7 @@ fn render_list(
     items: &[SemanticNode],
     width: usize,
     inherited: &TextStyle,
+    width_config: &WidthConfig,
 ) -> Vec<Vec<Cell>> {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     let mut ordinal = 1usize;
@@ -282,6 +330,7 @@ fn render_list(
             &list_marker(ordered, ordinal),
             width,
             inherited,
+            width_config,
         );
         ordinal += 1;
     }
@@ -297,15 +346,16 @@ fn append_list_item_rows(
     marker: &str,
     width: usize,
     inherited: &TextStyle,
+    width_config: &WidthConfig,
 ) {
     let SemanticNode::ListItem { children, .. } = item else {
         return;
     };
     let style = cascade(inherited, item);
     let marker_cells = graphemes_to_cells(marker, &style);
-    let marker_columns = count_columns(&marker_cells);
+    let marker_columns = count_columns(&marker_cells, width_config);
     let content_width = list_content_width(width, marker_columns);
-    for (index, row) in render_children(children, content_width, &style)
+    for (index, row) in render_children(children, content_width, &style, width_config)
         .into_iter()
         .enumerate()
     {
@@ -357,18 +407,23 @@ fn decorate_list_row(
 
 /// Render code or preformatted text verbatim: one row per source line, clipped at the
 /// width rather than wrapped, so the original line structure is preserved.
-fn render_verbatim(text: &str, style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+fn render_verbatim(
+    text: &str,
+    style: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
     text.split('\n')
-        .map(|line| clip_line(line, style, width))
+        .map(|line| clip_line(line, style, width, width_config))
         .collect()
 }
 
 /// Turn a single line into cells, stopping before any grapheme that would cross `width`.
-fn clip_line(line: &str, style: &TextStyle, width: usize) -> Vec<Cell> {
+fn clip_line(line: &str, style: &TextStyle, width: usize, width_config: &WidthConfig) -> Vec<Cell> {
     let mut cells: Vec<Cell> = Vec::new();
     let mut columns = 0usize;
     for grapheme in line.graphemes(true) {
-        let advance = grapheme_columns(grapheme);
+        let advance = grapheme_columns(grapheme, width_config);
         if columns + advance > width {
             break;
         }
@@ -402,10 +457,11 @@ fn render_figure(
     caption: &Option<Vec<InlineRun>>,
     style: &TextStyle,
     width: usize,
+    width_config: &WidthConfig,
 ) -> Vec<Vec<Cell>> {
-    let mut rows = render_children(children, width, style);
+    let mut rows = render_children(children, width, style, width_config);
     if let Some(runs) = caption {
-        rows.extend(wrap_runs(runs, style, width));
+        rows.extend(wrap_runs(runs, style, width, width_config));
     }
     rows
 }
@@ -432,11 +488,16 @@ fn select_placeholder(label: Option<&str>, options: &[String]) -> String {
 }
 
 /// Render a button as its label wrapped in brackets, keeping the label's inline styling.
-fn render_button(runs: &[InlineRun], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
+fn render_button(
+    runs: &[InlineRun],
+    style: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
     let mut cells = graphemes_to_cells("[ ", style);
     cells.extend(runs_to_cells(runs, style));
     cells.extend(graphemes_to_cells(" ]", style));
-    single_row(clip_cells(cells, width))
+    single_row(clip_cells(cells, width, width_config))
 }
 
 fn embedded_placeholder(label: &str) -> String {
@@ -444,11 +505,11 @@ fn embedded_placeholder(label: &str) -> String {
 }
 
 /// Truncate a styled cell run before the first grapheme that would cross `width`.
-fn clip_cells(cells: Vec<Cell>, width: usize) -> Vec<Cell> {
+fn clip_cells(cells: Vec<Cell>, width: usize, width_config: &WidthConfig) -> Vec<Cell> {
     let mut clipped: Vec<Cell> = Vec::new();
     let mut columns = 0usize;
     for cell in cells {
-        let advance = grapheme_columns(cell.grapheme());
+        let advance = grapheme_columns(cell.grapheme(), width_config);
         if columns + advance > width {
             break;
         }
@@ -480,30 +541,26 @@ pub(crate) fn graphemes_to_cells(text: &str, style: &TextStyle) -> Vec<Cell> {
         .collect()
 }
 
-pub(crate) fn count_columns(cells: &[Cell]) -> usize {
+pub(crate) fn count_columns(cells: &[Cell], width_config: &WidthConfig) -> usize {
     cells
         .iter()
-        .map(|cell| grapheme_columns(cell.grapheme()))
+        .map(|cell| grapheme_columns(cell.grapheme(), width_config))
         .sum()
-}
-
-/// The number of terminal columns a single grapheme cluster advances.
-///
-/// A combining mark contributes zero, so a base-plus-mark cluster stays one column; a
-/// CJK or other wide grapheme advances two.
-pub(crate) fn grapheme_columns(grapheme: &str) -> usize {
-    UnicodeWidthStr::width(grapheme)
 }
 
 /// Convert the laid-out rows into a filled cell buffer.
 ///
 /// The height is the row count, guarded so a document taller than the addressable row
 /// range is refused rather than truncated silently.
-fn build_buffer(rows: Vec<Vec<Cell>>, width: u16) -> Result<CellBuffer, LayoutError> {
+fn build_buffer(
+    rows: Vec<Vec<Cell>>,
+    width: u16,
+    width_config: &WidthConfig,
+) -> Result<CellBuffer, LayoutError> {
     let height = row_height(rows.len())?;
     let mut buffer = CellBuffer::new(width, height);
     for (row_index, row) in rows.into_iter().enumerate() {
-        write_row(&mut buffer, row_index, row);
+        write_row(&mut buffer, row_index, row, width_config);
     }
     Ok(buffer)
 }
@@ -514,15 +571,38 @@ fn row_height(count: usize) -> Result<u16, LayoutError> {
 
 /// Write one row of cells into the buffer, advancing the column by each grapheme's width
 /// so a wide grapheme leaves the following column blank.
-fn write_row(buffer: &mut CellBuffer, row_index: usize, row: Vec<Cell>) {
+///
+/// The column a wide grapheme spans into is written as a blank cell, not merely skipped,
+/// so the trailing half never keeps stale content from an earlier write and no partial
+/// grapheme is ever left in the buffer.
+fn write_row(
+    buffer: &mut CellBuffer,
+    row_index: usize,
+    row: Vec<Cell>,
+    width_config: &WidthConfig,
+) {
     let Ok(row_position) = u16::try_from(row_index) else {
         return;
     };
     let mut column = 0usize;
     for cell in row {
-        let advance = grapheme_columns(cell.grapheme());
+        let advance = grapheme_columns(cell.grapheme(), width_config);
         write_cell(buffer, column, row_position, cell);
+        blank_spanned_columns(buffer, column, row_position, advance);
         column += advance;
+    }
+}
+
+/// Blank the columns a grapheme spans beyond its first, so a wide grapheme's trailing
+/// column shows a space rather than leftover content.
+fn blank_spanned_columns(
+    buffer: &mut CellBuffer,
+    column: usize,
+    row_position: u16,
+    advance: usize,
+) {
+    for offset in 1..advance {
+        write_cell(buffer, column + offset, row_position, Cell::blank());
     }
 }
 
@@ -543,18 +623,20 @@ enum LineToken {
 /// next word (plus its separating space) would overflow the target width. A word carries
 /// its graphemes' own styles, so wrapping never restyles content; the separating space is
 /// the source space cell, held back until the following word joins the same row.
-struct LineWrapper {
+struct LineWrapper<'a> {
     width: usize,
+    width_config: &'a WidthConfig,
     rows: Vec<Vec<Cell>>,
     current: Vec<Cell>,
     current_columns: usize,
     pending_space: Option<Cell>,
 }
 
-impl LineWrapper {
-    fn new(width: usize) -> LineWrapper {
+impl<'a> LineWrapper<'a> {
+    fn new(width: usize, width_config: &'a WidthConfig) -> LineWrapper<'a> {
         LineWrapper {
             width,
+            width_config,
             rows: Vec::new(),
             current: Vec::new(),
             current_columns: 0,
@@ -570,7 +652,7 @@ impl LineWrapper {
     }
 
     fn push_word(&mut self, cells: Vec<Cell>) {
-        let columns = count_columns(&cells);
+        let columns = count_columns(&cells, self.width_config);
         if columns > self.width {
             self.pending_space = None;
             self.push_broken_word(cells);
@@ -588,7 +670,11 @@ impl LineWrapper {
         self.append_with_space(cells, columns);
     }
 
-    /// Break a word wider than the whole line across rows, one grapheme at a time.
+    /// Break a word wider than the whole line across rows, one grapheme cluster at a time.
+    ///
+    /// Each cell already holds exactly one grapheme cluster, so breaking between cells can
+    /// never split a cluster: a base and its combining marks stay in the same cell and
+    /// therefore on the same row.
     fn push_broken_word(&mut self, cells: Vec<Cell>) {
         for cell in cells {
             self.push_grapheme_breaking(cell);
@@ -596,7 +682,7 @@ impl LineWrapper {
     }
 
     fn push_grapheme_breaking(&mut self, cell: Cell) {
-        let columns = grapheme_columns(cell.grapheme());
+        let columns = grapheme_columns(cell.grapheme(), self.width_config);
         if self.would_overflow(columns) {
             self.flush();
         }

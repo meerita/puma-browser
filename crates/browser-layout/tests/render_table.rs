@@ -5,7 +5,7 @@
 
 use browser_css::Emphasis;
 use browser_html::{Document, InlineRun, SemanticNode};
-use browser_layout::{render_document, CellBuffer};
+use browser_layout::{render_document, CellBuffer, WidthConfig};
 
 fn document_of(nodes: Vec<SemanticNode>) -> Document {
     Document::new(nodes, None, 0)
@@ -78,8 +78,12 @@ fn find_row(buffer: &CellBuffer, needle: &str) -> Option<u16> {
 
 #[test]
 fn wide_view_aligns_each_column_across_header_and_data_rows() {
-    let buffer = render_document(&document_of(vec![people_table()]), 40)
-        .expect("a table that fits must lay out");
+    let buffer = render_document(
+        &document_of(vec![people_table()]),
+        40,
+        &WidthConfig::default(),
+    )
+    .expect("a table that fits must lay out");
 
     let header = row_text(&buffer, 0);
     let alice = row_text(&buffer, 1);
@@ -97,8 +101,12 @@ fn wide_view_aligns_each_column_across_header_and_data_rows() {
 
 #[test]
 fn header_cells_render_bold_and_data_cells_do_not() {
-    let buffer = render_document(&document_of(vec![people_table()]), 40)
-        .expect("a table that fits must lay out");
+    let buffer = render_document(
+        &document_of(vec![people_table()]),
+        40,
+        &WidthConfig::default(),
+    )
+    .expect("a table that fits must lay out");
 
     let header_cell = buffer.cell_at(0, 0).expect("the header row exists");
     let data_cell = buffer.cell_at(0, 1).expect("the first data row exists");
@@ -108,8 +116,12 @@ fn header_cells_render_bold_and_data_cells_do_not() {
 
 #[test]
 fn narrow_view_falls_back_to_record_lines() {
-    let buffer = render_document(&document_of(vec![people_table()]), 18)
-        .expect("a narrow table must lay out");
+    let buffer = render_document(
+        &document_of(vec![people_table()]),
+        18,
+        &WidthConfig::default(),
+    )
+    .expect("a narrow table must lay out");
 
     let heading = find_row(&buffer, "Alice").expect("the first record heading appears");
     assert_eq!(
@@ -131,7 +143,8 @@ fn column_widths_derive_from_the_widest_cell_in_the_column() {
         row(vec![cell(false, "long"), cell(false, "y")]),
     ]);
 
-    let buffer = render_document(&document_of(vec![grid]), 40).expect("table must lay out");
+    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default())
+        .expect("table must lay out");
 
     // Column zero is as wide as "long" (4) plus a two-column gap, so the second column
     // starts at offset 6 on both rows regardless of the shorter cell above.
@@ -146,7 +159,8 @@ fn wide_grapheme_cells_measure_at_two_columns() {
         row(vec![cell(false, "a"), cell(false, "c")]),
     ]);
 
-    let buffer = render_document(&document_of(vec![grid]), 40).expect("table must lay out");
+    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default())
+        .expect("table must lay out");
 
     // The wide grapheme occupies two columns, so column zero is two wide and the second
     // column starts at offset 4 (two for the grapheme, two for the gap).
@@ -162,7 +176,8 @@ fn linked_cell_content_is_underlined() {
         cell(false, "tail"),
     ])]);
 
-    let buffer = render_document(&document_of(vec![grid]), 40).expect("table must lay out");
+    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default())
+        .expect("table must lay out");
 
     let first = buffer.cell_at(0, 0).expect("the linked cell renders");
     assert!(

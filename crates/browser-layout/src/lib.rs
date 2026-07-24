@@ -7,7 +7,9 @@ mod cell;
 mod error;
 mod render;
 mod table;
+mod width;
 
 pub use cell::{Cell, CellBuffer};
 pub use error::LayoutError;
 pub use render::render_document;
+pub use width::{AmbiguousWidth, WidthConfig};

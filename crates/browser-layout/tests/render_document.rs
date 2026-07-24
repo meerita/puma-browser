@@ -5,7 +5,7 @@
 
 use browser_css::Emphasis;
 use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
-use browser_layout::{render_document, CellBuffer, LayoutError};
+use browser_layout::{render_document, CellBuffer, LayoutError, WidthConfig};
 use unicode_width::UnicodeWidthStr;
 
 fn document_of(nodes: Vec<SemanticNode>) -> Document {
@@ -37,7 +37,7 @@ fn row_text(buffer: &CellBuffer, row: u16) -> String {
 fn zero_width_returns_zero_width_error() {
     let document = document_of(vec![paragraph("hello")]);
 
-    let outcome = render_document(&document, 0);
+    let outcome = render_document(&document, 0, &WidthConfig::default());
 
     assert!(matches!(outcome, Err(LayoutError::ZeroWidth)));
 }
@@ -48,7 +48,8 @@ fn long_paragraph_wraps_so_no_row_exceeds_the_width() {
     let words = vec!["word"; 40].join(" ");
     let document = document_of(vec![paragraph(&words)]);
 
-    let buffer = render_document(&document, width).expect("paragraph must lay out");
+    let buffer =
+        render_document(&document, width, &WidthConfig::default()).expect("paragraph must lay out");
 
     assert!(
         buffer.height() > 1,
@@ -76,7 +77,8 @@ fn heading_and_two_list_items_produce_expected_rows_and_bullets() {
         },
     ]);
 
-    let buffer = render_document(&document, 40).expect("document must lay out");
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("document must lay out");
 
     // One blank row before and after the heading, then one row per list item.
     assert_eq!(buffer.height(), 5);
@@ -94,7 +96,8 @@ fn ordered_list_items_render_running_numbers() {
         inline_style: None,
     }]);
 
-    let buffer = render_document(&document, 40).expect("ordered list must lay out");
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("ordered list must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "1. x");
     assert_eq!(row_text(&buffer, 1).trim_end(), "2. y");
@@ -116,7 +119,8 @@ fn a_nested_unordered_list_indents_one_level_under_its_parent() {
         inline_style: None,
     }]);
 
-    let buffer = render_document(&document, 40).expect("nested list must lay out");
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("nested list must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "• a");
     assert_eq!(row_text(&buffer, 1).trim_end(), "  • b");
@@ -141,7 +145,8 @@ fn ordered_numbering_restarts_within_each_nested_list() {
         inline_style: None,
     }]);
 
-    let buffer = render_document(&document, 40).expect("nested ordered list must lay out");
+    let buffer = render_document(&document, 40, &WidthConfig::default())
+        .expect("nested ordered list must lay out");
 
     let rows: Vec<String> = (0..buffer.height())
         .map(|row| row_text(&buffer, row).trim_end().to_string())
@@ -158,7 +163,7 @@ fn a_wrapped_list_item_aligns_its_continuation_under_the_item_text() {
         inline_style: None,
     }]);
 
-    let buffer = render_document(&document, 7).expect("list must lay out");
+    let buffer = render_document(&document, 7, &WidthConfig::default()).expect("list must lay out");
 
     // "• alpha" fills the width; "beta" wraps and indents under the item text, not the marker.
     assert_eq!(row_text(&buffer, 0).trim_end(), "• alpha");
@@ -171,7 +176,8 @@ fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
         text: String::from("abcdefghij\nkl"),
     }]);
 
-    let buffer = render_document(&document, 5).expect("code block must lay out");
+    let buffer =
+        render_document(&document, 5, &WidthConfig::default()).expect("code block must lay out");
 
     // Two source lines stay two rows; the long line is clipped to the width, not wrapped.
     assert_eq!(buffer.height(), 2);
@@ -183,7 +189,8 @@ fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
 fn combining_mark_grapheme_occupies_a_single_cell() {
     let document = document_of(vec![paragraph("e\u{0301}x")]);
 
-    let buffer = render_document(&document, 10).expect("paragraph must lay out");
+    let buffer =
+        render_document(&document, 10, &WidthConfig::default()).expect("paragraph must lay out");
 
     assert_eq!(
         buffer.cell_at(0, 0).expect("cluster cell").grapheme(),
@@ -196,7 +203,8 @@ fn combining_mark_grapheme_occupies_a_single_cell() {
 fn double_width_grapheme_advances_two_columns() {
     let document = document_of(vec![paragraph("x界y")]);
 
-    let buffer = render_document(&document, 10).expect("paragraph must lay out");
+    let buffer =
+        render_document(&document, 10, &WidthConfig::default()).expect("paragraph must lay out");
 
     assert_eq!(buffer.cell_at(0, 0).expect("first cell").grapheme(), "x");
     assert_eq!(buffer.cell_at(1, 0).expect("wide cell").grapheme(), "界");
@@ -229,7 +237,8 @@ fn representative_document_renders_to_the_expected_rows() {
         SemanticNode::Separator,
     ]);
 
-    let buffer = render_document(&document, 20).expect("document must lay out");
+    let buffer =
+        render_document(&document, 20, &WidthConfig::default()).expect("document must lay out");
 
     let rows: Vec<String> = (0..buffer.height())
         .map(|row| row_text(&buffer, row).trim_end().to_string())
@@ -283,7 +292,8 @@ fn a_multi_run_paragraph_applies_each_runs_own_emphasis() {
         inline_style: None,
     }]);
 
-    let buffer = render_document(&document, 40).expect("paragraph must lay out");
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("paragraph must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "word bold tail");
     // "word " occupies columns 0..5, "bold" columns 5..9, " tail" from column 9.
@@ -315,7 +325,8 @@ fn a_linked_run_is_underlined_while_plain_text_is_not() {
         inline_style: None,
     }]);
 
-    let buffer = render_document(&document, 40).expect("paragraph must lay out");
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("paragraph must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "see link");
     // "see " occupies columns 0..4, "link" columns 4..8.
@@ -338,8 +349,10 @@ fn run_boundaries_do_not_change_word_wrapping() {
         inline_style: None,
     }]);
 
-    let plain_buffer = render_document(&plain, width).expect("plain paragraph must lay out");
-    let marked_buffer = render_document(&marked, width).expect("marked paragraph must lay out");
+    let plain_buffer = render_document(&plain, width, &WidthConfig::default())
+        .expect("plain paragraph must lay out");
+    let marked_buffer = render_document(&marked, width, &WidthConfig::default())
+        .expect("marked paragraph must lay out");
 
     let plain_rows: Vec<String> = (0..plain_buffer.height())
         .map(|row| row_text(&plain_buffer, row).trim_end().to_string())
@@ -357,7 +370,7 @@ fn document_taller_than_the_addressable_range_returns_dimension_overflow() {
     let nodes = vec![SemanticNode::Separator; usize::from(u16::MAX) + 1];
     let document = document_of(nodes);
 
-    let outcome = render_document(&document, 4);
+    let outcome = render_document(&document, 4, &WidthConfig::default());
 
     assert!(matches!(outcome, Err(LayoutError::DimensionOverflow)));
 }

@@ -5,7 +5,7 @@
 
 use browser_css::Color;
 use browser_html::{Document, InlineRun, SemanticNode};
-use browser_layout::{render_document, Cell, CellBuffer};
+use browser_layout::{render_document, Cell, CellBuffer, WidthConfig};
 
 const CONTENT_WIDTH: u16 = 20;
 
@@ -35,7 +35,8 @@ fn paragraph(text: &str, inline_style: Option<&str>) -> SemanticNode {
 fn a_display_none_paragraph_produces_no_rows() {
     let document = document_of(vec![paragraph("hidden text", Some("display: none"))]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH).expect("layout must succeed");
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+        .expect("layout must succeed");
 
     assert_eq!(buffer.height(), 0);
 }
@@ -47,7 +48,8 @@ fn a_hidden_paragraph_does_not_suppress_its_visible_sibling() {
         paragraph("shown", None),
     ]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH).expect("layout must succeed");
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+        .expect("layout must succeed");
 
     assert_eq!(buffer.height(), 1);
     assert_eq!(buffer.cell_at(0, 0).map(|cell| cell.grapheme()), Some("s"));
@@ -57,7 +59,8 @@ fn a_hidden_paragraph_does_not_suppress_its_visible_sibling() {
 fn an_inline_color_reaches_the_rendered_cells() {
     let document = document_of(vec![paragraph("hello", Some("color: red"))]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH).expect("layout must succeed");
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+        .expect("layout must succeed");
 
     let first = buffer.cell_at(0, 0).expect("first cell must exist");
     assert_eq!(first.grapheme(), "h");
@@ -72,7 +75,8 @@ fn an_inherited_color_reaches_a_child_paragraph_cell() {
         inline_style: Some(String::from("color: green")),
     }]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH).expect("layout must succeed");
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+        .expect("layout must succeed");
 
     let colored = cell_with_grapheme(&buffer, "q").expect("quoted text must be rendered");
     assert_eq!(colored.foreground(), Some(Color::Green));
@@ -82,7 +86,8 @@ fn an_inherited_color_reaches_a_child_paragraph_cell() {
 fn uppercase_text_transform_is_applied_to_rendered_text() {
     let document = document_of(vec![paragraph("hi", Some("text-transform: uppercase"))]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH).expect("layout must succeed");
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+        .expect("layout must succeed");
 
     assert_eq!(buffer.cell_at(0, 0).map(|cell| cell.grapheme()), Some("H"));
     assert_eq!(buffer.cell_at(1, 0).map(|cell| cell.grapheme()), Some("I"));
