@@ -1,12 +1,24 @@
 // @file crates/browser-cli/src/run_mode_tests.rs
-// @description Verifies argument resolution selects MCP, a URL load target, a blank page, or an error.
+// @description Verifies argument resolution selects MCP, a URL or file load target, a blank page, or an error.
 // @layer cli
 // @created meerita <meerita@icloud.com>
 
+use std::path::Path;
+
+use tempfile::tempdir;
+
 use super::{resolve_mode, ResolvedMode};
 
+fn resolved_in(working_directory: &Path, arguments: &[&str]) -> ResolvedMode {
+    resolve_mode(
+        arguments.iter().map(|argument| argument.to_string()),
+        working_directory,
+    )
+}
+
 fn resolved_for(arguments: &[&str]) -> ResolvedMode {
-    resolve_mode(arguments.iter().map(|argument| argument.to_string()))
+    let working_directory = tempdir().expect("a temporary working directory must be created");
+    resolved_in(working_directory.path(), arguments)
 }
 
 #[test]
@@ -20,7 +32,7 @@ fn mcp_keyword_selects_mcp_mode() {
 }
 
 #[test]
-fn terminal_keyword_without_a_url_opens_a_blank_page() {
+fn terminal_keyword_without_an_address_opens_a_blank_page() {
     assert!(matches!(
         resolved_for(&["terminal"]),
         ResolvedMode::TerminalBlank
@@ -43,6 +55,43 @@ fn bare_host_argument_is_assumed_to_be_https() {
         panic!("a bare host must resolve to a terminal load target");
     };
     assert_eq!(url.scheme(), "https");
+}
+
+#[test]
+fn bare_token_with_no_matching_file_is_assumed_to_be_https() {
+    let working_directory = tempdir().expect("a temporary working directory must be created");
+    let resolved = resolved_in(working_directory.path(), &["not-a-real-file.html"]);
+    let ResolvedMode::TerminalUrl(url) = resolved else {
+        panic!("a bare token with no matching file must resolve to a web address");
+    };
+    assert_eq!(url.scheme(), "https");
+}
+
+#[test]
+fn bare_token_naming_an_existing_file_becomes_a_file_load_target() {
+    let working_directory = tempdir().expect("a temporary working directory must be created");
+    std::fs::write(working_directory.path().join("page.html"), "<p>hello</p>")
+        .expect("the temporary file must be written");
+    let resolved = resolved_in(working_directory.path(), &["page.html"]);
+    let ResolvedMode::TerminalUrl(url) = resolved else {
+        panic!("an existing local file must resolve to a terminal load target");
+    };
+    assert_eq!(url.scheme(), "file");
+}
+
+#[test]
+fn absolute_path_to_a_missing_file_resolves_to_a_usage_error_echoing_the_argument() {
+    let working_directory = tempdir().expect("a temporary working directory must be created");
+    let missing = working_directory.path().join("does-not-exist.html");
+    let argument = missing.to_string_lossy().to_string();
+    let resolved = resolved_in(working_directory.path(), &[argument.as_str()]);
+    let ResolvedMode::UsageError(message) = resolved else {
+        panic!("a missing absolute path must resolve to a usage error");
+    };
+    assert!(
+        message.contains(&argument),
+        "the usage error must echo the typed argument: {message:?}"
+    );
 }
 
 #[test]

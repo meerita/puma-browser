@@ -1,5 +1,5 @@
 // @file crates/browser-network/src/fetch.rs
-// @description HTTP/HTTPS fetch: timeout, safe capped redirects, bounded raw body, charset hint.
+// @description Resource acquisition: HTTP/HTTPS fetch and bounded local file:// reads, dispatched on scheme.
 // @layer network
 // @created meerita <meerita@icloud.com>
 
@@ -23,6 +23,61 @@ const MAX_REDIRECT_COUNT: usize = 10;
 /// How long a single request may take before it is abandoned.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Acquire `url` and return the raw document, dispatching on its scheme.
+///
+/// A `file://` URL is read from disk; any other URL is fetched over HTTP or HTTPS.
+/// The public signature is identical for both paths so callers do not distinguish
+/// local from remote acquisition.
+pub async fn fetch(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
+    match url.scheme() {
+        "file" => read_local_file(url).await,
+        _ => fetch_over_http(url).await,
+    }
+}
+
+/// Read a local file named by a `file://` URL into a [`FetchedDocument`].
+///
+/// The read is bounded by [`MAX_RESPONSE_BYTES`] via a metadata check before the body
+/// is loaded. A directory is rejected. The content type is guessed from the file
+/// extension and no charset is declared, so the parse boundary detects the encoding.
+/// Raw `std::io::Error` values are mapped to typed variants and never cross outward.
+async fn read_local_file(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
+    let Some(path) = url.path_buf() else {
+        return Err(NetworkError::InvalidUrl);
+    };
+    let metadata = tokio::fs::metadata(&path).await.map_err(map_file_error)?;
+    if metadata.is_dir() {
+        return Err(NetworkError::PathIsDirectory);
+    }
+    if metadata.len() > MAX_RESPONSE_BYTES {
+        return Err(NetworkError::FileTooLarge);
+    }
+    let body = tokio::fs::read(&path).await.map_err(map_file_error)?;
+    let content_type = content_type_for_path(&path);
+    Ok(FetchedDocument::new(url.clone(), content_type, None, body))
+}
+
+/// Map a filesystem error to a typed variant, keeping raw io detail out of callers.
+fn map_file_error(error: std::io::Error) -> NetworkError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return NetworkError::FileNotFound;
+    }
+    NetworkError::FileReadFailed
+}
+
+/// Guess a content type from a file extension: HTML extensions map to `text/html`,
+/// everything else to `text/plain`. The parse boundary handles the actual bytes.
+fn content_type_for_path(path: &std::path::Path) -> String {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("html") | Some("htm") | Some("xhtml") => "text/html".to_string(),
+        _ => "text/plain".to_string(),
+    }
+}
+
 /// Fetch `url` over HTTP or HTTPS and return the raw response.
 ///
 /// Redirects are followed manually so each hop can be validated: the target scheme
@@ -30,7 +85,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// is capped at [`MAX_REDIRECT_COUNT`]. The body is bounded at [`MAX_RESPONSE_BYTES`]
 /// while streaming and returned undecoded; decoding to Unicode happens at the parse
 /// boundary, where a `<meta charset>` can be honored.
-pub async fn fetch(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
+async fn fetch_over_http(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
     let client = build_client()?;
     let mut current = Url::parse(url.as_str()).map_err(|_| NetworkError::InvalidUrl)?;
     let mut redirect_count: usize = 0;

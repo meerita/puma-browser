@@ -3,6 +3,8 @@
 //! @layer cli
 //! @created meerita <meerita@icloud.com>
 
+use std::path::Path;
+
 use anyhow::{anyhow, Result};
 use browser_core::NavigationController;
 use browser_mcp::McpServer;
@@ -16,7 +18,7 @@ const MCP_MODE_KEYWORD: &str = "mcp";
 const TERMINAL_MODE_KEYWORD: &str = "terminal";
 
 /// A one-line reminder of how the binary is invoked, shown when an argument is rejected.
-const USAGE_HINT: &str = "usage: puma [mcp | <url>]";
+const USAGE_HINT: &str = "usage: puma [mcp | <url> | <path>]";
 
 /// What the process should do, resolved from the command-line arguments alone.
 ///
@@ -33,40 +35,62 @@ enum ResolvedMode {
 /// Resolves the process arguments into a [`ResolvedMode`].
 ///
 /// The `mcp` keyword selects the MCP server. The `terminal` keyword is skipped so a later
-/// argument can still be a URL. The first argument that is neither keyword is treated as
-/// the initial URL and parsed with [`BrowserUrl::parse`]: a valid URL becomes the load
-/// target, and one that fails to parse becomes a fail-fast usage error. With no such
-/// argument the terminal opens on a blank page.
-fn resolve_mode(arguments: impl Iterator<Item = String>) -> ResolvedMode {
+/// argument can still be an address. The first argument that is neither keyword is treated
+/// as the initial address and resolved against `working_directory`: a local file path or a
+/// URL becomes the load target, and input that resolves to neither becomes a fail-fast
+/// usage error. With no such argument the terminal opens on a blank page.
+///
+/// The working directory is threaded in rather than read here, so resolving the mode does
+/// no filesystem probing of its own beyond what the resolver performs and stays testable
+/// against a temporary directory.
+fn resolve_mode(arguments: impl Iterator<Item = String>, working_directory: &Path) -> ResolvedMode {
     for argument in arguments {
         match argument.as_str() {
             MCP_MODE_KEYWORD => return ResolvedMode::Mcp,
             TERMINAL_MODE_KEYWORD => continue,
-            _ => return resolve_url_argument(&argument),
+            _ => return resolve_address_argument(&argument, working_directory),
         }
     }
     ResolvedMode::TerminalBlank
 }
 
-/// Parses a non-keyword argument as the initial URL, or reports a usage error.
-fn resolve_url_argument(argument: &str) -> ResolvedMode {
-    match BrowserUrl::parse(argument) {
+/// Resolves a non-keyword argument to a load target, or reports a usage error.
+///
+/// The argument is resolved by [`browser_core::resolve_address`], which decides between a
+/// local file path and a web address and validates the result. Any resolution failure
+/// becomes the fail-fast usage error; the CLI holds no path-detection policy of its own.
+fn resolve_address_argument(argument: &str, working_directory: &Path) -> ResolvedMode {
+    match browser_core::resolve_address(argument, working_directory) {
         Ok(url) => ResolvedMode::TerminalUrl(url),
         Err(_) => ResolvedMode::UsageError(usage_error_message(argument)),
     }
 }
 
-/// A short, safe message for an argument that looks like a URL but does not parse.
+/// A short, safe message for an argument that resolves to neither a file nor a URL.
 ///
 /// The argument is the text the user typed, not remote content, so echoing it back is
 /// safe; no network response or page text is involved.
 fn usage_error_message(argument: &str) -> String {
-    format!("Not a valid URL: {argument}\n{USAGE_HINT}")
+    format!("Not a valid address: {argument}\n{USAGE_HINT}")
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    run(resolve_mode(std::env::args().skip(1))).await
+    run(resolve_arguments()).await
+}
+
+/// Reads the working directory and resolves the process arguments into a [`ResolvedMode`].
+///
+/// The working directory is needed to resolve a relative or bare-token file argument. If
+/// it cannot be read (for example the directory was removed), resolution fails fast with a
+/// usage error rather than panicking.
+fn resolve_arguments() -> ResolvedMode {
+    let Ok(working_directory) = std::env::current_dir() else {
+        return ResolvedMode::UsageError(format!(
+            "Could not read the working directory\n{USAGE_HINT}"
+        ));
+    };
+    resolve_mode(std::env::args().skip(1), &working_directory)
 }
 
 async fn run(resolved: ResolvedMode) -> Result<()> {

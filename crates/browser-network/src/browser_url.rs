@@ -42,6 +42,25 @@ impl BrowserUrl {
         Ok(Self(parsed))
     }
 
+    /// Construct a `file://` URL from an absolute filesystem path.
+    ///
+    /// This is pure: it constructs the URL and nothing more. It does not probe the
+    /// filesystem, expand `~`, or consult the working directory; callers absolutize
+    /// the path before calling. `url::Url::from_file_path` requires an absolute path
+    /// and reports any other input as [`NetworkError::InvalidUrl`].
+    pub fn from_file_path(path: &std::path::Path) -> Result<Self, NetworkError> {
+        let parsed = Url::from_file_path(path).map_err(|_| NetworkError::InvalidUrl)?;
+        Ok(Self(parsed))
+    }
+
+    /// The on-disk path this URL points to, when it is a `file://` URL.
+    ///
+    /// Returns `None` for non-file URLs or a file URL that does not map to a valid
+    /// path on this platform.
+    pub fn path_buf(&self) -> Option<std::path::PathBuf> {
+        self.0.to_file_path().ok()
+    }
+
     pub fn scheme(&self) -> &str {
         self.0.scheme()
     }

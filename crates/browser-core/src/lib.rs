@@ -3,12 +3,14 @@
 //! @layer core
 //! @created meerita <meerita@icloud.com>
 
+mod address_resolver;
 mod current_page;
 mod error;
 mod ids;
 mod tab_id;
 mod tab_state;
 
+pub use address_resolver::resolve_address;
 pub use browser_html::{Document, DocumentTitle};
 pub use browser_layout::CellBuffer;
 pub use browser_network::BrowserUrl;
