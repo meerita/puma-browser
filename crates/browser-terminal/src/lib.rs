@@ -338,23 +338,16 @@ fn draw_frame(
 ) {
     let terminal_width = frame.area().width;
     let chunks = Layout::vertical([
-        Constraint::Length(1), // title bar
+        Constraint::Min(0),    // content area
         Constraint::Length(1), // separator
         Constraint::Length(1), // command bar
         Constraint::Length(1), // separator
-        Constraint::Min(0),    // content area
+        Constraint::Length(1), // title bar
         Constraint::Length(1), // hints bar
     ])
     .split(frame.area());
 
-    let title_text = compose_title_bar(
-        label,
-        scroll_percent,
-        script_count,
-        page_byte_count,
-        terminal_width,
-    );
-    draw_chrome_row(frame, chunks[0], &title_text);
+    draw_body(frame, view, page, chunks[0], scroll_offset);
 
     draw_separator(frame, chunks[1]);
 
@@ -372,10 +365,17 @@ fn draw_frame(
 
     draw_separator(frame, chunks[3]);
 
-    draw_body(frame, view, page, chunks[4], scroll_offset);
+    let title_text = compose_title_bar(
+        label,
+        scroll_percent,
+        script_count,
+        page_byte_count,
+        terminal_width,
+    );
+    draw_chrome_row(frame, chunks[4], &title_text);
 
     let hints_text = compose_hints_bar(None, terminal_width);
-    draw_chrome_row(frame, chunks[5], &hints_text);
+    frame.render_widget(Paragraph::new(hints_text), chunks[5]);
 }
 
 /// Renders a reversed-style chrome row (title bar or hints bar).
