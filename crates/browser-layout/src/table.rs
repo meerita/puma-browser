@@ -3,7 +3,7 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
-use browser_css::{Emphasis, TextStyle};
+use browser_css::{cascade, Emphasis, TextStyle};
 use browser_html::{InlineRun, SemanticNode};
 
 use crate::cell::Cell;
@@ -76,11 +76,14 @@ fn grid_row(node: &SemanticNode, base: &TextStyle) -> Option<GridRow> {
 }
 
 fn grid_cell(node: &SemanticNode, base: &TextStyle) -> Option<GridCell> {
-    let SemanticNode::TableCell { header, children } = node else {
+    let SemanticNode::TableCell {
+        header, children, ..
+    } = node
+    else {
         return None;
     };
     let runs = collect_cell_runs(children);
-    let content = runs_to_cells(&runs, &cell_base_style(*header, base));
+    let content = runs_to_cells(&runs, &cell_base_style(node, *header, base));
     let columns = count_columns(&content);
     Some(GridCell {
         header: *header,
@@ -89,15 +92,17 @@ fn grid_cell(node: &SemanticNode, base: &TextStyle) -> Option<GridCell> {
     })
 }
 
-/// Header cells render with bold emphasis so a header row stays distinguishable without
-/// relying on color.
-fn cell_base_style(header: bool, base: &TextStyle) -> TextStyle {
+/// The base style for a cell's content: the cell cascaded from the table's style, with
+/// header cells forced bold so a header row stays distinguishable without relying on
+/// color.
+fn cell_base_style(node: &SemanticNode, header: bool, base: &TextStyle) -> TextStyle {
+    let style = cascade(base, node);
     if !header {
-        return *base;
+        return style;
     }
     TextStyle {
         emphasis: Emphasis::Bold,
-        ..*base
+        ..style
     }
 }
 
@@ -115,12 +120,12 @@ fn collect_cell_runs(children: &[SemanticNode]) -> Vec<InlineRun> {
 
 fn collect_node_runs(node: &SemanticNode, runs: &mut Vec<InlineRun>) {
     match node {
-        SemanticNode::Paragraph { runs: block } | SemanticNode::Heading { runs: block, .. } => {
+        SemanticNode::Paragraph { runs: block, .. } | SemanticNode::Heading { runs: block, .. } => {
             append_block_runs(runs, block)
         }
         SemanticNode::List { children, .. }
-        | SemanticNode::ListItem { children }
-        | SemanticNode::Quote { children } => append_children_runs(runs, children),
+        | SemanticNode::ListItem { children, .. }
+        | SemanticNode::Quote { children, .. } => append_children_runs(runs, children),
         _ => {}
     }
 }

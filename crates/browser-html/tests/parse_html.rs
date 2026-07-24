@@ -15,7 +15,7 @@ fn parse(source: &str) -> Vec<SemanticNode> {
 /// The text of a text block that holds exactly one plain run, for terse assertions.
 fn single_run_text(node: &SemanticNode) -> &str {
     match node {
-        SemanticNode::Heading { runs, .. } | SemanticNode::Paragraph { runs } => {
+        SemanticNode::Heading { runs, .. } | SemanticNode::Paragraph { runs, .. } => {
             assert_eq!(runs.len(), 1, "expected exactly one run");
             &runs[0].text
         }
@@ -31,7 +31,7 @@ fn headings_map_to_heading_nodes_with_their_level_and_text() {
     let headings: Vec<(u8, &str)> = nodes
         .iter()
         .filter_map(|node| match node {
-            SemanticNode::Heading { level, runs } => Some((*level, runs[0].text.as_str())),
+            SemanticNode::Heading { level, runs, .. } => Some((*level, runs[0].text.as_str())),
             _ => None,
         })
         .collect();
@@ -58,6 +58,7 @@ fn heading_text_is_stripped_of_control_characters() {
         vec![SemanticNode::Heading {
             level: 1,
             runs: vec![InlineRun::plain("Clean[31mText".to_string())],
+            inline_style: None,
         }]
     );
 }
@@ -78,6 +79,7 @@ fn paragraph_with_inline_anchor_splits_the_link_into_its_own_run() {
                 },
                 InlineRun::plain(" for details".to_string()),
             ],
+            inline_style: None,
         }]
     );
 }
@@ -96,7 +98,10 @@ fn standalone_anchor_produces_no_block_node() {
 fn list_maps_to_a_list_of_items_each_holding_a_paragraph_run() {
     let nodes = parse("<ul><li>Alpha</li><li>Beta</li></ul>");
 
-    let SemanticNode::List { ordered, children } = &nodes[0] else {
+    let SemanticNode::List {
+        ordered, children, ..
+    } = &nodes[0]
+    else {
         panic!("expected a list node");
     };
     assert!(!ordered, "an unordered list must not be marked ordered");
@@ -105,7 +110,7 @@ fn list_maps_to_a_list_of_items_each_holding_a_paragraph_run() {
     let items: Vec<&str> = children
         .iter()
         .map(|item| match item {
-            SemanticNode::ListItem { children } => single_run_text(&children[0]),
+            SemanticNode::ListItem { children, .. } => single_run_text(&children[0]),
             _ => panic!("expected a list item"),
         })
         .collect();
@@ -126,7 +131,7 @@ fn ordered_list_is_marked_ordered() {
 /// The block children of a list item, panicking when the node is not a list item.
 fn list_item_children(item: &SemanticNode) -> &[SemanticNode] {
     match item {
-        SemanticNode::ListItem { children } => children,
+        SemanticNode::ListItem { children, .. } => children,
         _ => panic!("expected a list item"),
     }
 }
@@ -134,7 +139,9 @@ fn list_item_children(item: &SemanticNode) -> &[SemanticNode] {
 /// The single list item of a list holding exactly one item, with the ordered flag.
 fn sole_item(node: &SemanticNode) -> (bool, &SemanticNode) {
     match node {
-        SemanticNode::List { ordered, children } => {
+        SemanticNode::List {
+            ordered, children, ..
+        } => {
             assert_eq!(children.len(), 1, "expected exactly one list item");
             (*ordered, &children[0])
         }
@@ -230,7 +237,9 @@ fn blockquote_maps_to_a_quote_node_with_a_paragraph_child() {
         vec![SemanticNode::Quote {
             children: vec![SemanticNode::Paragraph {
                 runs: vec![InlineRun::plain("A remembered line".to_string())],
+                inline_style: None,
             }],
+            inline_style: None,
         }]
     );
 }
@@ -270,7 +279,7 @@ fn script_element_is_never_emitted_is_counted_and_yields_a_warning() {
     assert!(has_warning, "a suppressed script must surface a warning");
 
     let leaks_script = document.children().iter().any(|node| match node {
-        SemanticNode::Paragraph { runs } => runs.iter().any(|run| run.text.contains("alert")),
+        SemanticNode::Paragraph { runs, .. } => runs.iter().any(|run| run.text.contains("alert")),
         SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
             text.contains("alert")
         }
@@ -294,10 +303,11 @@ fn paragraph_text_and_title_are_stripped_of_escape_and_control_characters() {
         document.children(),
         &[SemanticNode::Paragraph {
             runs: vec![InlineRun::plain("Hello[31m World".to_string())],
+            inline_style: None,
         }]
     );
 
-    let SemanticNode::Paragraph { runs } = &document.children()[0] else {
+    let SemanticNode::Paragraph { runs, .. } = &document.children()[0] else {
         panic!("expected a single paragraph node");
     };
     assert!(

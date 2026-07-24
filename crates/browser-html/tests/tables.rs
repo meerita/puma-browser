@@ -49,7 +49,7 @@ fn cell_text(cell: &SemanticNode) -> String {
     };
     let mut text = String::new();
     for block in children {
-        if let SemanticNode::Paragraph { runs } = block {
+        if let SemanticNode::Paragraph { runs, .. } = block {
             runs.iter().for_each(|run| text.push_str(&run.text));
         }
     }
@@ -97,7 +97,7 @@ fn cells_preserve_inline_emphasis_and_links_as_runs() {
     let SemanticNode::TableCell { children, .. } = cell else {
         panic!("expected a table cell");
     };
-    let SemanticNode::Paragraph { runs } = &children[0] else {
+    let SemanticNode::Paragraph { runs, .. } = &children[0] else {
         panic!("expected a paragraph inside the cell");
     };
     let linked = runs

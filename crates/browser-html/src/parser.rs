@@ -515,7 +515,11 @@ impl<'a> TreeExtractor<'a> {
         if runs.is_empty() {
             return;
         }
-        output.push(SemanticNode::Heading { level, runs });
+        output.push(SemanticNode::Heading {
+            level,
+            runs,
+            inline_style: self.inline_style(element),
+        });
     }
 
     fn push_paragraph(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
@@ -523,7 +527,10 @@ impl<'a> TreeExtractor<'a> {
         if runs.is_empty() {
             return;
         }
-        output.push(SemanticNode::Paragraph { runs });
+        output.push(SemanticNode::Paragraph {
+            runs,
+            inline_style: self.inline_style(element),
+        });
     }
 
     fn push_list(&mut self, element: usize, ordered: bool, output: &mut Vec<SemanticNode>) {
@@ -531,7 +538,11 @@ impl<'a> TreeExtractor<'a> {
         if children.is_empty() {
             return;
         }
-        output.push(SemanticNode::List { ordered, children });
+        output.push(SemanticNode::List {
+            ordered,
+            children,
+            inline_style: self.inline_style(element),
+        });
     }
 
     fn push_quote(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
@@ -539,7 +550,10 @@ impl<'a> TreeExtractor<'a> {
         if children.is_empty() {
             return;
         }
-        output.push(SemanticNode::Quote { children });
+        output.push(SemanticNode::Quote {
+            children,
+            inline_style: self.inline_style(element),
+        });
     }
 
     /// Map a `<table>` into a `Table` of `TableRow`s of `TableCell`s.
@@ -612,7 +626,11 @@ impl<'a> TreeExtractor<'a> {
         // position, so a spanned cell is rendered as a single cell rather than widened.
         // Honoring spans needs a grid model that a later table milestone will add.
         let children = self.block_children(node);
-        cells.push(SemanticNode::TableCell { header, children });
+        cells.push(SemanticNode::TableCell {
+            header,
+            children,
+            inline_style: self.inline_style(node),
+        });
     }
 
     fn list_items(&mut self, element: usize) -> Vec<SemanticNode> {
@@ -631,7 +649,10 @@ impl<'a> TreeExtractor<'a> {
         if children.is_empty() {
             return;
         }
-        items.push(SemanticNode::ListItem { children });
+        items.push(SemanticNode::ListItem {
+            children,
+            inline_style: self.inline_style(node),
+        });
     }
 
     fn is_list_item_element(&self, node: usize) -> bool {
@@ -701,7 +722,12 @@ impl<'a> TreeExtractor<'a> {
         if runs.is_empty() {
             return;
         }
-        output.push(SemanticNode::Paragraph { runs });
+        // An anonymous paragraph gathers bare inline content that has no element of its
+        // own, so it carries no inline style.
+        output.push(SemanticNode::Paragraph {
+            runs,
+            inline_style: None,
+        });
     }
 
     /// Gather a text block's content into a sequence of styled inline runs.
@@ -839,7 +865,10 @@ impl<'a> TreeExtractor<'a> {
         if runs.is_empty() {
             return;
         }
-        output.push(SemanticNode::Summary { runs });
+        output.push(SemanticNode::Summary {
+            runs,
+            inline_style: self.inline_style(element),
+        });
     }
 
     fn push_form(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
@@ -908,7 +937,10 @@ impl<'a> TreeExtractor<'a> {
 
     fn push_button(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
         let runs = self.block_runs(element);
-        output.push(SemanticNode::Button { runs });
+        output.push(SemanticNode::Button {
+            runs,
+            inline_style: self.inline_style(element),
+        });
     }
 
     /// The accessible label of a form control.
@@ -1021,6 +1053,17 @@ impl<'a> TreeExtractor<'a> {
             .iter()
             .find(|attribute| local_name(&attribute.name) == wanted)
             .map(|attribute| attribute.value.to_string())
+    }
+
+    /// The raw `style` attribute of a style-bearing element, control-stripped and kept
+    /// unparsed, or `None` when the element carries no `style`.
+    ///
+    /// Control characters are removed here so no escape sequence from remote markup can
+    /// survive into a node; CSS interpretation stays in the css layer, which parses this
+    /// string during the cascade.
+    fn inline_style(&self, element: usize) -> Option<String> {
+        let raw = self.attribute(element, "style")?;
+        Some(strip_control_characters(&raw))
     }
 
     fn child_handles(&self, node: usize) -> Vec<usize> {

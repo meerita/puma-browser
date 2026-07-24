@@ -9,6 +9,7 @@ use browser_html::{Document, DocumentTitle, InlineRun, SemanticNode};
 fn document_exposes_its_children_and_title() {
     let children = vec![SemanticNode::Paragraph {
         runs: vec![InlineRun::plain("Body".to_string())],
+        inline_style: None,
     }];
     let title = Some(DocumentTitle::new("Example Domain"));
     let document = Document::new(children, title, 0);

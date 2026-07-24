@@ -13,7 +13,7 @@ fn paragraph_runs(source: &str) -> Vec<InlineRun> {
         .first()
         .expect("the document must hold at least one node")
     {
-        SemanticNode::Paragraph { runs } => runs.clone(),
+        SemanticNode::Paragraph { runs, .. } => runs.clone(),
         other => panic!("expected a paragraph, found {other:?}"),
     }
 }

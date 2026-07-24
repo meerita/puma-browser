@@ -16,7 +16,9 @@ fn cell(header: bool, text: &str) -> SemanticNode {
         header,
         children: vec![SemanticNode::Paragraph {
             runs: vec![InlineRun::plain(text.to_string())],
+            inline_style: None,
         }],
+        inline_style: None,
     }
 }
 
@@ -29,7 +31,9 @@ fn linked_cell(text: &str, href: &str) -> SemanticNode {
                 emphasis: browser_html::InlineEmphasis::none(),
                 link: Some(href.to_string()),
             }],
+            inline_style: None,
         }],
+        inline_style: None,
     }
 }
 

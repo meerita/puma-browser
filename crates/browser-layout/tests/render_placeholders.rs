@@ -13,6 +13,7 @@ fn document_of(nodes: Vec<SemanticNode>) -> Document {
 fn paragraph(text: &str) -> SemanticNode {
     SemanticNode::Paragraph {
         runs: vec![InlineRun::plain(text.to_string())],
+        inline_style: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn select_renders_its_first_option_and_a_dropdown_marker() {
 fn button_renders_its_label_in_brackets() {
     let button = SemanticNode::Button {
         runs: vec![InlineRun::plain("Submit".to_string())],
+        inline_style: None,
     };
     let buffer = render_document(&document_of(vec![button]), 40).expect("button must lay out");
     assert!(buffer_text(&buffer).contains("[ Submit ]"));
@@ -92,6 +94,7 @@ fn details_renders_the_summary_then_the_body_expanded() {
         children: vec![
             SemanticNode::Summary {
                 runs: vec![InlineRun::plain("More".to_string())],
+                inline_style: None,
             },
             paragraph("Hidden body text"),
         ],

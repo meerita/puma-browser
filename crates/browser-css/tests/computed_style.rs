@@ -11,6 +11,7 @@ fn heading_is_bold_with_surrounding_spacing() {
     let style = computed_style(&SemanticNode::Heading {
         level: 1,
         runs: vec![InlineRun::plain(String::from("Title"))],
+        inline_style: None,
     });
 
     assert_eq!(style.emphasis, Emphasis::Bold);
@@ -23,7 +24,9 @@ fn list_item_uses_a_bullet_marker() {
     let style = computed_style(&SemanticNode::ListItem {
         children: vec![SemanticNode::Paragraph {
             runs: vec![InlineRun::plain(String::from("item"))],
+            inline_style: None,
         }],
+        inline_style: None,
     });
 
     assert_eq!(style.list_marker, Some(ListMarker::Disc));
@@ -33,6 +36,7 @@ fn list_item_uses_a_bullet_marker() {
 fn plain_paragraph_uses_the_default_style() {
     let style = computed_style(&SemanticNode::Paragraph {
         runs: vec![InlineRun::plain(String::from("body text"))],
+        inline_style: None,
     });
 
     assert_eq!(style, TextStyle::default());
@@ -52,7 +56,9 @@ fn quote_has_surrounding_spacing() {
     let style = computed_style(&SemanticNode::Quote {
         children: vec![SemanticNode::Paragraph {
             runs: vec![InlineRun::plain(String::from("quoted"))],
+            inline_style: None,
         }],
+        inline_style: None,
     });
 
     assert_eq!(style.spacing_before, 1);

@@ -11,22 +11,29 @@ fn all_semantic_node_variants_construct() {
         SemanticNode::Heading {
             level: 1,
             runs: vec![InlineRun::plain("Title".to_string())],
+            inline_style: None,
         },
         SemanticNode::Paragraph {
             runs: vec![InlineRun::plain("Body".to_string())],
+            inline_style: None,
         },
         SemanticNode::List {
             ordered: false,
             children: vec![SemanticNode::ListItem {
                 children: vec![SemanticNode::Paragraph {
                     runs: vec![InlineRun::plain("First".to_string())],
+                    inline_style: None,
                 }],
+                inline_style: None,
             }],
+            inline_style: None,
         },
         SemanticNode::ListItem {
             children: vec![SemanticNode::Paragraph {
                 runs: vec![InlineRun::plain("First".to_string())],
+                inline_style: None,
             }],
+            inline_style: None,
         },
         SemanticNode::Table {
             children: vec![SemanticNode::TableRow {
@@ -34,7 +41,9 @@ fn all_semantic_node_variants_construct() {
                     header: true,
                     children: vec![SemanticNode::Paragraph {
                         runs: vec![InlineRun::plain("Name".to_string())],
+                        inline_style: None,
                     }],
+                    inline_style: None,
                 }],
             }],
         },
@@ -43,19 +52,25 @@ fn all_semantic_node_variants_construct() {
                 header: false,
                 children: vec![SemanticNode::Paragraph {
                     runs: vec![InlineRun::plain("Alice".to_string())],
+                    inline_style: None,
                 }],
+                inline_style: None,
             }],
         },
         SemanticNode::TableCell {
             header: false,
             children: vec![SemanticNode::Paragraph {
                 runs: vec![InlineRun::plain("Madrid".to_string())],
+                inline_style: None,
             }],
+            inline_style: None,
         },
         SemanticNode::Quote {
             children: vec![SemanticNode::Paragraph {
                 runs: vec![InlineRun::plain("Quoted".to_string())],
+                inline_style: None,
             }],
+            inline_style: None,
         },
         SemanticNode::CodeBlock {
             text: "let x = 1;".to_string(),
@@ -79,6 +94,7 @@ fn all_semantic_node_variants_construct() {
         SemanticNode::Form {
             children: vec![SemanticNode::Button {
                 runs: vec![InlineRun::plain("Send".to_string())],
+                inline_style: None,
             }],
         },
         SemanticNode::Input {
@@ -92,22 +108,26 @@ fn all_semantic_node_variants_construct() {
         },
         SemanticNode::Button {
             runs: vec![InlineRun::plain("Submit".to_string())],
+            inline_style: None,
         },
         SemanticNode::Separator,
         SemanticNode::Landmark {
             role: LandmarkRole::Navigation,
             children: vec![SemanticNode::Paragraph {
                 runs: vec![InlineRun::plain("Menu".to_string())],
+                inline_style: None,
             }],
         },
         SemanticNode::Details {
             open: false,
             children: vec![SemanticNode::Summary {
                 runs: vec![InlineRun::plain("More".to_string())],
+                inline_style: None,
             }],
         },
         SemanticNode::Summary {
             runs: vec![InlineRun::plain("Details".to_string())],
+            inline_style: None,
         },
         SemanticNode::EmbeddedContent {
             label: "video".to_string(),

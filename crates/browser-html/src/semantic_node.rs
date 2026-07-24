@@ -17,22 +17,31 @@ use crate::landmark_role::LandmarkRole;
 /// to the network layer, not here. The document root is the [`Document`] struct itself,
 /// which owns the top-level children.
 ///
+/// Style-bearing variants carry `inline_style`: the raw, control-character-stripped
+/// value of the element's `style` attribute, or `None` when the element had none. The
+/// string is kept unparsed on purpose so the CSS layer, not the HTML layer, owns CSS
+/// interpretation; `browser-html` never depends on `browser-css`.
+///
 /// [`Document`]: crate::Document
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticNode {
     Heading {
         level: u8,
         runs: Vec<InlineRun>,
+        inline_style: Option<String>,
     },
     Paragraph {
         runs: Vec<InlineRun>,
+        inline_style: Option<String>,
     },
     List {
         ordered: bool,
         children: Vec<SemanticNode>,
+        inline_style: Option<String>,
     },
     ListItem {
         children: Vec<SemanticNode>,
+        inline_style: Option<String>,
     },
     Table {
         children: Vec<SemanticNode>,
@@ -43,9 +52,11 @@ pub enum SemanticNode {
     TableCell {
         header: bool,
         children: Vec<SemanticNode>,
+        inline_style: Option<String>,
     },
     Quote {
         children: Vec<SemanticNode>,
+        inline_style: Option<String>,
     },
     CodeBlock {
         text: String,
@@ -76,6 +87,7 @@ pub enum SemanticNode {
     },
     Button {
         runs: Vec<InlineRun>,
+        inline_style: Option<String>,
     },
     Separator,
     Landmark {
@@ -88,6 +100,7 @@ pub enum SemanticNode {
     },
     Summary {
         runs: Vec<InlineRun>,
+        inline_style: Option<String>,
     },
     EmbeddedContent {
         label: String,

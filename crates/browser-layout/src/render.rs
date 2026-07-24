@@ -3,7 +3,7 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
-use browser_css::{computed_run_style, computed_style, TextStyle};
+use browser_css::{cascade, computed_run_style, DisplayMode, TextStyle, TextTransform};
 use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -29,35 +29,53 @@ const SELECT_MARKER: &str = "▾";
 
 /// Lay a document out into a cell buffer sized to `width` columns.
 ///
-/// Each node is styled by [`computed_style`] and turned into laid-out rows: text blocks
+/// Each node is styled by the [`cascade`] and turned into laid-out rows: text blocks
 /// word-wrap to the width, code and preformatted blocks render verbatim and clip,
 /// container nodes recurse into their children, and spacing is applied as blank rows
 /// between blocks. The rows are then written into a blank buffer whose height is the
-/// total row count.
+/// total row count. The root nodes inherit from the default style, so the cascade starts
+/// from a clean context.
 pub fn render_document(document: &Document, width: u16) -> Result<CellBuffer, LayoutError> {
     if width == 0 {
         return Err(LayoutError::ZeroWidth);
     }
     let width_columns = usize::from(width);
-    let rows = render_children(document.children(), width_columns);
+    let rows = render_children(document.children(), width_columns, &TextStyle::default());
     build_buffer(rows, width)
 }
 
 /// Lay a sequence of sibling nodes out into rows, applying each node's own spacing.
-fn render_children(children: &[SemanticNode], width: usize) -> Vec<Vec<Cell>> {
+///
+/// `inherited` is the computed style of the container these nodes sit in; each node's own
+/// style cascades from it, so inherited properties like color flow down into children.
+fn render_children(
+    children: &[SemanticNode],
+    width: usize,
+    inherited: &TextStyle,
+) -> Vec<Vec<Cell>> {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for node in children {
-        append_node_rows(&mut rows, node, width);
+        append_node_rows(&mut rows, node, width, inherited);
     }
     rows
 }
 
 /// Append a node's spacing and content rows to the running row list.
 ///
-/// A structural node with no content contributes nothing, not even its spacing, so
-/// invisible nodes never leave stray blank rows behind.
-fn append_node_rows(rows: &mut Vec<Vec<Cell>>, node: &SemanticNode, width: usize) {
-    let style = computed_style(node);
+/// A node the cascade computes as hidden (`display: none` or `visibility: hidden`)
+/// contributes no rows and its subtree is not walked. A structural node with no content
+/// contributes nothing, not even its spacing, so invisible nodes never leave stray blank
+/// rows behind.
+fn append_node_rows(
+    rows: &mut Vec<Vec<Cell>>,
+    node: &SemanticNode,
+    width: usize,
+    inherited: &TextStyle,
+) {
+    let style = cascade(inherited, node);
+    if is_hidden(&style) {
+        return;
+    }
     let content = node_rows(node, &style, width);
     if content.is_empty() {
         return;
@@ -65,6 +83,14 @@ fn append_node_rows(rows: &mut Vec<Vec<Cell>>, node: &SemanticNode, width: usize
     append_blank_rows(rows, style.spacing_before);
     rows.extend(content);
     append_blank_rows(rows, style.spacing_after);
+}
+
+/// Whether a computed style removes the node from the rendered output.
+///
+/// `display: none` sets the display mode to hidden; `visibility: hidden` clears the
+/// visible flag. Either keeps the node and its subtree from contributing any rows.
+fn is_hidden(style: &TextStyle) -> bool {
+    style.display_mode == DisplayMode::Hidden || !style.visible
 }
 
 fn append_blank_rows(rows: &mut Vec<Vec<Cell>>, count: u16) {
@@ -81,10 +107,12 @@ fn append_blank_rows(rows: &mut Vec<Vec<Cell>>, count: u16) {
 fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
     match node {
         SemanticNode::Heading { runs, .. } => wrap_runs(runs, style, width),
-        SemanticNode::Paragraph { runs } => wrap_runs(runs, style, width),
-        SemanticNode::Quote { children } => render_quote(children, style, width),
-        SemanticNode::List { ordered, children } => render_list(*ordered, children, width),
-        SemanticNode::ListItem { children } => render_children(children, width),
+        SemanticNode::Paragraph { runs, .. } => wrap_runs(runs, style, width),
+        SemanticNode::Quote { children, .. } => render_quote(children, style, width),
+        SemanticNode::List {
+            ordered, children, ..
+        } => render_list(*ordered, children, width, style),
+        SemanticNode::ListItem { children, .. } => render_children(children, width, style),
         SemanticNode::Table { children } => render_table(children, style, width),
         SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
             render_verbatim(text, style, width)
@@ -97,10 +125,10 @@ fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Ce
         SemanticNode::Figure { children, caption } => {
             render_figure(children, caption, style, width)
         }
-        SemanticNode::Details { children, .. } => render_children(children, width),
-        SemanticNode::Summary { runs } => wrap_runs(runs, style, width),
-        SemanticNode::Landmark { children, .. } => render_children(children, width),
-        SemanticNode::Form { children } => render_children(children, width),
+        SemanticNode::Details { children, .. } => render_children(children, width, style),
+        SemanticNode::Summary { runs, .. } => wrap_runs(runs, style, width),
+        SemanticNode::Landmark { children, .. } => render_children(children, width, style),
+        SemanticNode::Form { children } => render_children(children, width, style),
         SemanticNode::Input {
             label, sensitive, ..
         } => single_row(clip_line(
@@ -113,7 +141,7 @@ fn node_rows(node: &SemanticNode, style: &TextStyle, width: usize) -> Vec<Vec<Ce
             style,
             width,
         )),
-        SemanticNode::Button { runs } => render_button(runs, style, width),
+        SemanticNode::Button { runs, .. } => render_button(runs, style, width),
         SemanticNode::EmbeddedContent { label } => {
             single_row(clip_line(&embedded_placeholder(label), style, width))
         }
@@ -135,9 +163,47 @@ pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
     let mut cells: Vec<Cell> = Vec::new();
     for run in runs {
         let style = computed_run_style(*base, run);
-        cells.extend(graphemes_to_cells(&run.text, &style));
+        let text = transform_text(&run.text, style.text_transform);
+        cells.extend(graphemes_to_cells(&text, &style));
     }
     cells
+}
+
+/// Apply a run's `text-transform` to its text before it becomes cells.
+///
+/// Capitalization uppercases the first character of each whitespace-separated word and
+/// leaves the rest untouched, which is a close reading of CSS `capitalize` without full
+/// word-boundary detection.
+fn transform_text(text: &str, transform: TextTransform) -> String {
+    match transform {
+        TextTransform::None => text.to_string(),
+        TextTransform::Uppercase => text.to_uppercase(),
+        TextTransform::Lowercase => text.to_lowercase(),
+        TextTransform::Capitalize => capitalize_words(text),
+    }
+}
+
+fn capitalize_words(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut at_word_start = true;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            at_word_start = true;
+            output.push(character);
+            continue;
+        }
+        push_cased(&mut output, character, at_word_start);
+        at_word_start = false;
+    }
+    output
+}
+
+fn push_cased(output: &mut String, character: char, uppercase: bool) {
+    if uppercase {
+        output.extend(character.to_uppercase());
+        return;
+    }
+    output.push(character);
 }
 
 /// Wrap a block's styled cells into rows no wider than `width` display columns.
@@ -181,7 +247,7 @@ fn flush_word(word: &mut Vec<Cell>, tokens: &mut Vec<LineToken>) {
 fn render_quote(children: &[SemanticNode], style: &TextStyle, width: usize) -> Vec<Vec<Cell>> {
     let indent = quote_indent(width);
     let content_width = width - indent;
-    render_children(children, content_width)
+    render_children(children, content_width, style)
         .into_iter()
         .map(|row| indent_row(row, indent, style))
         .collect()
@@ -198,14 +264,25 @@ fn quote_indent(width: usize) -> usize {
 /// `N. ` number for an ordered list), then lay the item's block children out and indent
 /// them under the item text. Ordered numbering is 1-based within this list; a nested
 /// list is rendered by its own call, so its numbering restarts from one.
-fn render_list(ordered: bool, items: &[SemanticNode], width: usize) -> Vec<Vec<Cell>> {
+fn render_list(
+    ordered: bool,
+    items: &[SemanticNode],
+    width: usize,
+    inherited: &TextStyle,
+) -> Vec<Vec<Cell>> {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     let mut ordinal = 1usize;
     for item in items {
         if !is_list_item(item) {
             continue;
         }
-        append_list_item_rows(&mut rows, item, &list_marker(ordered, ordinal), width);
+        append_list_item_rows(
+            &mut rows,
+            item,
+            &list_marker(ordered, ordinal),
+            width,
+            inherited,
+        );
         ordinal += 1;
     }
     rows
@@ -219,15 +296,16 @@ fn append_list_item_rows(
     item: &SemanticNode,
     marker: &str,
     width: usize,
+    inherited: &TextStyle,
 ) {
-    let SemanticNode::ListItem { children } = item else {
+    let SemanticNode::ListItem { children, .. } = item else {
         return;
     };
-    let style = computed_style(item);
+    let style = cascade(inherited, item);
     let marker_cells = graphemes_to_cells(marker, &style);
     let marker_columns = count_columns(&marker_cells);
     let content_width = list_content_width(width, marker_columns);
-    for (index, row) in render_children(children, content_width)
+    for (index, row) in render_children(children, content_width, &style)
         .into_iter()
         .enumerate()
     {
@@ -325,7 +403,7 @@ fn render_figure(
     style: &TextStyle,
     width: usize,
 ) -> Vec<Vec<Cell>> {
-    let mut rows = render_children(children, width);
+    let mut rows = render_children(children, width, style);
     if let Some(runs) = caption {
         rows.extend(wrap_runs(runs, style, width));
     }

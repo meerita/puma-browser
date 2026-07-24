@@ -31,6 +31,15 @@ pub enum WhiteSpace {
     NoWrap,
 }
 
+/// How a node's text is case-transformed before it is laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextTransform {
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
 /// The order in which sibling content is read out during layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadingOrder {

@@ -192,7 +192,7 @@ fn button_text_survives_as_inline_runs() {
     let button = first_matching("<form><button>Send</button></form>", |node| {
         matches!(node, SemanticNode::Button { .. })
     });
-    let SemanticNode::Button { runs } = button else {
+    let SemanticNode::Button { runs, .. } = button else {
         panic!("expected a button");
     };
     assert_eq!(

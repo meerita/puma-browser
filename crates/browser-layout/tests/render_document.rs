@@ -15,12 +15,14 @@ fn document_of(nodes: Vec<SemanticNode>) -> Document {
 fn paragraph(text: &str) -> SemanticNode {
     SemanticNode::Paragraph {
         runs: vec![InlineRun::plain(text.to_string())],
+        inline_style: None,
     }
 }
 
 fn list_item(text: &str) -> SemanticNode {
     SemanticNode::ListItem {
         children: vec![paragraph(text)],
+        inline_style: None,
     }
 }
 
@@ -65,10 +67,12 @@ fn heading_and_two_list_items_produce_expected_rows_and_bullets() {
         SemanticNode::Heading {
             level: 1,
             runs: vec![InlineRun::plain(String::from("Title"))],
+            inline_style: None,
         },
         SemanticNode::List {
             ordered: false,
             children: vec![list_item("one"), list_item("two")],
+            inline_style: None,
         },
     ]);
 
@@ -87,6 +91,7 @@ fn ordered_list_items_render_running_numbers() {
     let document = document_of(vec![SemanticNode::List {
         ordered: true,
         children: vec![list_item("x"), list_item("y")],
+        inline_style: None,
     }]);
 
     let buffer = render_document(&document, 40).expect("ordered list must lay out");
@@ -100,12 +105,15 @@ fn a_nested_unordered_list_indents_one_level_under_its_parent() {
     let inner = SemanticNode::List {
         ordered: false,
         children: vec![list_item("b")],
+        inline_style: None,
     };
     let document = document_of(vec![SemanticNode::List {
         ordered: false,
         children: vec![SemanticNode::ListItem {
             children: vec![paragraph("a"), inner],
+            inline_style: None,
         }],
+        inline_style: None,
     }]);
 
     let buffer = render_document(&document, 40).expect("nested list must lay out");
@@ -119,15 +127,18 @@ fn ordered_numbering_restarts_within_each_nested_list() {
     let inner = SemanticNode::List {
         ordered: true,
         children: vec![list_item("b"), list_item("c")],
+        inline_style: None,
     };
     let document = document_of(vec![SemanticNode::List {
         ordered: true,
         children: vec![
             SemanticNode::ListItem {
                 children: vec![paragraph("a"), inner],
+                inline_style: None,
             },
             list_item("d"),
         ],
+        inline_style: None,
     }]);
 
     let buffer = render_document(&document, 40).expect("nested ordered list must lay out");
@@ -144,6 +155,7 @@ fn a_wrapped_list_item_aligns_its_continuation_under_the_item_text() {
     let document = document_of(vec![SemanticNode::List {
         ordered: false,
         children: vec![list_item("alpha beta")],
+        inline_style: None,
     }]);
 
     let buffer = render_document(&document, 7).expect("list must lay out");
@@ -202,14 +214,17 @@ fn representative_document_renders_to_the_expected_rows() {
         SemanticNode::Heading {
             level: 1,
             runs: vec![InlineRun::plain(String::from("Title"))],
+            inline_style: None,
         },
         paragraph("Body text"),
         SemanticNode::List {
             ordered: false,
             children: vec![list_item("one"), list_item("two")],
+            inline_style: None,
         },
         SemanticNode::Quote {
             children: vec![paragraph("Quoted")],
+            inline_style: None,
         },
         SemanticNode::Separator,
     ]);
@@ -265,6 +280,7 @@ fn a_multi_run_paragraph_applies_each_runs_own_emphasis() {
             strong_run("bold"),
             InlineRun::plain(String::from(" tail")),
         ],
+        inline_style: None,
     }]);
 
     let buffer = render_document(&document, 40).expect("paragraph must lay out");
@@ -296,6 +312,7 @@ fn a_linked_run_is_underlined_while_plain_text_is_not() {
             InlineRun::plain(String::from("see ")),
             linked_run("link", "/x"),
         ],
+        inline_style: None,
     }]);
 
     let buffer = render_document(&document, 40).expect("paragraph must lay out");
@@ -318,6 +335,7 @@ fn run_boundaries_do_not_change_word_wrapping() {
             strong_run("der"),
             InlineRun::plain(String::from("ful world")),
         ],
+        inline_style: None,
     }]);
 
     let plain_buffer = render_document(&plain, width).expect("plain paragraph must lay out");
