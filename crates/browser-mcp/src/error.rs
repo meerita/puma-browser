@@ -50,6 +50,13 @@ impl McpError {
             CoreError::NavigationFailed => "NAVIGATION_FAILED",
             CoreError::TabNotFound => "TAB_NOT_FOUND",
             CoreError::Network(_) => "NETWORK_ERROR",
+            // Local-file failures cannot arise through MCP: file access is disabled and
+            // no MCP tool resolves a local path. They collapse to the generic acquisition
+            // code so no client ever learns that local files exist as a resource.
+            CoreError::LocalFileNotFound
+            | CoreError::LocalPathIsDirectory
+            | CoreError::LocalFileTooLarge
+            | CoreError::LocalFileReadFailed => "NETWORK_ERROR",
             // A parse failure leaves no document for the client to read.
             CoreError::Parse(_) => "DOCUMENT_NOT_LOADED",
             // A layout failure is an internal rendering fault, reported generically so

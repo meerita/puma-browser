@@ -26,6 +26,18 @@ pub enum CoreError {
     #[error("network error")]
     Network(#[source] NetworkError),
 
+    #[error("local file not found")]
+    LocalFileNotFound,
+
+    #[error("local path is a directory")]
+    LocalPathIsDirectory,
+
+    #[error("local file too large")]
+    LocalFileTooLarge,
+
+    #[error("local file read failed")]
+    LocalFileReadFailed,
+
     #[error("document parse error")]
     Parse(#[source] HtmlError),
 
@@ -41,7 +53,24 @@ pub enum CoreError {
 
 impl From<NetworkError> for CoreError {
     fn from(error: NetworkError) -> Self {
-        Self::Network(error)
+        // Local-file failures get distinct variants so the terminal can render a correct,
+        // path-free message instead of collapsing them into a generic connection failure.
+        // Every genuine network failure keeps mapping to `Network`.
+        match error {
+            NetworkError::FileNotFound => Self::LocalFileNotFound,
+            NetworkError::PathIsDirectory => Self::LocalPathIsDirectory,
+            NetworkError::FileTooLarge => Self::LocalFileTooLarge,
+            NetworkError::FileReadFailed => Self::LocalFileReadFailed,
+            NetworkError::InvalidUrl
+            | NetworkError::UnsupportedScheme { .. }
+            | NetworkError::DnsFailure
+            | NetworkError::TlsError
+            | NetworkError::Timeout
+            | NetworkError::TooManyRedirects
+            | NetworkError::ResponseTooLarge
+            | NetworkError::RequestFailed
+            | NetworkError::Decode => Self::Network(error),
+        }
     }
 }
 
