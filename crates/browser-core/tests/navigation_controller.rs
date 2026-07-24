@@ -47,6 +47,36 @@ async fn load_stores_the_fetched_page_and_renders_it() {
 }
 
 #[tokio::test]
+async fn load_decodes_the_body_using_the_content_type_charset() {
+    let server = MockServer::start().await;
+    // 0xE9 is `é` in windows-1252; the header charset must drive decoding at the parser.
+    let mut body = b"<html><head><title>Caf".to_vec();
+    body.push(0xE9);
+    body.extend_from_slice(b"</title></head><body><p>x</p></body></html>");
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body, "text/html; charset=windows-1252"),
+        )
+        .mount(&server)
+        .await;
+    let mut controller = NavigationController::new();
+
+    controller
+        .load(url_for(&server, "/"))
+        .await
+        .expect("loading a windows-1252 page must succeed");
+
+    assert_eq!(
+        controller
+            .current_title()
+            .expect("the page declared a title")
+            .as_str(),
+        "Café"
+    );
+}
+
+#[tokio::test]
 async fn load_of_an_oversized_body_surfaces_a_network_error() {
     let server = MockServer::start().await;
     let oversized = vec![b'a'; MAX_RESPONSE_BYTES + 1];

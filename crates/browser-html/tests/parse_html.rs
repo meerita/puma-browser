@@ -6,7 +6,7 @@
 use browser_html::{parse_html, HtmlError, InlineEmphasis, InlineRun, SemanticNode};
 
 fn parse(source: &str) -> Vec<SemanticNode> {
-    parse_html(source)
+    parse_html(source.as_bytes(), None)
         .expect("well-formed HTML must parse")
         .children()
         .to_vec()
@@ -267,8 +267,11 @@ fn image_maps_to_an_image_placeholder_with_alt_title_and_source() {
 
 #[test]
 fn script_element_is_never_emitted_is_counted_and_yields_a_warning() {
-    let document = parse_html("<head><script>alert('x')</script></head><body><p>Body</p></body>")
-        .expect("HTML with a script must parse");
+    let document = parse_html(
+        "<head><script>alert('x')</script></head><body><p>Body</p></body>".as_bytes(),
+        None,
+    )
+    .expect("HTML with a script must parse");
 
     assert_eq!(document.script_count(), 1);
 
@@ -290,9 +293,11 @@ fn script_element_is_never_emitted_is_counted_and_yields_a_warning() {
 
 #[test]
 fn paragraph_text_and_title_are_stripped_of_escape_and_control_characters() {
-    let document =
-        parse_html("<title>Ti\u{1b}tle</title><body><p>Hello\u{1b}[31m\r\u{0}World</p></body>")
-            .expect("HTML with control characters must parse");
+    let document = parse_html(
+        "<title>Ti\u{1b}tle</title><body><p>Hello\u{1b}[31m\r\u{0}World</p></body>".as_bytes(),
+        None,
+    )
+    .expect("HTML with control characters must parse");
 
     assert_eq!(document.title().map(|title| title.as_str()), Some("Title"));
 
@@ -320,7 +325,7 @@ fn paragraph_text_and_title_are_stripped_of_escape_and_control_characters() {
 fn document_exceeding_the_node_count_limit_returns_that_error() {
     let source = "<hr>".repeat(50_001);
 
-    let error = parse_html(&source).expect_err("too many nodes must fail");
+    let error = parse_html(source.as_bytes(), None).expect_err("too many nodes must fail");
 
     assert!(matches!(error, HtmlError::MaxNodeCountExceeded));
 }
@@ -329,7 +334,7 @@ fn document_exceeding_the_node_count_limit_returns_that_error() {
 fn document_exceeding_the_depth_limit_returns_that_error() {
     let source = "<div>".repeat(300);
 
-    let error = parse_html(&source).expect_err("too much nesting must fail");
+    let error = parse_html(source.as_bytes(), None).expect_err("too much nesting must fail");
 
     assert!(matches!(error, HtmlError::MaxDepthExceeded));
 }
@@ -338,7 +343,7 @@ fn document_exceeding_the_depth_limit_returns_that_error() {
 fn pathologically_nested_lists_hit_the_depth_limit() {
     let source = "<ul><li>".repeat(200);
 
-    let error = parse_html(&source).expect_err("too much list nesting must fail");
+    let error = parse_html(source.as_bytes(), None).expect_err("too much list nesting must fail");
 
     assert!(matches!(error, HtmlError::MaxDepthExceeded));
 }

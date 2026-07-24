@@ -7,7 +7,7 @@ use browser_html::{parse_html, InlineEmphasis, InlineRun, SemanticNode};
 
 /// The inline runs of the first node, which every case here builds as a single paragraph.
 fn paragraph_runs(source: &str) -> Vec<InlineRun> {
-    let document = parse_html(source).expect("well-formed HTML must parse");
+    let document = parse_html(source.as_bytes(), None).expect("well-formed HTML must parse");
     match document
         .children()
         .first()
@@ -145,9 +145,11 @@ fn base_href_resolves_a_relative_link_reference() {
 
 #[test]
 fn base_href_resolves_a_relative_image_source() {
-    let document =
-        parse_html(r#"<base href="https://example.com/docs/"><img alt="A diagram" src="pic.png">"#)
-            .expect("well-formed HTML must parse");
+    let document = parse_html(
+        r#"<base href="https://example.com/docs/"><img alt="A diagram" src="pic.png">"#.as_bytes(),
+        None,
+    )
+    .expect("well-formed HTML must parse");
 
     let source = document.children().iter().find_map(|node| match node {
         SemanticNode::ImagePlaceholder { source, .. } => source.clone(),

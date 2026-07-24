@@ -6,7 +6,7 @@
 use browser_html::{parse_html, InputKind, LandmarkRole, SemanticNode};
 
 fn first_matching(source: &str, wanted: impl Fn(&SemanticNode) -> bool) -> SemanticNode {
-    let document = parse_html(source).expect("well-formed HTML must parse");
+    let document = parse_html(source.as_bytes(), None).expect("well-formed HTML must parse");
     find_matching(document.children(), &wanted).expect("a matching node must be produced")
 }
 

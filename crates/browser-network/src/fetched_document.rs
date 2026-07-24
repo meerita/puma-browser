@@ -1,5 +1,5 @@
 // @file crates/browser-network/src/fetched_document.rs
-// @description Value object holding a fetched response: final URL, content type, decoded body.
+// @description Value object holding a fetched response: final URL, content type, charset, raw body.
 // @layer network
 // @created meerita <meerita@icloud.com>
 
@@ -8,19 +8,28 @@ use crate::browser_url::BrowserUrl;
 /// The result of a successful fetch.
 ///
 /// Holds the URL the request finally resolved to after any redirects, the response
-/// content type, and the body decoded to a `String`. The body is decoded with a lossy
-/// UTF-8 fallback, so it is always valid UTF-8 and never carries raw remote bytes.
+/// content type, the charset declared in that content type (if any), and the raw,
+/// undecoded response body. The network layer does not decode the body: decoding
+/// belongs at the parse boundary, where a `<meta charset>` inside the markup can be
+/// honored. The charset is surfaced separately so the parser can use it as a hint.
 pub struct FetchedDocument {
     final_url: BrowserUrl,
     content_type: String,
-    body: String,
+    charset: Option<String>,
+    body: Vec<u8>,
 }
 
 impl FetchedDocument {
-    pub(crate) fn new(final_url: BrowserUrl, content_type: String, body: String) -> Self {
+    pub(crate) fn new(
+        final_url: BrowserUrl,
+        content_type: String,
+        charset: Option<String>,
+        body: Vec<u8>,
+    ) -> Self {
         Self {
             final_url,
             content_type,
+            charset,
             body,
         }
     }
@@ -35,8 +44,13 @@ impl FetchedDocument {
         &self.content_type
     }
 
-    /// The response body decoded to UTF-8 with a lossy fallback.
-    pub fn body(&self) -> &str {
+    /// The charset declared in the response `Content-Type`, if any.
+    pub fn charset(&self) -> Option<&str> {
+        self.charset.as_deref()
+    }
+
+    /// The raw, undecoded response body bytes.
+    pub fn body_bytes(&self) -> &[u8] {
         &self.body
     }
 }

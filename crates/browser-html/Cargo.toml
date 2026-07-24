@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 html5ever = { workspace = true }
+encoding_rs = { workspace = true }
 url = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }

@@ -7,7 +7,7 @@ use browser_html::{parse_html, SemanticNode};
 
 /// The inline style captured on the first paragraph of a parsed document.
 fn first_paragraph_style(source: &str) -> Option<String> {
-    let document = parse_html(source).expect("valid HTML must parse");
+    let document = parse_html(source.as_bytes(), None).expect("valid HTML must parse");
     for node in document.children() {
         if let SemanticNode::Paragraph { inline_style, .. } = node {
             return inline_style.clone();
@@ -41,8 +41,8 @@ fn control_characters_are_stripped_from_the_style_value() {
 
 #[test]
 fn heading_style_attribute_is_captured() {
-    let document =
-        parse_html(r#"<h1 style="display: none">Title</h1>"#).expect("valid HTML must parse");
+    let document = parse_html(r#"<h1 style="display: none">Title</h1>"#.as_bytes(), None)
+        .expect("valid HTML must parse");
     let heading = document
         .children()
         .iter()
@@ -57,8 +57,11 @@ fn heading_style_attribute_is_captured() {
 
 #[test]
 fn blockquote_style_attribute_is_captured() {
-    let document = parse_html(r#"<blockquote style="color: blue"><p>quoted</p></blockquote>"#)
-        .expect("valid HTML must parse");
+    let document = parse_html(
+        r#"<blockquote style="color: blue"><p>quoted</p></blockquote>"#.as_bytes(),
+        None,
+    )
+    .expect("valid HTML must parse");
     let quote = document
         .children()
         .iter()

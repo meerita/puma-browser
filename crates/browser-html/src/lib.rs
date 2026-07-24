@@ -4,6 +4,7 @@
 //! @created meerita <meerita@icloud.com>
 
 mod document;
+mod encoding;
 mod error;
 mod inline_run;
 mod input_kind;
@@ -14,6 +15,7 @@ mod sanitize;
 mod semantic_node;
 
 pub use document::{Document, DocumentTitle};
+pub use encoding::{DetectedEncoding, Encoding};
 pub use error::HtmlError;
 pub use inline_run::{InlineEmphasis, InlineRun};
 pub use input_kind::InputKind;

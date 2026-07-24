@@ -12,7 +12,7 @@ const ROW_CAP: usize = 1_000;
 const COLUMN_CAP: usize = 64;
 
 fn first_table(source: &str) -> SemanticNode {
-    let document = parse_html(source).expect("well-formed HTML must parse");
+    let document = parse_html(source.as_bytes(), None).expect("well-formed HTML must parse");
     document
         .children()
         .iter()
@@ -22,7 +22,7 @@ fn first_table(source: &str) -> SemanticNode {
 }
 
 fn document_has_warning(source: &str) -> bool {
-    let document = parse_html(source).expect("well-formed HTML must parse");
+    let document = parse_html(source.as_bytes(), None).expect("well-formed HTML must parse");
     document
         .children()
         .iter()

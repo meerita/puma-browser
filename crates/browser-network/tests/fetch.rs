@@ -1,5 +1,5 @@
 // @file crates/browser-network/tests/fetch.rs
-// @description Behavior tests for fetch: success, redirects, redirect cap, size cap, lossy decode.
+// @description Behavior tests for fetch: success, redirects, caps, raw body, charset hint.
 // @layer network
 // @created meerita <meerita@icloud.com>
 
@@ -29,8 +29,43 @@ async fn successful_response_returns_body_and_content_type() {
         .await
         .expect("successful fetch must return a document");
 
-    assert_eq!(document.body(), "<html><body>hello</body></html>");
+    assert_eq!(document.body_bytes(), b"<html><body>hello</body></html>");
     assert!(document.content_type().starts_with("text/html"));
+}
+
+#[tokio::test]
+async fn content_type_charset_is_exposed_as_a_hint() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw("<html></html>", "text/html; charset=windows-1252"),
+        )
+        .mount(&server)
+        .await;
+
+    let document = fetch(&url_for(&server, "/"))
+        .await
+        .expect("successful fetch must return a document");
+
+    assert_eq!(document.charset(), Some("windows-1252"));
+}
+
+#[tokio::test]
+async fn a_response_without_a_charset_exposes_no_hint() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("<html></html>", "text/html"))
+        .mount(&server)
+        .await;
+
+    let document = fetch(&url_for(&server, "/"))
+        .await
+        .expect("successful fetch must return a document");
+
+    assert_eq!(document.charset(), None);
 }
 
 #[tokio::test]
@@ -51,7 +86,7 @@ async fn redirect_within_limit_resolves_to_final_url_and_body() {
         .await
         .expect("redirect within limit must resolve");
 
-    assert_eq!(document.body(), "final page");
+    assert_eq!(document.body_bytes(), b"final page");
     assert!(document.final_url().as_str().ends_with("/end"));
 }
 
@@ -85,19 +120,18 @@ async fn body_larger_than_limit_returns_response_too_large_error() {
 }
 
 #[tokio::test]
-async fn non_utf8_body_decodes_lossily_without_error() {
+async fn non_utf8_body_is_returned_as_raw_bytes_without_decoding() {
     let server = MockServer::start().await;
-    let invalid_utf8 = vec![0xff, 0xfe, b'H', b'i'];
+    let raw = vec![0xff, 0xfe, b'H', b'i'];
     Mock::given(method("GET"))
         .and(path("/binary"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(invalid_utf8))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(raw.clone()))
         .mount(&server)
         .await;
 
     let document = fetch(&url_for(&server, "/binary"))
         .await
-        .expect("non-UTF-8 body must decode lossily without error");
+        .expect("a non-UTF-8 body must fetch without error");
 
-    assert!(document.body().contains('\u{FFFD}'));
-    assert!(document.body().ends_with("Hi"));
+    assert_eq!(document.body_bytes(), raw.as_slice());
 }

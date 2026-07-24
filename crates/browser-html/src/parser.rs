@@ -12,6 +12,7 @@ use html5ever::{parse_document, Attribute, LocalName, Namespace, ParseOpts, Qual
 use url::Url;
 
 use crate::document::{Document, DocumentTitle};
+use crate::encoding::{decode, detect_encoding, DetectedEncoding};
 use crate::error::HtmlError;
 use crate::inline_run::{InlineEmphasis, InlineRun};
 use crate::input_kind::InputKind;
@@ -45,13 +46,19 @@ const MAX_TABLE_ROWS: usize = 1_000;
 /// count, so each row is truncated to this many cells and a warning is emitted.
 const MAX_TABLE_COLUMNS: usize = 64;
 
-/// Parse an HTML source string into a recursive [`Document`] tree.
+/// Parse HTML document bytes into a recursive [`Document`] tree.
 ///
-/// All text taken from the source is stripped of control characters before it enters a
-/// node or the title, `<script>` elements are counted and never retained, and the node
-/// count and nesting depth are bounded so untrusted input cannot exhaust memory.
-pub fn parse_html(source: &str) -> Result<Document, HtmlError> {
-    let dom = parse_document(DomBuilder::new(), ParseOpts::default()).one(source);
+/// The bytes are decoded to Unicode before parsing: the encoding is detected from a
+/// byte-order mark, then the `Content-Type` charset hint, then a bounded `<meta charset>`
+/// pre-scan, then a UTF-8 fallback, and decoding replaces malformed bytes rather than
+/// failing. All decoded text is stripped of control characters before it enters a node
+/// or the title, `<script>` elements are counted and never retained, and the node count
+/// and nesting depth are bounded so untrusted input cannot exhaust memory.
+pub fn parse_html(source: &[u8], charset_hint: Option<&str>) -> Result<Document, HtmlError> {
+    let (encoding, mark_length) = detect_encoding(source, charset_hint);
+    let decoded = decode(source, encoding, mark_length);
+
+    let dom = parse_document(DomBuilder::new(), ParseOpts::default()).one(decoded.as_str());
 
     if let Some(error) = dom.limit_error() {
         return Err(error);
@@ -71,7 +78,9 @@ pub fn parse_html(source: &str) -> Result<Document, HtmlError> {
         });
     }
 
-    Ok(Document::new(children, title, script_count))
+    // The detected and active encoding coincide because no override is applied here.
+    let detected = DetectedEncoding::new(encoding, encoding);
+    Ok(Document::new(children, title, script_count).with_encoding(detected))
 }
 
 /// Handle of the document root node, created first by [`DomBuilder::new`].
