@@ -10,7 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::cell::{Cell, CellBuffer};
 use crate::error::LayoutError;
 use crate::table::render_table;
-use crate::width::{grapheme_columns, WidthConfig};
+use crate::width::{emoji_replacement, grapheme_columns, WidthConfig};
 
 /// Columns a block quote's text is indented from the left margin.
 const QUOTE_INDENT_COLUMNS: usize = 2;
@@ -587,9 +587,27 @@ fn write_row(
     let mut column = 0usize;
     for cell in row {
         let advance = grapheme_columns(cell.grapheme(), width_config);
-        write_cell(buffer, column, row_position, cell);
+        write_cell(
+            buffer,
+            column,
+            row_position,
+            substitute_emoji(cell, width_config),
+        );
         blank_spanned_columns(buffer, column, row_position, advance);
         column += advance;
+    }
+}
+
+/// Replace an emoji cell with the neutral placeholder in `Replace` mode, leaving every other
+/// cell untouched.
+///
+/// The column advance is measured from the source grapheme before substitution, and the
+/// placeholder is measured the same way, so the substituted cell occupies exactly the space
+/// the layout reserved for it.
+fn substitute_emoji(cell: Cell, width_config: &WidthConfig) -> Cell {
+    match emoji_replacement(cell.grapheme(), width_config) {
+        Some(placeholder) => cell.with_grapheme(placeholder.to_string()),
+        None => cell,
     }
 }
 

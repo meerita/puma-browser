@@ -45,6 +45,17 @@ impl Cell {
         }
     }
 
+    /// A copy of this cell showing a different grapheme, keeping every display attribute.
+    ///
+    /// Used to substitute a neutral placeholder for an emoji cluster without disturbing the
+    /// cell's colour, emphasis, or underline.
+    pub(crate) fn with_grapheme(&self, grapheme: String) -> Cell {
+        Cell {
+            grapheme,
+            ..self.clone()
+        }
+    }
+
     pub fn grapheme(&self) -> &str {
         &self.grapheme
     }
