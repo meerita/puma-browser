@@ -55,6 +55,22 @@ const MAX_TABLE_COLUMNS: usize = 64;
 /// or the title, `<script>` elements are counted and never retained, and the node count
 /// and nesting depth are bounded so untrusted input cannot exhaust memory.
 pub fn parse_html(source: &[u8], charset_hint: Option<&str>) -> Result<Document, HtmlError> {
+    parse_html_with_base(source, charset_hint, None)
+}
+
+/// Parse HTML document bytes, resolving relative references against `document_url`.
+///
+/// Identical to [`parse_html`] except that relative link and image references resolve
+/// against a base URL when the document declares no usable `<base href>`. `document_url`
+/// is the page's own location (the final URL after any redirects); it is passed as a
+/// string so no URL type crosses this boundary. A `<base href>` still overrides it, and
+/// a relative `<base href>` resolves against it. When neither a base element nor a
+/// document URL is available, references are kept exactly as authored.
+pub fn parse_html_with_base(
+    source: &[u8],
+    charset_hint: Option<&str>,
+    document_url: Option<&str>,
+) -> Result<Document, HtmlError> {
     let (encoding, mark_length) = detect_encoding(source, charset_hint);
     let decoded = decode(source, encoding, mark_length);
 
@@ -66,7 +82,8 @@ pub fn parse_html(source: &[u8], charset_hint: Option<&str>) -> Result<Document,
 
     let arena = dom.into_nodes();
     let title = extract_title(&arena).map(|raw| DocumentTitle::new(&raw));
-    let base_url = extract_base_url(&arena);
+    let document_base = document_url.and_then(|value| Url::parse(value).ok());
+    let base_url = resolve_base_url(&arena, document_base);
 
     let mut extractor = TreeExtractor::new(&arena, base_url);
     let mut children = extractor.walk_children(DOCUMENT_HANDLE);
@@ -1245,13 +1262,21 @@ fn resolve_reference(reference: &str, base_url: Option<&Url>) -> String {
     }
 }
 
-/// Read the document's `<base href>` as an absolute base URL.
+/// Determine the base URL relative references resolve against.
 ///
-/// The first `<base>` carrying an `href` wins. A relative or malformed value yields no
-/// base, so references are left as authored.
-fn extract_base_url(arena: &[Node]) -> Option<Url> {
-    let href = find_base_href(arena, DOCUMENT_HANDLE)?;
-    Url::parse(&sanitize_reference(href)).ok()
+/// A `<base href>` wins: it resolves against `document_url` when relative and is taken
+/// as written when absolute. With no usable `<base href>`, `document_url` is the base.
+/// With neither, the result is `None` and references are left exactly as authored.
+fn resolve_base_url(arena: &[Node], document_url: Option<Url>) -> Option<Url> {
+    let Some(href) = find_base_href(arena, DOCUMENT_HANDLE) else {
+        return document_url;
+    };
+    let sanitized = sanitize_reference(href);
+    let declared = match document_url.as_ref() {
+        Some(document) => document.join(&sanitized).ok(),
+        None => Url::parse(&sanitized).ok(),
+    };
+    declared.or(document_url)
 }
 
 fn find_base_href(arena: &[Node], node: usize) -> Option<String> {

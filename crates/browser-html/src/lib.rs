@@ -21,5 +21,5 @@ pub use inline_run::{InlineEmphasis, InlineRun};
 pub use input_kind::InputKind;
 pub use landmark_role::LandmarkRole;
 pub use node_id::NodeId;
-pub use parser::parse_html;
+pub use parser::{parse_html, parse_html_with_base};
 pub use semantic_node::SemanticNode;

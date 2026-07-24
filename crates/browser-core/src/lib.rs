@@ -45,7 +45,11 @@ impl NavigationController {
     /// parse failures are mapped into [`CoreError`] by `?`.
     pub async fn load(&mut self, url: BrowserUrl) -> Result<(), CoreError> {
         let fetched = browser_network::fetch(&url).await?;
-        let document = browser_html::parse_html(fetched.body_bytes(), fetched.charset())?;
+        let document = browser_html::parse_html_with_base(
+            fetched.body_bytes(),
+            fetched.charset(),
+            Some(fetched.final_url().as_str()),
+        )?;
         let title = document.title().cloned();
         self.current_page = Some(CurrentPage::new(
             fetched.final_url().clone(),
