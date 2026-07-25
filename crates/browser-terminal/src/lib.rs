@@ -431,7 +431,8 @@ fn draw_frame(
         frame.set_cursor_position((cursor_x, cursor_y));
     } else {
         let cmd_text = compose_command_bar_reading(ui_state.current_hint(), terminal_width);
-        frame.render_widget(Paragraph::new(cmd_text), chunks[2]);
+        let hint_style = Style::default().fg(TerminalColor::DarkGray);
+        frame.render_widget(Paragraph::new(cmd_text).style(hint_style), chunks[2]);
     }
 
     draw_separator(frame, chunks[3]);

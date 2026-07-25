@@ -99,7 +99,7 @@ fn resolve(inherited: &TextStyle, user_agent: &Declarations, inline: &Declaratio
 /// trailing blank row so consecutive items in a list run tight.
 fn user_agent_declarations(node: &SemanticNode) -> Declarations {
     match node {
-        SemanticNode::Heading { .. } => heading_declarations(),
+        SemanticNode::Heading { level, .. } => heading_declarations(*level),
         SemanticNode::ListItem { .. } => list_item_declarations(),
         SemanticNode::CodeBlock { .. } | SemanticNode::PreformattedBlock { .. } => {
             preformatted_declarations()
@@ -116,12 +116,20 @@ fn user_agent_declarations(node: &SemanticNode) -> Declarations {
     }
 }
 
-fn heading_declarations() -> Declarations {
+fn heading_declarations(level: u8) -> Declarations {
     Declarations {
         emphasis: Some(Emphasis::Bold),
-        foreground: Some(Color::BrightWhite),
+        foreground: Some(heading_foreground(level)),
         spacing_after: Some(1),
         ..Declarations::default()
+    }
+}
+
+fn heading_foreground(level: u8) -> Color {
+    match level {
+        1 => Color::BrightWhite,
+        2 => Color::White,
+        _ => Color::BrightBlack,
     }
 }
 
