@@ -58,7 +58,7 @@ pub fn render_document(
 ///
 /// `inherited` is the computed style of the container these nodes sit in; each node's own
 /// style cascades from it, so inherited properties like color flow down into children.
-fn render_children(
+pub(crate) fn render_children(
     children: &[SemanticNode],
     width: usize,
     inherited: &TextStyle,
