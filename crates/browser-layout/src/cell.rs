@@ -5,6 +5,18 @@
 
 use browser_css::{Color, Emphasis, TextStyle};
 
+/// The terminal-row extent of a single hyperlink span in the laid-out buffer.
+///
+/// A link that wraps across multiple lines produces one `LinkSpan` per row. `col_end`
+/// is the inclusive last column of the span on that row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub url: String,
+    pub row: u16,
+    pub col_start: u16,
+    pub col_end: u16,
+}
+
 /// A single terminal cell: one grapheme cluster and the display attributes used to
 /// render it.
 ///
@@ -19,6 +31,7 @@ pub struct Cell {
     background: Option<Color>,
     emphasis: Emphasis,
     underline: bool,
+    link_url: Option<String>,
 }
 
 impl Cell {
@@ -31,6 +44,7 @@ impl Cell {
             background: style.background,
             emphasis: style.emphasis,
             underline: style.underline,
+            link_url: None,
         }
     }
 
@@ -42,6 +56,7 @@ impl Cell {
             background: None,
             emphasis: Emphasis::None,
             underline: false,
+            link_url: None,
         }
     }
 
@@ -54,6 +69,18 @@ impl Cell {
             grapheme,
             ..self.clone()
         }
+    }
+
+    /// Records the URL of the link this cell belongs to, used only by layout to extract
+    /// link spans. The URL is never rendered from here; it is not part of the public API.
+    pub(crate) fn set_link_url(&mut self, url: String) {
+        self.link_url = Some(url);
+    }
+
+    /// The URL of the link this cell belongs to, or `None` when the cell is not part of a
+    /// link. Crate-private so remote-sourced URLs never leak through the public cell API.
+    pub(crate) fn link_url(&self) -> Option<&str> {
+        self.link_url.as_deref()
     }
 
     pub fn grapheme(&self) -> &str {
@@ -89,6 +116,7 @@ pub struct CellBuffer {
     width: u16,
     height: u16,
     cells: Vec<Cell>,
+    links: Vec<LinkSpan>,
 }
 
 impl CellBuffer {
@@ -100,7 +128,17 @@ impl CellBuffer {
             width,
             height,
             cells,
+            links: Vec::new(),
         }
+    }
+
+    /// The link spans recorded for this buffer, in row-major order.
+    pub fn links(&self) -> &[LinkSpan] {
+        &self.links
+    }
+
+    pub(crate) fn set_links(&mut self, links: Vec<LinkSpan>) {
+        self.links = links;
     }
 
     pub fn width(&self) -> u16 {

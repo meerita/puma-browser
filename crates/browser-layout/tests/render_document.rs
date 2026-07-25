@@ -249,11 +249,11 @@ fn representative_document_renders_to_the_expected_rows() {
     assert_eq!(
         rows,
         vec![
-            String::from("Title"),                // heading
-            String::new(),                        // heading spacing_after
-            String::from("Body text"),            // paragraph
-            String::new(),                        // paragraph spacing_after
-            String::from("• one"),               // list items run tight
+            String::from("Title"),     // heading
+            String::new(),             // heading spacing_after
+            String::from("Body text"), // paragraph
+            String::new(),             // paragraph spacing_after
+            String::from("• one"),     // list items run tight
             String::from("• two"),
             String::new(),                        // list spacing_after
             String::from("  Quoted"),             // quote indented two columns
