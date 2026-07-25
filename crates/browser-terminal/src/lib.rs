@@ -19,7 +19,7 @@ use std::io::Stdout;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use browser_core::{CoreError, NavigationController};
+use browser_core::{BrowserUrl, CoreError, NavigationController};
 use browser_css::{Color, Emphasis};
 use browser_layout::{Cell, CellBuffer};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -186,6 +186,7 @@ impl TerminalApp {
             // applied after the borrow on load_state is released.
             let mut completed_load: Option<(NavigationController, Result<(), CoreError>)> = None;
             let mut command_to_submit: Option<String> = None;
+            let mut reload_url: Option<BrowserUrl> = None;
 
             if let LoadState::Active {
                 ref mut handle,
@@ -234,6 +235,9 @@ impl TerminalApp {
                             command_to_submit = Some(ui_state.take_command_buffer());
                         } else {
                             apply_command_action(action, &mut ui_state);
+                        }
+                        if matches!(action, InputAction::RefreshArmed) {
+                            reload_url = self.controller.current_url().cloned();
                         }
                         ui_state.quit_armed = quit_armed_after(action);
                         ui_state.refresh_armed = refresh_armed_after(action);
@@ -289,6 +293,23 @@ impl TerminalApp {
                         };
                     }
                 }
+            }
+
+            // Apply page refresh — re-fetch the current URL using the same load pipeline.
+            if let Some(url) = reload_url {
+                let (progress_tx, progress_rx) = watch::channel(0usize);
+                let loading_url = url.to_string();
+                let mut taken = std::mem::take(&mut self.controller);
+                let handle = tokio::spawn(async move {
+                    let result = taken.load_with_progress(url, progress_tx).await;
+                    (taken, result)
+                });
+                load_state = LoadState::Active {
+                    handle,
+                    progress_rx,
+                    spinner_frame: 0,
+                    loading_url,
+                };
             }
         }
     }
