@@ -3,7 +3,7 @@
 // @layer css
 // @created meerita <meerita@icloud.com>
 
-use browser_css::{computed_run_style, Emphasis, TextStyle};
+use browser_css::{computed_run_style, Color, Emphasis, TextStyle};
 use browser_html::{InlineEmphasis, InlineRun};
 
 fn run_with(emphasis: InlineEmphasis, link: Option<String>) -> InlineRun {
@@ -85,6 +85,31 @@ fn a_linked_run_is_underlined() {
     let style = computed_run_style(TextStyle::default(), &run);
 
     assert!(style.underline, "a linked run must be underlined");
+}
+
+#[test]
+fn a_strong_run_foreground_is_bright_white() {
+    let run = run_with(
+        InlineEmphasis {
+            strong: true,
+            emphasis: false,
+            code: false,
+        },
+        None,
+    );
+
+    let style = computed_run_style(TextStyle::default(), &run);
+
+    assert_eq!(style.foreground, Some(Color::BrightWhite));
+}
+
+#[test]
+fn a_linked_run_foreground_is_yellow() {
+    let run = run_with(InlineEmphasis::none(), Some(String::from("/path")));
+
+    let style = computed_run_style(TextStyle::default(), &run);
+
+    assert_eq!(style.foreground, Some(Color::BrightYellow));
 }
 
 #[test]

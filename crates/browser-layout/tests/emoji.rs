@@ -105,7 +105,7 @@ fn a_family_emoji_is_never_split_across_rows_by_a_force_break() {
 
     let buffer = render_document(&document, 4, &wide()).expect("emoji must lay out");
 
-    assert_eq!(buffer.height(), 2);
+    assert_eq!(buffer.height(), 3); // 2 content rows + 1 blank from paragraph spacing_after
     assert_eq!(grapheme_at(&buffer, 0, 0), FAMILY);
     assert_eq!(grapheme_at(&buffer, 2, 0), FAMILY);
     assert_eq!(grapheme_at(&buffer, 0, 1), FAMILY);

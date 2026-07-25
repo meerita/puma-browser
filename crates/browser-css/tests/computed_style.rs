@@ -3,11 +3,11 @@
 // @layer css
 // @created meerita <meerita@icloud.com>
 
-use browser_css::{computed_style, Emphasis, ListMarker, TextStyle, WhiteSpace};
+use browser_css::{computed_style, Emphasis, ListMarker, WhiteSpace};
 use browser_html::{InlineRun, SemanticNode};
 
 #[test]
-fn heading_is_bold_with_surrounding_spacing() {
+fn heading_is_bold_with_trailing_spacing() {
     let style = computed_style(&SemanticNode::Heading {
         level: 1,
         runs: vec![InlineRun::plain(String::from("Title"))],
@@ -15,7 +15,7 @@ fn heading_is_bold_with_surrounding_spacing() {
     });
 
     assert_eq!(style.emphasis, Emphasis::Bold);
-    assert_eq!(style.spacing_before, 1);
+    assert_eq!(style.spacing_before, 0);
     assert_eq!(style.spacing_after, 1);
 }
 
@@ -33,13 +33,17 @@ fn list_item_uses_a_bullet_marker() {
 }
 
 #[test]
-fn plain_paragraph_uses_the_default_style() {
+fn plain_paragraph_has_trailing_spacing() {
     let style = computed_style(&SemanticNode::Paragraph {
         runs: vec![InlineRun::plain(String::from("body text"))],
         inline_style: None,
     });
 
-    assert_eq!(style, TextStyle::default());
+    assert_eq!(style.spacing_before, 0);
+    assert_eq!(style.spacing_after, 1);
+    assert_eq!(style.emphasis, Emphasis::None);
+    assert_eq!(style.foreground, None);
+    assert!(!style.underline);
 }
 
 #[test]
@@ -52,7 +56,7 @@ fn code_block_preserves_whitespace() {
 }
 
 #[test]
-fn quote_has_surrounding_spacing() {
+fn quote_has_trailing_spacing() {
     let style = computed_style(&SemanticNode::Quote {
         children: vec![SemanticNode::Paragraph {
             runs: vec![InlineRun::plain(String::from("quoted"))],
@@ -61,6 +65,6 @@ fn quote_has_surrounding_spacing() {
         inline_style: None,
     });
 
-    assert_eq!(style.spacing_before, 1);
+    assert_eq!(style.spacing_before, 0);
     assert_eq!(style.spacing_after, 1);
 }

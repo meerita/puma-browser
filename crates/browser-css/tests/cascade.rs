@@ -111,7 +111,11 @@ fn visibility_hidden_clears_the_visible_flag() {
 fn unknown_property_is_ignored_and_leaves_the_user_agent_style() {
     let style = cascade_from_default(&paragraph_with_style("margin: 5px"));
 
-    assert_eq!(style, TextStyle::default());
+    assert_eq!(style.emphasis, Emphasis::None);
+    assert_eq!(style.foreground, None);
+    assert!(!style.underline);
+    assert_eq!(style.spacing_before, 0);
+    assert_eq!(style.spacing_after, 1);
 }
 
 #[test]
@@ -125,7 +129,11 @@ fn unknown_color_value_is_ignored_and_leaves_no_foreground() {
 fn malformed_style_string_leaves_the_user_agent_style() {
     let style = cascade_from_default(&paragraph_with_style("$$$ ;; : :"));
 
-    assert_eq!(style, TextStyle::default());
+    assert_eq!(style.emphasis, Emphasis::None);
+    assert_eq!(style.foreground, None);
+    assert!(!style.underline);
+    assert_eq!(style.spacing_before, 0);
+    assert_eq!(style.spacing_after, 1);
 }
 
 #[test]
@@ -161,7 +169,7 @@ fn spacing_does_not_inherit_from_the_parent() {
     let style = cascade(&inherited, &plain_paragraph());
 
     assert_eq!(style.spacing_before, 0);
-    assert_eq!(style.spacing_after, 0);
+    assert_eq!(style.spacing_after, 1);
 }
 
 #[test]
@@ -200,5 +208,5 @@ fn a_heading_with_no_inline_style_keeps_its_user_agent_bold() {
     let style = cascade_from_default(&heading);
 
     assert_eq!(style.emphasis, Emphasis::Bold);
-    assert_eq!(style.spacing_before, 1);
+    assert_eq!(style.spacing_before, 0);
 }

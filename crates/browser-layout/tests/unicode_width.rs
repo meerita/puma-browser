@@ -39,7 +39,7 @@ fn a_cjk_word_wraps_counting_each_ideograph_as_two_columns() {
 
     let buffer = render_document(&document, 6, &WidthConfig::default()).expect("CJK must lay out");
 
-    assert_eq!(buffer.height(), 2);
+    assert_eq!(buffer.height(), 3); // 2 content rows + 1 blank from paragraph spacing_after
     for row in 0..2 {
         for column in [0u16, 2, 4] {
             assert_eq!(
@@ -62,7 +62,7 @@ fn a_wide_grapheme_at_the_right_edge_wraps_instead_of_splitting() {
 
     let buffer = render_document(&document, 5, &WidthConfig::default()).expect("word must lay out");
 
-    assert_eq!(rows(&buffer), vec!["abcd", "界"]);
+    assert_eq!(rows(&buffer), vec!["abcd", "界", ""]);
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn a_base_and_its_combining_marks_stay_one_cluster_under_force_break() {
     let buffer =
         render_document(&document, 1, &WidthConfig::default()).expect("cluster must lay out");
 
-    assert_eq!(rows(&buffer), vec!["a", "e\u{0301}\u{0323}", "b"]);
+    assert_eq!(rows(&buffer), vec!["a", "e\u{0301}\u{0323}", "b", ""]);
 }
 
 #[test]
@@ -135,8 +135,8 @@ fn an_ambiguous_width_word_wraps_sooner_in_wide_mode_than_narrow() {
 
     // Four ambiguous graphemes fit one row of four columns in narrow mode; in wide mode
     // they are eight columns and force-break two per row.
-    assert_eq!(narrow.height(), 1);
-    assert_eq!(wide.height(), 2);
+    assert_eq!(narrow.height(), 2); // 1 content row + 1 blank from paragraph spacing_after
+    assert_eq!(wide.height(), 3);  // 2 content rows + 1 blank from paragraph spacing_after
     assert_eq!(
         wide.cell_at(0, 0).expect("first cell").grapheme(),
         "\u{00a7}"
@@ -154,5 +154,5 @@ fn ascii_layout_is_unchanged_by_the_default_width_config() {
     let buffer =
         render_document(&document, 20, &WidthConfig::default()).expect("paragraph must lay out");
 
-    assert_eq!(rows(&buffer), vec!["hello world"]);
+    assert_eq!(rows(&buffer), vec!["hello world", ""]);
 }
