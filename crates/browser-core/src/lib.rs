@@ -102,6 +102,11 @@ impl NavigationController {
         self.current_page.as_ref().map(CurrentPage::final_url)
     }
 
+    /// The parsed document for the current page, or `None` when no page is loaded.
+    pub fn current_document(&self) -> Option<&Document> {
+        self.current_page.as_ref().map(|page| page.document())
+    }
+
     /// Whether a page is currently loaded.
     pub fn has_page(&self) -> bool {
         self.current_page.is_some()
