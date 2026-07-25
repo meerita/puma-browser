@@ -38,11 +38,11 @@ pub(crate) fn compose_title_bar(
 /// one decimal place in KB below 1 MB, one decimal place in MB otherwise.
 pub(crate) fn format_page_size(byte_count: usize) -> String {
     if byte_count < 1024 {
-        format!("{byte_count} B")
+        format!("↓ {byte_count} B")
     } else if byte_count < 1024 * 1024 {
-        format!("{:.1} KB", byte_count as f64 / 1024.0)
+        format!("↓ {:.1} KB", byte_count as f64 / 1024.0)
     } else {
-        format!("{:.1} MB", byte_count as f64 / (1024.0 * 1024.0))
+        format!("↓ {:.1} MB", byte_count as f64 / (1024.0 * 1024.0))
     }
 }
 

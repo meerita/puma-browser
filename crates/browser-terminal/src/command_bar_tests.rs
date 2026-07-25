@@ -111,7 +111,7 @@ fn loading_bar_shows_spinner_url_and_kb() {
         "expected URL in loading bar: {result}"
     );
     assert!(
-        result.contains("42 KB"),
+        result.contains("↓ 42 KB"),
         "expected KB count in loading bar: {result}"
     );
 }
