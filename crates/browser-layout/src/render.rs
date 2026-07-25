@@ -7,7 +7,7 @@ use browser_css::{cascade, computed_run_style, Color, DisplayMode, TextStyle, Te
 use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::cell::{Cell, CellBuffer};
+use crate::cell::{Cell, CellBuffer, LinkSpan};
 use crate::error::LayoutError;
 use crate::table::render_table;
 use crate::width::{emoji_replacement, grapheme_columns, WidthConfig};
@@ -200,7 +200,13 @@ pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
     for run in runs {
         let style = computed_run_style(*base, run);
         let text = transform_text(&run.text, style.text_transform);
+        let start = cells.len();
         cells.extend(graphemes_to_cells(&text, &style));
+        if let Some(url) = &run.link {
+            for cell in &mut cells[start..] {
+                cell.set_link_url(url.clone());
+            }
+        }
     }
     cells
 }
@@ -295,10 +301,15 @@ fn render_quote(
 ) -> Vec<Vec<Cell>> {
     let indent = quote_indent(width);
     let content_width = width - indent;
-    trim_trailing_blanks(render_children(children, content_width, style, width_config))
-        .into_iter()
-        .map(|row| indent_row(row, indent, style))
-        .collect()
+    trim_trailing_blanks(render_children(
+        children,
+        content_width,
+        style,
+        width_config,
+    ))
+    .into_iter()
+    .map(|row| indent_row(row, indent, style))
+    .collect()
 }
 
 fn quote_indent(width: usize) -> usize {
@@ -360,8 +371,12 @@ fn append_list_item_rows(
     let marker_cells = graphemes_to_cells(marker, &style);
     let marker_columns = count_columns(&marker_cells, width_config);
     let content_width = list_content_width(width, marker_columns);
-    let children_rows =
-        trim_trailing_blanks(render_children(children, content_width, &style, width_config));
+    let children_rows = trim_trailing_blanks(render_children(
+        children,
+        content_width,
+        &style,
+        width_config,
+    ));
     for (index, row) in children_rows.into_iter().enumerate() {
         rows.push(decorate_list_row(
             index,
@@ -559,12 +574,67 @@ fn build_buffer(
     width: u16,
     width_config: &WidthConfig,
 ) -> Result<CellBuffer, LayoutError> {
+    let links = extract_link_spans(&rows, width_config);
     let height = row_height(rows.len())?;
     let mut buffer = CellBuffer::new(width, height);
     for (row_index, row) in rows.into_iter().enumerate() {
         write_row(&mut buffer, row_index, row, width_config);
     }
+    buffer.set_links(links);
     Ok(buffer)
+}
+
+/// Scan the laid-out rows and record one [`LinkSpan`] per contiguous run of cells that
+/// share a link URL on a row. A link that wraps across rows yields one span per row, and
+/// two adjacent links with different URLs yield two spans. Columns are measured with the
+/// same width config used for layout so hit-testing and rendering agree on positions.
+fn extract_link_spans(rows: &[Vec<Cell>], width_config: &WidthConfig) -> Vec<LinkSpan> {
+    let mut spans: Vec<LinkSpan> = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let Ok(row_u16) = u16::try_from(row_index) else {
+            continue;
+        };
+        let mut col: u16 = 0;
+        let mut open: Option<(u16, String)> = None; // (col_start, url)
+        for cell in row {
+            let advance =
+                u16::try_from(grapheme_columns(cell.grapheme(), width_config)).unwrap_or(1);
+            match (&open, cell.link_url()) {
+                (None, Some(url)) => {
+                    open = Some((col, url.to_string()));
+                }
+                (Some((start, previous_url)), Some(url)) if url != previous_url => {
+                    spans.push(LinkSpan {
+                        url: previous_url.clone(),
+                        row: row_u16,
+                        col_start: *start,
+                        col_end: col.saturating_sub(1),
+                    });
+                    open = Some((col, url.to_string()));
+                }
+                (Some((start, previous_url)), None) => {
+                    spans.push(LinkSpan {
+                        url: previous_url.clone(),
+                        row: row_u16,
+                        col_start: *start,
+                        col_end: col.saturating_sub(1),
+                    });
+                    open = None;
+                }
+                _ => {}
+            }
+            col = col.saturating_add(advance);
+        }
+        if let Some((start, url)) = open {
+            spans.push(LinkSpan {
+                url,
+                row: row_u16,
+                col_start: start,
+                col_end: col.saturating_sub(1),
+            });
+        }
+    }
+    spans
 }
 
 fn row_height(count: usize) -> Result<u16, LayoutError> {

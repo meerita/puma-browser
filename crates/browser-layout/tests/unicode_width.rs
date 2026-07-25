@@ -136,7 +136,7 @@ fn an_ambiguous_width_word_wraps_sooner_in_wide_mode_than_narrow() {
     // Four ambiguous graphemes fit one row of four columns in narrow mode; in wide mode
     // they are eight columns and force-break two per row.
     assert_eq!(narrow.height(), 2); // 1 content row + 1 blank from paragraph spacing_after
-    assert_eq!(wide.height(), 3);  // 2 content rows + 1 blank from paragraph spacing_after
+    assert_eq!(wide.height(), 3); // 2 content rows + 1 blank from paragraph spacing_after
     assert_eq!(
         wide.cell_at(0, 0).expect("first cell").grapheme(),
         "\u{00a7}"

@@ -176,3 +176,42 @@ fn command_append_char_handles_multibyte_unicode_correctly() {
     assert_eq!(state.command_buffer(), "");
     assert_eq!(state.cursor_byte_offset(), 0);
 }
+
+#[test]
+fn focus_next_link_advances_index() {
+    let mut state = UiState::new();
+    state.focus_next_link(3);
+    assert_eq!(state.focused_link_index, Some(0));
+    state.focus_next_link(3);
+    assert_eq!(state.focused_link_index, Some(1));
+    state.focus_next_link(3);
+    assert_eq!(state.focused_link_index, Some(2));
+    state.focus_next_link(3);
+    assert_eq!(state.focused_link_index, Some(0));
+}
+
+#[test]
+fn focus_previous_link_wraps() {
+    let mut state = UiState::new();
+    state.focus_previous_link(3);
+    assert_eq!(state.focused_link_index, Some(2));
+}
+
+#[test]
+fn enter_and_exit_link_navigation() {
+    let mut state = UiState::new();
+    state.enter_link_navigation(1);
+    assert!(state.is_in_link_navigation());
+    assert_eq!(state.focused_link_index, Some(1));
+    state.exit_link_navigation();
+    assert!(!state.is_in_link_navigation());
+    assert_eq!(state.focused_link_index, None);
+}
+
+#[test]
+fn mark_visited_and_is_visited() {
+    let mut state = UiState::new();
+    state.mark_visited("https://a.test/");
+    assert!(state.is_visited("https://a.test/"));
+    assert!(!state.is_visited("https://b.test/"));
+}

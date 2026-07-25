@@ -30,7 +30,12 @@ use current_page::CurrentPage;
 #[derive(Debug, Default)]
 pub struct NavigationController {
     current_page: Option<CurrentPage>,
+    history_stack: Vec<CurrentPage>,
 }
+
+/// The most pages the back history retains. Older pages are dropped when the stack
+/// overflows so a long browsing session cannot grow memory without bound.
+const MAX_HISTORY_DEPTH: usize = 50;
 
 impl NavigationController {
     pub fn new() -> Self {
@@ -72,6 +77,14 @@ impl NavigationController {
             Some(fetched.final_url().as_str()),
         )?;
         let title = document.title().cloned();
+        // Push the current page to history before replacing it, so Backspace can restore
+        // it without a second network round-trip.
+        if let Some(previous) = self.current_page.take() {
+            if self.history_stack.len() >= MAX_HISTORY_DEPTH {
+                self.history_stack.remove(0);
+            }
+            self.history_stack.push(previous);
+        }
         self.current_page = Some(CurrentPage::new(
             fetched.final_url().clone(),
             document,
@@ -79,6 +92,25 @@ impl NavigationController {
             byte_count,
         ));
         Ok(())
+    }
+
+    /// Returns `true` when there is at least one page in the history stack.
+    pub fn can_go_back(&self) -> bool {
+        !self.history_stack.is_empty()
+    }
+
+    /// Restores the most recently visited page from the history stack.
+    ///
+    /// Returns `true` if a page was restored, `false` when the stack was empty. The
+    /// restored page becomes the current page without a network call.
+    pub fn go_back(&mut self) -> bool {
+        match self.history_stack.pop() {
+            Some(page) => {
+                self.current_page = Some(page);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Lay the current page out into a cell buffer sized to `width` columns.

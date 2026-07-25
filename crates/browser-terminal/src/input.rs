@@ -26,6 +26,10 @@ pub(crate) enum InputAction {
     CommandDeleteBack,
     CommandCancel,
     CommandSubmit,
+    FocusNextLink,
+    FocusPreviousLink,
+    ActivateFocusedLink,
+    NavigateBack,
 }
 
 /// Interprets one key event against the current arm state and interaction mode.
@@ -40,15 +44,18 @@ pub(crate) fn map_key_event(
     quit_armed: bool,
     refresh_armed: bool,
     in_command_mode: bool,
+    in_link_navigation: bool,
 ) -> InputAction {
     if is_quit_combination(event) {
         return InputAction::Quit;
     }
     if in_command_mode {
-        map_command_mode_key(event)
-    } else {
-        map_reading_mode_key(event, quit_armed, refresh_armed)
+        return map_command_mode_key(event);
     }
+    if in_link_navigation {
+        return map_link_navigation_key(event);
+    }
+    map_reading_mode_key(event, quit_armed, refresh_armed)
 }
 
 /// The quit-arm flag after `action` runs.
@@ -75,7 +82,31 @@ fn map_reading_mode_key(event: KeyEvent, quit_armed: bool, refresh_armed: bool) 
         KeyCode::PageUp => InputAction::ScrollPageUp,
         KeyCode::Char('g') => InputAction::ScrollToTop,
         KeyCode::Char('G') => InputAction::ScrollToBottom,
+        KeyCode::Tab => InputAction::FocusNextLink,
+        KeyCode::BackTab => InputAction::FocusPreviousLink,
+        KeyCode::Backspace => InputAction::NavigateBack,
         KeyCode::Char(ch) if !ch.is_control() => InputAction::EnterCommand(ch),
+        _ => InputAction::Disarm,
+    }
+}
+
+/// Maps a key while a link is focused. Tab and Shift+Tab move focus, Enter activates the
+/// focused link, Backspace goes back in history, Esc leaves link navigation, and the
+/// scroll keys keep working so the reader can move the viewport while a link stays
+/// focused. Any other key leaves link navigation.
+fn map_link_navigation_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Tab => InputAction::FocusNextLink,
+        KeyCode::BackTab => InputAction::FocusPreviousLink,
+        KeyCode::Enter => InputAction::ActivateFocusedLink,
+        KeyCode::Esc => InputAction::Disarm,
+        KeyCode::Backspace => InputAction::NavigateBack,
+        KeyCode::Down | KeyCode::Char('j') => InputAction::ScrollLineDown,
+        KeyCode::Up | KeyCode::Char('k') => InputAction::ScrollLineUp,
+        KeyCode::PageDown => InputAction::ScrollPageDown,
+        KeyCode::PageUp => InputAction::ScrollPageUp,
+        KeyCode::Char('g') => InputAction::ScrollToTop,
+        KeyCode::Char('G') => InputAction::ScrollToBottom,
         _ => InputAction::Disarm,
     }
 }

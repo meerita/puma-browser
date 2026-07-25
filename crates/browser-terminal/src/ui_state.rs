@@ -3,6 +3,7 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 pub(crate) const READING_HINTS: &[&str] = &[
@@ -18,12 +19,15 @@ const TRANSIENT_HINT_DURATION: Duration = Duration::from_secs(5);
 pub(crate) enum InteractionMode {
     Reading,
     Command,
+    LinkNavigation,
 }
 
 pub(crate) struct UiState {
     pub(crate) interaction_mode: InteractionMode,
     pub(crate) quit_armed: bool,
     pub(crate) refresh_armed: bool,
+    pub(crate) focused_link_index: Option<usize>,
+    pub(crate) visited_urls: HashSet<String>,
     hint_index: usize,
     last_hint_advance: Instant,
     transient_hint: Option<&'static str>,
@@ -38,6 +42,8 @@ impl UiState {
             interaction_mode: InteractionMode::Reading,
             quit_armed: false,
             refresh_armed: false,
+            focused_link_index: None,
+            visited_urls: HashSet::new(),
             hint_index: 0,
             last_hint_advance: Instant::now(),
             transient_hint: None,
@@ -49,6 +55,54 @@ impl UiState {
 
     pub(crate) fn is_in_command_mode(&self) -> bool {
         matches!(self.interaction_mode, InteractionMode::Command)
+    }
+
+    pub(crate) fn is_in_link_navigation(&self) -> bool {
+        matches!(self.interaction_mode, InteractionMode::LinkNavigation)
+    }
+
+    /// Enters link navigation mode and focuses the link at `index`.
+    pub(crate) fn enter_link_navigation(&mut self, index: usize) {
+        self.interaction_mode = InteractionMode::LinkNavigation;
+        self.focused_link_index = Some(index);
+    }
+
+    /// Exits link navigation mode and clears the focused link.
+    pub(crate) fn exit_link_navigation(&mut self) {
+        self.interaction_mode = InteractionMode::Reading;
+        self.focused_link_index = None;
+    }
+
+    /// Advances focus to the next link, wrapping at the end.
+    pub(crate) fn focus_next_link(&mut self, link_count: usize) {
+        if link_count == 0 {
+            return;
+        }
+        self.focused_link_index = Some(match self.focused_link_index {
+            Some(current) => (current + 1) % link_count,
+            None => 0,
+        });
+    }
+
+    /// Moves focus to the previous link, wrapping at the start.
+    pub(crate) fn focus_previous_link(&mut self, link_count: usize) {
+        if link_count == 0 {
+            return;
+        }
+        self.focused_link_index = Some(match self.focused_link_index {
+            Some(current) => current.checked_sub(1).unwrap_or(link_count - 1),
+            None => link_count - 1,
+        });
+    }
+
+    /// Records `url` as visited for this session.
+    pub(crate) fn mark_visited(&mut self, url: &str) {
+        self.visited_urls.insert(url.to_string());
+    }
+
+    /// Returns `true` when `url` has been visited this session.
+    pub(crate) fn is_visited(&self, url: &str) -> bool {
+        self.visited_urls.contains(url)
     }
 
     pub(crate) fn enter_command_mode(&mut self, first_char: char) {
