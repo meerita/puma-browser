@@ -6,34 +6,42 @@
 mod command_bar;
 mod error;
 mod hints_bar;
-mod initial_view;
 mod input;
 mod title_bar;
 mod ui_state;
+mod view_state;
 mod viewport;
 
 pub use error::TerminalError;
-pub use initial_view::InitialView;
+pub use view_state::ViewState;
 
 use std::io::Stdout;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::Instant;
 
-use browser_core::NavigationController;
+use browser_core::{CoreError, NavigationController};
 use browser_css::{Color, Emphasis};
 use browser_layout::{Cell, CellBuffer};
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color as TerminalColor, Modifier, Style};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::{interval, Duration};
 
-use command_bar::{command_cursor_col, compose_command_bar_command, compose_command_bar_reading};
+use command_bar::{
+    command_cursor_col, compose_command_bar_command, compose_command_bar_loading,
+    compose_command_bar_reading,
+};
 use hints_bar::compose_hints_bar;
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use title_bar::compose_title_bar;
@@ -52,6 +60,20 @@ const BLANK_PLACEHOLDER: &str = "(blank page)";
 /// The concrete terminal this adapter draws to: a crossterm backend over stdout.
 type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 
+/// Handle returned by the load task, carrying the controller back alongside the result.
+type LoadHandle = JoinHandle<(NavigationController, Result<(), CoreError>)>;
+
+/// Whether a page load is in progress and the data needed to animate and restore state.
+enum LoadState {
+    Idle,
+    Active {
+        handle: LoadHandle,
+        progress_rx: watch::Receiver<usize>,
+        spinner_frame: usize,
+        loading_url: String,
+    },
+}
+
 /// Drives the terminal user interface over the navigation core.
 ///
 /// This is the output adapter the terminal binary builds on. It reads the laid-out cell
@@ -62,7 +84,7 @@ type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 #[derive(Debug)]
 pub struct TerminalApp {
     controller: NavigationController,
-    initial_view: InitialView,
+    view_state: ViewState,
 }
 
 /// A cell buffer cached alongside the content width it was laid out for, so the page
@@ -72,17 +94,11 @@ struct CachedPage {
     buffer: CellBuffer,
 }
 
-/// Whether the event loop should keep running or exit.
-enum LoopControl {
-    Continue,
-    Quit,
-}
-
 impl TerminalApp {
-    pub fn new(controller: NavigationController, initial_view: InitialView) -> Self {
+    pub fn new(controller: NavigationController, view_state: ViewState) -> Self {
         Self {
             controller,
-            initial_view,
+            view_state,
         }
     }
 
@@ -97,31 +113,63 @@ impl TerminalApp {
     /// every exit path, including errors, so the shell is never left in raw mode. A
     /// draw or backend failure is reported as [`TerminalError::RenderFailed`] with no
     /// raw error detail.
-    pub fn run(&mut self) -> Result<(), TerminalError> {
+    pub async fn run(&mut self) -> Result<(), TerminalError> {
         let mut terminal = install_terminal()?;
-        let outcome = self.drive(&mut terminal);
+        let outcome = self.drive(&mut terminal).await;
         restore_terminal(&mut terminal);
         outcome
     }
 
-    fn drive(&mut self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
+    async fn drive(&mut self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
         let mut scroll = ScrollState::new();
         let mut ui_state = UiState::new();
         let mut cache: Option<CachedPage> = None;
+        let mut load_state = LoadState::Idle;
+        let mut tick = interval(Duration::from_millis(80));
+        let mut event_stream = EventStream::new();
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
         loop {
             let now = Instant::now();
             ui_state.advance_hint_if_due(now);
             ui_state.clear_transient_if_expired(now);
+
             let size = terminal.size().map_err(|_| TerminalError::RenderFailed)?;
             let viewport_height = size.height.saturating_sub(CHROME_ROWS);
             let content_width = size.width.saturating_sub(CONTENT_PADDING * 2);
-            self.refresh_page_cache(&mut cache, content_width)?;
+
+            if matches!(load_state, LoadState::Idle) {
+                self.refresh_page_cache(&mut cache, content_width)?;
+            }
+
             let content_rows = cache.as_ref().map_or(0, |cached| cached.buffer.height());
             let max_offset = max_scroll_offset(content_rows, viewport_height);
             scroll.clamp(max_offset);
-            let label = self.status_label();
-            let scroll_percent_val = scroll_percentage(scroll.offset(), max_offset);
+
+            // Extract loading state as owned values to avoid borrow conflicts with the
+            // mutable select! arm below.
+            let loading_snapshot: Option<(usize, String, usize)> = if let LoadState::Active {
+                ref progress_rx,
+                spinner_frame,
+                ref loading_url,
+                ..
+            } = load_state
+            {
+                Some((spinner_frame, loading_url.clone(), *progress_rx.borrow()))
+            } else {
+                None
+            };
+
+            let label = loading_snapshot
+                .as_ref()
+                .map(|(_, url, _)| url.clone())
+                .unwrap_or_else(|| self.status_label());
+
+            let loading_ref = loading_snapshot
+                .as_ref()
+                .map(|(frame, url, bytes)| (*frame, url.as_str(), *bytes));
             let page = cache.as_ref().map(|cached| &cached.buffer);
+            let scroll_percent_val = scroll_percentage(scroll.offset(), max_offset);
             self.draw(
                 terminal,
                 page,
@@ -131,16 +179,116 @@ impl TerminalApp {
                 scroll_percent_val,
                 self.controller.script_count(),
                 self.controller.page_byte_count(),
+                loading_ref,
             )?;
-            if let LoopControl::Quit = step_event(
-                &mut scroll,
-                &mut ui_state,
-                &mut self.controller,
-                viewport_height,
-                max_offset,
-                now,
-            )? {
-                return Ok(());
+
+            // Accumulators for state transitions; populated inside the select! arms and
+            // applied after the borrow on load_state is released.
+            let mut completed_load: Option<(NavigationController, Result<(), CoreError>)> = None;
+            let mut command_to_submit: Option<String> = None;
+
+            if let LoadState::Active {
+                ref mut handle,
+                ref mut spinner_frame,
+                ..
+            } = load_state
+            {
+                tokio::select! {
+                    join_result = handle => {
+                        let (ctrl, result) = join_result.expect("load task must not panic");
+                        completed_load = Some((ctrl, result));
+                    }
+                    _ = tick.tick() => {
+                        *spinner_frame += 1;
+                    }
+                    maybe_event = event_stream.next() => {
+                        if let Some(Ok(Event::Key(key))) = maybe_event {
+                            if key.kind != KeyEventKind::Release
+                                && key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    maybe_event = event_stream.next() => {
+                        let Some(Ok(event)) = maybe_event else { continue; };
+                        let Event::Key(key) = event else { continue; };
+                        if key.kind == KeyEventKind::Release { continue; }
+                        let in_command_mode = ui_state.is_in_command_mode();
+                        let action = map_key_event(
+                            key,
+                            ui_state.quit_armed,
+                            ui_state.refresh_armed,
+                            in_command_mode,
+                        );
+                        if matches!(action, InputAction::Quit) {
+                            return Ok(());
+                        }
+                        ui_state.clear_transient();
+                        apply_scroll(action, &mut scroll, viewport_height, max_offset);
+                        if matches!(action, InputAction::CommandSubmit) {
+                            command_to_submit = Some(ui_state.take_command_buffer());
+                        } else {
+                            apply_command_action(action, &mut ui_state);
+                        }
+                        ui_state.quit_armed = quit_armed_after(action);
+                        ui_state.refresh_armed = refresh_armed_after(action);
+                        if matches!(action, InputAction::ArmQuit) {
+                            ui_state.set_transient_hint("Press Esc again to quit", now);
+                        } else if matches!(action, InputAction::ArmRefresh) {
+                            ui_state.set_transient_hint("Press r again to refresh", now);
+                        }
+                    }
+                    _ = tick.tick() => {}
+                }
+            }
+
+            // Apply completed load — borrow on load_state has ended.
+            if let Some((ctrl, result)) = completed_load {
+                self.controller = ctrl;
+                load_state = LoadState::Idle;
+                match result {
+                    Ok(()) => {
+                        self.view_state = ViewState::Page;
+                        scroll = ScrollState::new();
+                        cache = None;
+                    }
+                    Err(error) => {
+                        self.view_state =
+                            ViewState::Error(TerminalError::from(error).user_message());
+                        scroll = ScrollState::new();
+                        cache = None;
+                    }
+                }
+            }
+
+            // Apply command submission.
+            if let Some(input) = command_to_submit {
+                match browser_core::resolve_address(&input, &working_dir) {
+                    Err(_) => {
+                        self.view_state = ViewState::Error(format!("Not a valid address: {input}"));
+                        cache = None;
+                    }
+                    Ok(url) => {
+                        let (progress_tx, progress_rx) = watch::channel(0usize);
+                        let loading_url = url.to_string();
+                        let mut taken = std::mem::take(&mut self.controller);
+                        let handle = tokio::spawn(async move {
+                            let result = taken.load_with_progress(url, progress_tx).await;
+                            (taken, result)
+                        });
+                        load_state = LoadState::Active {
+                            handle,
+                            progress_rx,
+                            spinner_frame: 0,
+                            loading_url,
+                        };
+                    }
+                }
             }
         }
     }
@@ -151,7 +299,7 @@ impl TerminalApp {
         cache: &mut Option<CachedPage>,
         width: u16,
     ) -> Result<(), TerminalError> {
-        if !matches!(self.initial_view, InitialView::Page) {
+        if !matches!(self.view_state, ViewState::Page) {
             return Ok(());
         }
         if cache.as_ref().is_some_and(|cached| cached.width == width) {
@@ -163,10 +311,10 @@ impl TerminalApp {
     }
 
     fn status_label(&self) -> String {
-        match &self.initial_view {
-            InitialView::Blank => "blank".to_string(),
-            InitialView::Error(_) => "error".to_string(),
-            InitialView::Page => self.page_label(),
+        match &self.view_state {
+            ViewState::Blank => "blank".to_string(),
+            ViewState::Error(_) => "error".to_string(),
+            ViewState::Page => self.page_label(),
         }
     }
 
@@ -191,12 +339,13 @@ impl TerminalApp {
         scroll_percent: u16,
         script_count: usize,
         page_byte_count: usize,
+        loading: Option<(usize, &str, usize)>,
     ) -> Result<(), TerminalError> {
         terminal
             .draw(|frame| {
                 draw_frame(
                     frame,
-                    &self.initial_view,
+                    &self.view_state,
                     label,
                     page,
                     scroll_offset,
@@ -204,115 +353,11 @@ impl TerminalApp {
                     scroll_percent,
                     script_count,
                     page_byte_count,
+                    loading,
                 )
             })
             .map_err(|_| TerminalError::RenderFailed)?;
         Ok(())
-    }
-}
-
-/// Polls for one event and applies it, reporting whether the loop should quit.
-///
-/// Returns immediately with `Continue` when no event arrives within the poll window,
-/// allowing the caller to check timers and redraw between keypresses.
-fn step_event(
-    scroll: &mut ScrollState,
-    ui_state: &mut UiState,
-    controller: &mut NavigationController,
-    viewport_height: u16,
-    max_offset: u16,
-    now: Instant,
-) -> Result<LoopControl, TerminalError> {
-    let poll_available =
-        event::poll(Duration::from_millis(250)).map_err(|_| TerminalError::RenderFailed)?;
-    if !poll_available {
-        return Ok(LoopControl::Continue);
-    }
-    let event = event::read().map_err(|_| TerminalError::RenderFailed)?;
-    let Event::Key(key) = event else {
-        return Ok(LoopControl::Continue);
-    };
-    if key.kind == KeyEventKind::Release {
-        return Ok(LoopControl::Continue);
-    }
-    let in_command_mode = ui_state.is_in_command_mode();
-    let action = map_key_event(
-        key,
-        ui_state.quit_armed,
-        ui_state.refresh_armed,
-        in_command_mode,
-    );
-    if matches!(action, InputAction::Quit) {
-        return Ok(LoopControl::Quit);
-    }
-    ui_state.clear_transient();
-    apply_scroll(action, scroll, viewport_height, max_offset);
-    apply_command_action(action, ui_state, controller);
-    ui_state.quit_armed = quit_armed_after(action);
-    ui_state.refresh_armed = refresh_armed_after(action);
-    if matches!(action, InputAction::ArmQuit) {
-        ui_state.set_transient_hint("Press Esc again to quit", now);
-    } else if matches!(action, InputAction::ArmRefresh) {
-        ui_state.set_transient_hint("Press r again to refresh", now);
-    }
-    Ok(LoopControl::Continue)
-}
-
-fn apply_scroll(
-    action: InputAction,
-    scroll: &mut ScrollState,
-    viewport_height: u16,
-    max_offset: u16,
-) {
-    match action {
-        InputAction::ScrollLineDown => scroll.line_down(max_offset),
-        InputAction::ScrollLineUp => scroll.line_up(),
-        InputAction::ScrollPageDown => scroll.page_down(viewport_height, max_offset),
-        InputAction::ScrollPageUp => scroll.page_up(viewport_height),
-        InputAction::ScrollToTop => scroll.move_to_top(),
-        InputAction::ScrollToBottom => scroll.move_to_bottom(max_offset),
-        InputAction::ArmQuit
-        | InputAction::ArmRefresh
-        | InputAction::RefreshArmed
-        | InputAction::Disarm
-        | InputAction::Quit
-        | InputAction::EnterCommand(_)
-        | InputAction::CommandAppend(_)
-        | InputAction::CommandMoveCursorLeft
-        | InputAction::CommandMoveCursorRight
-        | InputAction::CommandDeleteBack
-        | InputAction::CommandCancel
-        | InputAction::CommandSubmit => {}
-    }
-}
-
-fn apply_command_action(
-    action: InputAction,
-    ui_state: &mut UiState,
-    controller: &mut NavigationController,
-) {
-    match action {
-        InputAction::EnterCommand(ch) => ui_state.enter_command_mode(ch),
-        InputAction::CommandAppend(ch) => ui_state.command_append_char(ch),
-        InputAction::CommandMoveCursorLeft => ui_state.command_move_left(),
-        InputAction::CommandMoveCursorRight => ui_state.command_move_right(),
-        InputAction::CommandDeleteBack => ui_state.command_delete_before_cursor(),
-        InputAction::CommandCancel => ui_state.cancel_command_mode(),
-        InputAction::CommandSubmit => {
-            let url = ui_state.take_command_buffer();
-            let _ = controller.navigate(&url);
-        }
-        InputAction::ScrollLineDown
-        | InputAction::ScrollLineUp
-        | InputAction::ScrollPageDown
-        | InputAction::ScrollPageUp
-        | InputAction::ScrollToTop
-        | InputAction::ScrollToBottom
-        | InputAction::ArmQuit
-        | InputAction::Quit
-        | InputAction::ArmRefresh
-        | InputAction::RefreshArmed
-        | InputAction::Disarm => {}
     }
 }
 
@@ -327,7 +372,7 @@ fn render_page(controller: &NavigationController, width: u16) -> Result<CellBuff
 #[allow(clippy::too_many_arguments)]
 fn draw_frame(
     frame: &mut Frame,
-    view: &InitialView,
+    view: &ViewState,
     label: &str,
     page: Option<&CellBuffer>,
     scroll_offset: u16,
@@ -335,6 +380,7 @@ fn draw_frame(
     scroll_percent: u16,
     script_count: usize,
     page_byte_count: usize,
+    loading: Option<(usize, &str, usize)>,
 ) {
     let terminal_width = frame.area().width;
     let chunks = Layout::vertical([
@@ -351,7 +397,11 @@ fn draw_frame(
 
     draw_separator(frame, chunks[1]);
 
-    if ui_state.is_in_command_mode() {
+    if let Some((spinner_frame, loading_url, bytes_received)) = loading {
+        let bar =
+            compose_command_bar_loading(spinner_frame, loading_url, bytes_received, terminal_width);
+        frame.render_widget(Paragraph::new(bar), chunks[2]);
+    } else if ui_state.is_in_command_mode() {
         let cmd_text = compose_command_bar_command(ui_state.command_buffer(), terminal_width);
         frame.render_widget(Paragraph::new(cmd_text), chunks[2]);
         let cursor_x = chunks[2].x
@@ -398,7 +448,7 @@ fn chrome_row_style() -> Style {
 
 fn draw_body(
     frame: &mut Frame,
-    view: &InitialView,
+    view: &ViewState,
     page: Option<&CellBuffer>,
     area: Rect,
     scroll_offset: u16,
@@ -410,9 +460,9 @@ fn draw_body(
         height: area.height,
     };
     match view {
-        InitialView::Page => draw_page(frame, page, area, padded, scroll_offset),
-        InitialView::Blank => draw_message(frame, padded, BLANK_PLACEHOLDER),
-        InitialView::Error(message) => draw_message(frame, padded, message),
+        ViewState::Page => draw_page(frame, page, area, padded, scroll_offset),
+        ViewState::Blank => draw_message(frame, padded, BLANK_PLACEHOLDER),
+        ViewState::Error(message) => draw_message(frame, padded, message),
     }
 }
 
@@ -510,6 +560,57 @@ fn map_color(color: Color) -> TerminalColor {
 fn draw_message(frame: &mut Frame, area: Rect, message: &str) {
     let paragraph = Paragraph::new(message).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn apply_scroll(
+    action: InputAction,
+    scroll: &mut ScrollState,
+    viewport_height: u16,
+    max_offset: u16,
+) {
+    match action {
+        InputAction::ScrollLineDown => scroll.line_down(max_offset),
+        InputAction::ScrollLineUp => scroll.line_up(),
+        InputAction::ScrollPageDown => scroll.page_down(viewport_height, max_offset),
+        InputAction::ScrollPageUp => scroll.page_up(viewport_height),
+        InputAction::ScrollToTop => scroll.move_to_top(),
+        InputAction::ScrollToBottom => scroll.move_to_bottom(max_offset),
+        InputAction::ArmQuit
+        | InputAction::ArmRefresh
+        | InputAction::RefreshArmed
+        | InputAction::Disarm
+        | InputAction::Quit
+        | InputAction::EnterCommand(_)
+        | InputAction::CommandAppend(_)
+        | InputAction::CommandMoveCursorLeft
+        | InputAction::CommandMoveCursorRight
+        | InputAction::CommandDeleteBack
+        | InputAction::CommandCancel
+        | InputAction::CommandSubmit => {}
+    }
+}
+
+fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
+    match action {
+        InputAction::EnterCommand(ch) => ui_state.enter_command_mode(ch),
+        InputAction::CommandAppend(ch) => ui_state.command_append_char(ch),
+        InputAction::CommandMoveCursorLeft => ui_state.command_move_left(),
+        InputAction::CommandMoveCursorRight => ui_state.command_move_right(),
+        InputAction::CommandDeleteBack => ui_state.command_delete_before_cursor(),
+        InputAction::CommandCancel => ui_state.cancel_command_mode(),
+        InputAction::ScrollLineDown
+        | InputAction::ScrollLineUp
+        | InputAction::ScrollPageDown
+        | InputAction::ScrollPageUp
+        | InputAction::ScrollToTop
+        | InputAction::ScrollToBottom
+        | InputAction::ArmQuit
+        | InputAction::Quit
+        | InputAction::ArmRefresh
+        | InputAction::RefreshArmed
+        | InputAction::Disarm
+        | InputAction::CommandSubmit => {}
+    }
 }
 
 fn install_terminal() -> Result<AppTerminal, TerminalError> {

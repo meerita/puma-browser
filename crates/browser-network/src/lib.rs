@@ -12,5 +12,5 @@ mod fetched_document;
 pub use browser_url::BrowserUrl;
 pub use cache_mode::CacheMode;
 pub use error::NetworkError;
-pub use fetch::fetch;
+pub use fetch::{fetch, fetch_with_progress};
 pub use fetched_document::FetchedDocument;

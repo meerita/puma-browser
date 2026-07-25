@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use browser_core::NavigationController;
 use browser_mcp::McpServer;
 use browser_network::BrowserUrl;
-use browser_terminal::{InitialView, TerminalApp, TerminalError};
+use browser_terminal::{TerminalApp, TerminalError, ViewState};
 
 /// The mode keyword that selects the stdio MCP server instead of the terminal.
 const MCP_MODE_KEYWORD: &str = "mcp";
@@ -97,7 +97,7 @@ async fn run(resolved: ResolvedMode) -> Result<()> {
     match resolved {
         ResolvedMode::Mcp => run_mcp(),
         ResolvedMode::TerminalBlank => {
-            run_terminal_app(NavigationController::new(), InitialView::Blank)
+            run_terminal_app(NavigationController::new(), ViewState::Blank).await
         }
         ResolvedMode::TerminalUrl(url) => run_terminal_with_url(url).await,
         ResolvedMode::UsageError(message) => Err(anyhow!(message)),
@@ -111,25 +111,27 @@ async fn run(resolved: ResolvedMode) -> Result<()> {
 /// with `Esc Esc`; it is never a hard exit.
 async fn run_terminal_with_url(url: BrowserUrl) -> Result<()> {
     let mut controller = NavigationController::new();
-    let initial_view = load_initial_view(&mut controller, url).await;
-    run_terminal_app(controller, initial_view)
+    let view_state = load_initial_view(&mut controller, url).await;
+    run_terminal_app(controller, view_state).await
 }
 
 /// Resolves a load into the initial view the terminal opens on.
 ///
-/// Success becomes [`InitialView::Page`]. Failure becomes [`InitialView::Error`] carrying
+/// Success becomes [`ViewState::Page`]. Failure becomes [`ViewState::Error`] carrying
 /// only the safe terminal `user_message` for the error, never raw error detail.
-async fn load_initial_view(controller: &mut NavigationController, url: BrowserUrl) -> InitialView {
+async fn load_initial_view(controller: &mut NavigationController, url: BrowserUrl) -> ViewState {
     match controller.load(url).await {
-        Ok(()) => InitialView::Page,
-        Err(core_error) => InitialView::Error(TerminalError::from(core_error).user_message()),
+        Ok(()) => ViewState::Page,
+        Err(core_error) => ViewState::Error(TerminalError::from(core_error).user_message()),
     }
 }
 
-fn run_terminal_app(controller: NavigationController, initial_view: InitialView) -> Result<()> {
-    let mut app = TerminalApp::new(controller, initial_view);
+async fn run_terminal_app(controller: NavigationController, view_state: ViewState) -> Result<()> {
+    let mut app = TerminalApp::new(controller, view_state);
     // Surface only the adapter's safe status message, never raw error detail.
-    app.run().map_err(|error| anyhow!(error.user_message()))
+    app.run()
+        .await
+        .map_err(|error| anyhow!(error.user_message()))
 }
 
 fn run_mcp() -> Result<()> {
