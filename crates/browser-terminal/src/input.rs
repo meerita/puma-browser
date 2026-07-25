@@ -6,10 +6,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// A single interpreted input command, decoupled from the raw key event.
-///
-/// The event loop reads one of these per key press: scroll actions move the viewport,
-/// `ArmQuit` primes the two-press quit, and `Quit` ends the loop. `Disarm` covers every
-/// key that neither scrolls nor quits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputAction {
     ScrollLineDown,
@@ -20,36 +16,80 @@ pub(crate) enum InputAction {
     ScrollToBottom,
     ArmQuit,
     Quit,
+    ArmRefresh,
+    RefreshArmed,
     Disarm,
+    EnterCommand(char),
+    CommandAppend(char),
+    CommandMoveCursorLeft,
+    CommandMoveCursorRight,
+    CommandDeleteBack,
+    CommandCancel,
+    CommandSubmit,
 }
 
-/// Interprets one key event against the current quit-arm state.
+/// Interprets one key event against the current arm state and interaction mode.
 ///
-/// `Ctrl+C` always quits immediately. `Esc` arms the quit when it is not already armed
-/// and quits on the second press. Every other recognized key scrolls; anything else
-/// disarms.
-pub(crate) fn map_key_event(event: KeyEvent, quit_armed: bool) -> InputAction {
+/// `Ctrl+C` always quits immediately. In reading mode, navigation keys scroll and
+/// `Esc`/`r` arm their respective two-press confirmations; any other printable character
+/// enters command mode seeded with that character. In command mode, `Esc` cancels,
+/// `Enter` submits, arrow keys move the cursor, `Backspace` deletes, and printable
+/// characters append to the buffer.
+pub(crate) fn map_key_event(
+    event: KeyEvent,
+    quit_armed: bool,
+    refresh_armed: bool,
+    in_command_mode: bool,
+) -> InputAction {
     if is_quit_combination(event) {
         return InputAction::Quit;
     }
+    if in_command_mode {
+        map_command_mode_key(event)
+    } else {
+        map_reading_mode_key(event, quit_armed, refresh_armed)
+    }
+}
+
+/// The quit-arm flag after `action` runs.
+///
+/// Only `ArmQuit` keeps the flag set; every other action clears it.
+pub(crate) fn quit_armed_after(action: InputAction) -> bool {
+    matches!(action, InputAction::ArmQuit)
+}
+
+/// The refresh-arm flag after `action` runs.
+///
+/// Only `ArmRefresh` keeps the flag set; every other action clears it.
+pub(crate) fn refresh_armed_after(action: InputAction) -> bool {
+    matches!(action, InputAction::ArmRefresh)
+}
+
+fn map_reading_mode_key(event: KeyEvent, quit_armed: bool, refresh_armed: bool) -> InputAction {
     match event.code {
         KeyCode::Esc => arm_or_quit(quit_armed),
+        KeyCode::Char('r') => arm_or_refresh(refresh_armed),
         KeyCode::Down | KeyCode::Char('j') => InputAction::ScrollLineDown,
         KeyCode::Up | KeyCode::Char('k') => InputAction::ScrollLineUp,
         KeyCode::PageDown => InputAction::ScrollPageDown,
         KeyCode::PageUp => InputAction::ScrollPageUp,
         KeyCode::Char('g') => InputAction::ScrollToTop,
         KeyCode::Char('G') => InputAction::ScrollToBottom,
+        KeyCode::Char(ch) if !ch.is_control() => InputAction::EnterCommand(ch),
         _ => InputAction::Disarm,
     }
 }
 
-/// The quit-arm flag after `action` runs.
-///
-/// Only arming keeps the flag set; every other action clears it, which is how any
-/// non-`Esc` key disarms a pending quit.
-pub(crate) fn quit_armed_after(action: InputAction) -> bool {
-    matches!(action, InputAction::ArmQuit)
+fn map_command_mode_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Esc => InputAction::CommandCancel,
+        KeyCode::Enter => InputAction::CommandSubmit,
+        KeyCode::Left => InputAction::CommandMoveCursorLeft,
+        KeyCode::Right => InputAction::CommandMoveCursorRight,
+        KeyCode::Backspace => InputAction::CommandDeleteBack,
+        KeyCode::Char(ch) => InputAction::CommandAppend(ch),
+        _ => InputAction::Disarm,
+    }
 }
 
 fn is_quit_combination(event: KeyEvent) -> bool {
@@ -61,6 +101,13 @@ fn arm_or_quit(quit_armed: bool) -> InputAction {
         return InputAction::Quit;
     }
     InputAction::ArmQuit
+}
+
+fn arm_or_refresh(refresh_armed: bool) -> InputAction {
+    if refresh_armed {
+        return InputAction::RefreshArmed;
+    }
+    InputAction::ArmRefresh
 }
 
 #[cfg(test)]
