@@ -409,18 +409,19 @@ fn append_record(
     }
 }
 
-/// The `  Label: ` prefix for a record field, taking the label from the header row when
-/// present and falling back to the column index otherwise.
+/// The prefix for a record field.
+///
+/// When the table has a header row, the prefix is `  Label: ` so each field is clearly
+/// labelled. Without headers, a plain indent is used instead of a numeric column index,
+/// so rows that would otherwise show `  1: title` show `  title` — cleaner for layout
+/// tables where column numbers carry no meaning for the reader.
 fn field_prefix(index: usize, labels: Option<&[String]>, base: &TextStyle) -> Vec<Cell> {
-    let label = field_label(index, labels);
-    let text = format!("{}{label}: ", " ".repeat(RECORD_INDENT_COLUMNS));
-    graphemes_to_cells(&text, base)
-}
-
-fn field_label(index: usize, labels: Option<&[String]>) -> String {
     match labels.and_then(|labels| labels.get(index)) {
-        Some(label) if !label.is_empty() => label.clone(),
-        _ => index.to_string(),
+        Some(label) if !label.is_empty() => {
+            let text = format!("{}{label}: ", " ".repeat(RECORD_INDENT_COLUMNS));
+            graphemes_to_cells(&text, base)
+        }
+        _ => space_cells(RECORD_INDENT_COLUMNS, base),
     }
 }
 
@@ -432,11 +433,13 @@ fn append_wrapped_field(
     base: &TextStyle,
     width_config: &WidthConfig,
 ) {
+    if content.is_empty() {
+        return;
+    }
     let prefix_columns = count_columns(&prefix, width_config);
     let content_width = record_content_width(width, prefix_columns);
     let wrapped = wrap_cells(content.to_vec(), content_width, width_config);
     if wrapped.is_empty() {
-        rows.push(prefix);
         return;
     }
     push_wrapped_lines(rows, &prefix, prefix_columns, wrapped, base);
