@@ -6,7 +6,7 @@
 use browser_html::SemanticNode;
 
 use crate::declaration::{parse_inline_style, Declarations};
-use crate::style_properties::{DisplayMode, Emphasis, ListMarker, ReadingOrder, WhiteSpace};
+use crate::style_properties::{Color, DisplayMode, Emphasis, ListMarker, ReadingOrder, WhiteSpace};
 use crate::text_style::TextStyle;
 
 /// Compute the reduced text style for one node given its inherited context.
@@ -119,6 +119,7 @@ fn user_agent_declarations(node: &SemanticNode) -> Declarations {
 fn heading_declarations() -> Declarations {
     Declarations {
         emphasis: Some(Emphasis::Bold),
+        foreground: Some(Color::BrightWhite),
         spacing_after: Some(1),
         ..Declarations::default()
     }

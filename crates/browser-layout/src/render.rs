@@ -3,7 +3,7 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
-use browser_css::{cascade, computed_run_style, DisplayMode, TextStyle, TextTransform};
+use browser_css::{cascade, computed_run_style, Color, DisplayMode, TextStyle, TextTransform};
 use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -48,7 +48,10 @@ pub fn render_document(
     let rows = render_children(
         document.children(),
         width_columns,
-        &TextStyle::default(),
+        &TextStyle {
+            foreground: Some(Color::White),
+            ..TextStyle::default()
+        },
         width_config,
     );
     build_buffer(rows, width, width_config)
