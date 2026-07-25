@@ -17,6 +17,7 @@ pub struct FetchedDocument {
     content_type: String,
     charset: Option<String>,
     body: Vec<u8>,
+    wire_byte_count: usize,
 }
 
 impl FetchedDocument {
@@ -25,12 +26,14 @@ impl FetchedDocument {
         content_type: String,
         charset: Option<String>,
         body: Vec<u8>,
+        wire_byte_count: usize,
     ) -> Self {
         Self {
             final_url,
             content_type,
             charset,
             body,
+            wire_byte_count,
         }
     }
 
@@ -53,4 +56,13 @@ impl FetchedDocument {
     pub fn body_bytes(&self) -> &[u8] {
         &self.body
     }
+
+    /// The wire byte count from the `Content-Length` header, or zero when absent.
+    pub fn wire_byte_count(&self) -> usize {
+        self.wire_byte_count
+    }
 }
+
+#[cfg(test)]
+#[path = "fetched_document_tests.rs"]
+mod tests;

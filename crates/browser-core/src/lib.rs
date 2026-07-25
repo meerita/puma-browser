@@ -59,7 +59,13 @@ impl NavigationController {
         progress: tokio::sync::watch::Sender<usize>,
     ) -> Result<(), CoreError> {
         let fetched = browser_network::fetch_with_progress(&url, progress).await?;
-        let byte_count = fetched.body_bytes().len();
+        let body_byte_count = fetched.body_bytes().len();
+        let wire_byte_count = fetched.wire_byte_count();
+        let byte_count = if wire_byte_count > 0 {
+            wire_byte_count
+        } else {
+            body_byte_count
+        };
         let document = browser_html::parse_html_with_base(
             fetched.body_bytes(),
             fetched.charset(),

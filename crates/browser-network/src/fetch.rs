@@ -73,7 +73,13 @@ async fn read_local_file(url: &BrowserUrl) -> Result<FetchedDocument, NetworkErr
     }
     let body = tokio::fs::read(&path).await.map_err(map_file_error)?;
     let content_type = content_type_for_path(&path);
-    Ok(FetchedDocument::new(url.clone(), content_type, None, body))
+    Ok(FetchedDocument::new(
+        url.clone(),
+        content_type,
+        None,
+        body,
+        0usize,
+    ))
 }
 
 /// Map a filesystem error to a typed variant, keeping raw io detail out of callers.
@@ -187,8 +193,15 @@ async fn collect_document_reporting_progress(
             return Err(NetworkError::ResponseTooLarge);
         }
     }
+    let wire_byte_count = response.content_length().map(|n| n as usize).unwrap_or(0);
     let body = read_bounded_body_reporting_progress(response, progress).await?;
-    Ok(FetchedDocument::new(final_url, content_type, charset, body))
+    Ok(FetchedDocument::new(
+        final_url,
+        content_type,
+        charset,
+        body,
+        wire_byte_count,
+    ))
 }
 
 fn content_type_of(response: &reqwest::Response) -> String {
