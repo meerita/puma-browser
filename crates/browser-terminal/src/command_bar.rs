@@ -38,7 +38,7 @@ pub(crate) fn compose_command_bar_loading(
     let spinner = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
     let kb = bytes_received / 1024;
     let left = format!("{spinner} Loading {url}\u{2026}");
-    let right = format!("{kb} KB");
+    let right = format!("↓ {kb} KB");
     let width = terminal_width as usize;
     let left_cols = UnicodeWidthStr::width(left.as_str());
     let right_cols = UnicodeWidthStr::width(right.as_str());

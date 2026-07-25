@@ -79,27 +79,27 @@ fn page_size_zero_bytes_omits_size_segment() {
 fn page_size_shown_when_byte_count_is_nonzero() {
     let result = compose_title_bar("Page", 50, 0, 2048, 80);
     assert!(
-        result.contains("2.0 KB"),
+        result.contains("↓ 2.0 KB"),
         "expected page size in indicators: {result}"
     );
 }
 
 #[test]
 fn format_page_size_below_one_kb_shows_bytes() {
-    assert_eq!(format_page_size(0), "0 B");
-    assert_eq!(format_page_size(512), "512 B");
-    assert_eq!(format_page_size(1023), "1023 B");
+    assert_eq!(format_page_size(0), "↓ 0 B");
+    assert_eq!(format_page_size(512), "↓ 512 B");
+    assert_eq!(format_page_size(1023), "↓ 1023 B");
 }
 
 #[test]
 fn format_page_size_in_kb_range_shows_one_decimal() {
-    assert_eq!(format_page_size(1024), "1.0 KB");
-    assert_eq!(format_page_size(1536), "1.5 KB");
-    assert_eq!(format_page_size(1024 * 1024 - 1), "1024.0 KB");
+    assert_eq!(format_page_size(1024), "↓ 1.0 KB");
+    assert_eq!(format_page_size(1536), "↓ 1.5 KB");
+    assert_eq!(format_page_size(1024 * 1024 - 1), "↓ 1024.0 KB");
 }
 
 #[test]
 fn format_page_size_one_mb_and_above_shows_mb() {
-    assert_eq!(format_page_size(1024 * 1024), "1.0 MB");
-    assert_eq!(format_page_size(2 * 1024 * 1024), "2.0 MB");
+    assert_eq!(format_page_size(1024 * 1024), "↓ 1.0 MB");
+    assert_eq!(format_page_size(2 * 1024 * 1024), "↓ 2.0 MB");
 }
