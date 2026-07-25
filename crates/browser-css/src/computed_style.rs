@@ -20,7 +20,7 @@ pub fn computed_run_style(base: TextStyle, run: &InlineRun) -> TextStyle {
     let is_bold_run = run.emphasis.strong || run.emphasis.code;
 
     let foreground = if is_link {
-        Some(Color::Yellow)
+        Some(Color::BrightYellow)
     } else if is_bold_run {
         Some(Color::BrightWhite)
     } else {

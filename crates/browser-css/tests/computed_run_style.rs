@@ -109,7 +109,7 @@ fn a_linked_run_foreground_is_yellow() {
 
     let style = computed_run_style(TextStyle::default(), &run);
 
-    assert_eq!(style.foreground, Some(Color::Yellow));
+    assert_eq!(style.foreground, Some(Color::BrightYellow));
 }
 
 #[test]
