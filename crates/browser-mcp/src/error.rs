@@ -23,6 +23,12 @@ pub enum McpError {
 
     #[error("document not loaded")]
     DocumentNotLoaded,
+
+    #[error("SSRF blocked: URL targets a private or loopback address")]
+    SsrfBlocked,
+
+    #[error("protocol error")]
+    Protocol(#[source] anyhow::Error),
 }
 
 impl From<CoreError> for McpError {
@@ -42,6 +48,8 @@ impl McpError {
             Self::Core(error) => Self::core_reason_code(error),
             Self::PermissionDenied => "PERMISSION_DENIED",
             Self::DocumentNotLoaded => "DOCUMENT_NOT_LOADED",
+            Self::SsrfBlocked => "SSRF_BLOCKED",
+            Self::Protocol(_) => "PROTOCOL_ERROR",
         }
     }
 

@@ -95,7 +95,7 @@ fn resolve_arguments() -> ResolvedMode {
 
 async fn run(resolved: ResolvedMode) -> Result<()> {
     match resolved {
-        ResolvedMode::Mcp => run_mcp(),
+        ResolvedMode::Mcp => run_mcp().await,
         ResolvedMode::TerminalBlank => {
             run_terminal_app(NavigationController::new(), ViewState::Blank).await
         }
@@ -134,11 +134,11 @@ async fn run_terminal_app(controller: NavigationController, view_state: ViewStat
         .map_err(|error| anyhow!(error.user_message()))
 }
 
-fn run_mcp() -> Result<()> {
-    let mut server = McpServer::new(NavigationController::new());
-    // Only the stable reason code is safe to show; raw error detail stays internal.
+async fn run_mcp() -> Result<()> {
+    let server = McpServer::new(NavigationController::new());
     server
-        .serve()
+        .run()
+        .await
         .map_err(|error| anyhow!("MCP server failed: {}", error.reason_code()))
 }
 
