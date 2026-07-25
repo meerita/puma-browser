@@ -6,13 +6,9 @@
 use browser_core::CoreError;
 use thiserror::Error;
 
-/// Errors produced by the MCP output adapter.
-///
-/// Wraps [`CoreError`] for logging and adds MCP-specific variants. Only the stable
-/// reason code from [`McpError::reason_code`] ever crosses to an MCP client; the
-/// wrapped source, its message, and every internal detail stay in `tracing` at
-/// `debug`/`trace` level. This is how cookie values, tokens, and other secrets are
-/// kept out of client responses.
+/// Only the stable reason code from [`McpError::reason_code`] ever crosses to an MCP
+/// client; wrapped sources, messages, and every internal detail stay in `tracing` at
+/// `debug`/`trace` level so cookie values, tokens, and other secrets never escape.
 #[derive(Debug, Error)]
 pub enum McpError {
     #[error("core error")]
@@ -38,11 +34,6 @@ impl From<CoreError> for McpError {
 }
 
 impl McpError {
-    /// Returns the stable reason code sent to the MCP client.
-    ///
-    /// The reason code is the only error detail that reaches a client. The wrapped
-    /// error's message and fields must never cross the MCP boundary. Codes are stable
-    /// identifiers, safe for a client to match on programmatically.
     pub fn reason_code(&self) -> &'static str {
         match self {
             Self::Core(error) => Self::core_reason_code(error),
@@ -65,7 +56,6 @@ impl McpError {
             | CoreError::LocalPathIsDirectory
             | CoreError::LocalFileTooLarge
             | CoreError::LocalFileReadFailed => "NETWORK_ERROR",
-            // A parse failure leaves no document for the client to read.
             CoreError::Parse(_) => "DOCUMENT_NOT_LOADED",
             // A layout failure is an internal rendering fault, reported generically so
             // the client never learns which stage of display broke.
