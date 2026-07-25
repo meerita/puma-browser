@@ -281,6 +281,9 @@ fn flush_word(word: &mut Vec<Cell>, tokens: &mut Vec<LineToken>) {
 
 /// Render a block quote: lay its children out into the indented content width, then push
 /// each resulting row right by the quote indent.
+///
+/// Trailing blank rows from the last child are stripped before indenting so the quote's
+/// own spacing_after is the only blank row that follows the quoted content.
 fn render_quote(
     children: &[SemanticNode],
     style: &TextStyle,
@@ -289,7 +292,7 @@ fn render_quote(
 ) -> Vec<Vec<Cell>> {
     let indent = quote_indent(width);
     let content_width = width - indent;
-    render_children(children, content_width, style, width_config)
+    trim_trailing_blanks(render_children(children, content_width, style, width_config))
         .into_iter()
         .map(|row| indent_row(row, indent, style))
         .collect()
@@ -335,6 +338,10 @@ fn render_list(
 /// Lay one list item out: render its block children into the width left after the marker,
 /// prefix the first row with the marker, and indent continuation and nested rows to align
 /// under the item text.
+///
+/// Trailing blank rows from the last child are stripped so consecutive list items run
+/// tight without gaps between them. The blank that follows the whole list comes from the
+/// list node's own spacing_after.
 fn append_list_item_rows(
     rows: &mut Vec<Vec<Cell>>,
     item: &SemanticNode,
@@ -350,10 +357,9 @@ fn append_list_item_rows(
     let marker_cells = graphemes_to_cells(marker, &style);
     let marker_columns = count_columns(&marker_cells, width_config);
     let content_width = list_content_width(width, marker_columns);
-    for (index, row) in render_children(children, content_width, &style, width_config)
-        .into_iter()
-        .enumerate()
-    {
+    let children_rows =
+        trim_trailing_blanks(render_children(children, content_width, &style, width_config));
+    for (index, row) in children_rows.into_iter().enumerate() {
         rows.push(decorate_list_row(
             index,
             row,
@@ -510,6 +516,16 @@ fn indent_row(row: Vec<Cell>, indent: usize, style: &TextStyle) -> Vec<Cell> {
     let mut indented = space_cells(indent, style);
     indented.extend(row);
     indented
+}
+
+/// Remove blank rows from the end of a row list so a container's own spacing_after is
+/// the sole blank row that follows its content. Prevents inner block elements from
+/// adding double blanks at container boundaries.
+fn trim_trailing_blanks(mut rows: Vec<Vec<Cell>>) -> Vec<Vec<Cell>> {
+    while rows.last().map(Vec::is_empty).unwrap_or(false) {
+        rows.pop();
+    }
+    rows
 }
 
 pub(crate) fn space_cells(count: usize, style: &TextStyle) -> Vec<Cell> {

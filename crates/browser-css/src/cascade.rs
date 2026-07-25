@@ -94,7 +94,9 @@ fn resolve(inherited: &TextStyle, user_agent: &Declarations, inline: &Declaratio
 /// Only the properties the default presentation actually sets are present; everything
 /// else stays unset so it inherits or falls back to its initial value. Headings and
 /// quotes gain one blank row of spacing on each side, list items gain a bullet marker,
-/// and code and preformatted blocks keep their source whitespace.
+/// code and preformatted blocks keep their source whitespace, and all other block
+/// elements gain one blank row after their content. List items are excluded from the
+/// trailing blank row so consecutive items in a list run tight.
 fn user_agent_declarations(node: &SemanticNode) -> Declarations {
     match node {
         SemanticNode::Heading { .. } => heading_declarations(),
@@ -103,6 +105,13 @@ fn user_agent_declarations(node: &SemanticNode) -> Declarations {
             preformatted_declarations()
         }
         SemanticNode::Quote { .. } => quote_declarations(),
+        SemanticNode::Paragraph { .. }
+        | SemanticNode::List { .. }
+        | SemanticNode::Table { .. }
+        | SemanticNode::Figure { .. }
+        | SemanticNode::Details { .. }
+        | SemanticNode::Landmark { .. }
+        | SemanticNode::Form { .. } => block_declarations(),
         _ => Declarations::default(),
     }
 }
@@ -110,7 +119,6 @@ fn user_agent_declarations(node: &SemanticNode) -> Declarations {
 fn heading_declarations() -> Declarations {
     Declarations {
         emphasis: Some(Emphasis::Bold),
-        spacing_before: Some(1),
         spacing_after: Some(1),
         ..Declarations::default()
     }
@@ -126,13 +134,20 @@ fn list_item_declarations() -> Declarations {
 fn preformatted_declarations() -> Declarations {
     Declarations {
         white_space: Some(WhiteSpace::Pre),
+        spacing_after: Some(1),
         ..Declarations::default()
     }
 }
 
 fn quote_declarations() -> Declarations {
     Declarations {
-        spacing_before: Some(1),
+        spacing_after: Some(1),
+        ..Declarations::default()
+    }
+}
+
+fn block_declarations() -> Declarations {
+    Declarations {
         spacing_after: Some(1),
         ..Declarations::default()
     }

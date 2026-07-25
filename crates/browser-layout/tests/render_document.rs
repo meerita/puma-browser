@@ -80,12 +80,12 @@ fn heading_and_two_list_items_produce_expected_rows_and_bullets() {
     let buffer =
         render_document(&document, 40, &WidthConfig::default()).expect("document must lay out");
 
-    // One blank row before and after the heading, then one row per list item.
+    // One blank row after the heading, then one row per list item, then one blank from list.
     assert_eq!(buffer.height(), 5);
-    assert_eq!(row_text(&buffer, 1).trim_end(), "Title");
+    assert_eq!(row_text(&buffer, 0).trim_end(), "Title");
+    assert_eq!(buffer.cell_at(0, 2).expect("bullet cell").grapheme(), "•");
     assert_eq!(buffer.cell_at(0, 3).expect("bullet cell").grapheme(), "•");
-    assert_eq!(buffer.cell_at(0, 4).expect("bullet cell").grapheme(), "•");
-    assert_eq!(row_text(&buffer, 3).trim_end(), "• one");
+    assert_eq!(row_text(&buffer, 2).trim_end(), "• one");
 }
 
 #[test]
@@ -123,7 +123,8 @@ fn a_nested_unordered_list_indents_one_level_under_its_parent() {
         render_document(&document, 40, &WidthConfig::default()).expect("nested list must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "• a");
-    assert_eq!(row_text(&buffer, 1).trim_end(), "  • b");
+    // row 1 is blank: paragraph spacing_after inside the list item before the nested list
+    assert_eq!(row_text(&buffer, 2).trim_end(), "  • b");
 }
 
 #[test]
@@ -152,7 +153,8 @@ fn ordered_numbering_restarts_within_each_nested_list() {
         .map(|row| row_text(&buffer, row).trim_end().to_string())
         .collect();
     // The nested list restarts at 1, and the outer list resumes at 2 after it.
-    assert_eq!(rows, vec!["1. a", "   1. b", "   2. c", "2. d"]);
+    // Row 1 is blank: paragraph spacing_after inside the list item, before the nested list.
+    assert_eq!(rows, vec!["1. a", "", "   1. b", "   2. c", "2. d", ""]);
 }
 
 #[test]
@@ -179,8 +181,8 @@ fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
     let buffer =
         render_document(&document, 5, &WidthConfig::default()).expect("code block must lay out");
 
-    // Two source lines stay two rows; the long line is clipped to the width, not wrapped.
-    assert_eq!(buffer.height(), 2);
+    // Two source lines stay two rows, followed by one blank from code block spacing_after.
+    assert_eq!(buffer.height(), 3);
     assert_eq!(row_text(&buffer, 0), "abcde");
     assert_eq!(row_text(&buffer, 1).trim_end(), "kl");
 }
@@ -247,15 +249,15 @@ fn representative_document_renders_to_the_expected_rows() {
     assert_eq!(
         rows,
         vec![
-            String::new(),         // heading spacing before
-            String::from("Title"), // heading
-            String::new(),         // heading spacing after
-            String::from("Body text"),
-            String::from("• one"), // list, no surrounding spacing
+            String::from("Title"),                // heading
+            String::new(),                        // heading spacing_after
+            String::from("Body text"),            // paragraph
+            String::new(),                        // paragraph spacing_after
+            String::from("• one"),               // list items run tight
             String::from("• two"),
-            String::new(),                        // quote spacing before
+            String::new(),                        // list spacing_after
             String::from("  Quoted"),             // quote indented two columns
-            String::new(),                        // quote spacing after
+            String::new(),                        // quote spacing_after
             String::from("────────────────────"), // separator fills the width
         ]
     );
@@ -362,7 +364,7 @@ fn run_boundaries_do_not_change_word_wrapping() {
         .collect();
 
     assert_eq!(plain_rows, marked_rows);
-    assert_eq!(plain_rows, vec!["hello", "wonderful", "world"]);
+    assert_eq!(plain_rows, vec!["hello", "wonderful", "world", ""]);
 }
 
 #[test]

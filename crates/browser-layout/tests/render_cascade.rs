@@ -51,7 +51,7 @@ fn a_hidden_paragraph_does_not_suppress_its_visible_sibling() {
     let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
         .expect("layout must succeed");
 
-    assert_eq!(buffer.height(), 1);
+    assert_eq!(buffer.height(), 2); // 1 content row + 1 blank from paragraph spacing_after
     assert_eq!(buffer.cell_at(0, 0).map(|cell| cell.grapheme()), Some("s"));
 }
 
