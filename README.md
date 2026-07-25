@@ -67,6 +67,28 @@ make build
 The release binary is written to `target/release/puma`. Run `puma example.com` to fetch
 and render a page, or `puma` for a blank page; `Esc Esc` quits.
 
+### Windows
+
+`make` is not available by default on Windows, but it is not required: every `make`
+target is a one-line wrapper around a `cargo` command, so cargo can be called directly.
+
+```bash
+cargo build --release
+```
+
+The binary is written to `target/release/puma.exe`.
+
+Two native dependencies matter on Windows:
+
+- **MSVC build tools** — `rusqlite` is used with the `bundled` feature, which compiles
+  SQLite from C via the `cc` crate. Install the *Desktop development with C++* workload
+  (or the standalone Visual Studio Build Tools) so `cl.exe` is available to `cc`.
+- **TLS** — `reqwest` is configured with `rustls` and `default-features = false`, so
+  OpenSSL and perl are *not* needed.
+
+Verified on Windows 11 with Rust 1.97.1 (`x86_64-pc-windows-msvc`) and Visual Studio
+2022 Build Tools: full release build of the workspace succeeds with no extra setup.
+
 ## Development
 
 ```bash
@@ -75,6 +97,16 @@ make fmt-check    # Check formatting
 make lint         # Clippy (strict)
 make check        # Compile check
 make test         # Run tests
+```
+
+Without `make`, the equivalent cargo commands are:
+
+```bash
+cargo fmt --all                                              # fmt
+cargo fmt --all -- --check                                   # fmt-check
+cargo clippy --all-targets --all-features -- -D warnings     # lint
+cargo check --all-targets --all-features                     # check
+cargo test --all                                             # test
 ```
 
 See [docs/process/README.md](docs/process/README.md) for the full development workflow.
