@@ -21,8 +21,11 @@ use std::time::Instant;
 
 use browser_core::{BrowserUrl, CoreError, NavigationController};
 use browser_css::{Color, Emphasis};
-use browser_layout::{Cell, CellBuffer};
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use browser_layout::{Cell, CellBuffer, LinkSpan};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -53,6 +56,11 @@ const CHROME_ROWS: u16 = 5;
 
 /// Terminal columns of left and right padding on the content area.
 const CONTENT_PADDING: u16 = 2;
+
+/// The terminal row where the page body begins. The vertical layout places the content
+/// area first, so the body starts at the top of the screen and mouse rows map directly
+/// onto buffer rows once the scroll offset is added.
+const BODY_AREA_TOP_ROW: u16 = 0;
 
 /// The body text shown when the terminal opens with no page.
 const BLANK_PLACEHOLDER: &str = "(blank page)";
@@ -187,6 +195,7 @@ impl TerminalApp {
             let mut completed_load: Option<(NavigationController, Result<(), CoreError>)> = None;
             let mut command_to_submit: Option<String> = None;
             let mut reload_url: Option<BrowserUrl> = None;
+            let mut navigate_to_url: Option<String> = None;
 
             if let LoadState::Active {
                 ref mut handle,
@@ -217,34 +226,60 @@ impl TerminalApp {
                 tokio::select! {
                     maybe_event = event_stream.next() => {
                         let Some(Ok(event)) = maybe_event else { continue; };
-                        let Event::Key(key) = event else { continue; };
-                        if key.kind == KeyEventKind::Release { continue; }
-                        let in_command_mode = ui_state.is_in_command_mode();
-                        let action = map_key_event(
-                            key,
-                            ui_state.quit_armed,
-                            ui_state.refresh_armed,
-                            in_command_mode,
-                        );
-                        if matches!(action, InputAction::Quit) {
-                            return Ok(());
-                        }
-                        ui_state.clear_transient();
-                        apply_scroll(action, &mut scroll, viewport_height, max_offset);
-                        if matches!(action, InputAction::CommandSubmit) {
-                            command_to_submit = Some(ui_state.take_command_buffer());
-                        } else {
-                            apply_command_action(action, &mut ui_state);
-                        }
-                        if matches!(action, InputAction::RefreshArmed) {
-                            reload_url = self.controller.current_url().cloned();
-                        }
-                        ui_state.quit_armed = quit_armed_after(action);
-                        ui_state.refresh_armed = refresh_armed_after(action);
-                        if matches!(action, InputAction::ArmQuit) {
-                            ui_state.set_transient_hint("Press Esc again to quit", now);
-                        } else if matches!(action, InputAction::ArmRefresh) {
-                            ui_state.set_transient_hint("Press r again to refresh", now);
+                        match event {
+                            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                                let in_command_mode = ui_state.is_in_command_mode();
+                                let in_link_navigation = ui_state.is_in_link_navigation();
+                                let action = map_key_event(
+                                    key,
+                                    ui_state.quit_armed,
+                                    ui_state.refresh_armed,
+                                    in_command_mode,
+                                    in_link_navigation,
+                                );
+                                if matches!(action, InputAction::Quit) {
+                                    return Ok(());
+                                }
+                                ui_state.clear_transient();
+                                apply_scroll(action, &mut scroll, viewport_height, max_offset);
+                                if matches!(action, InputAction::CommandSubmit) {
+                                    command_to_submit = Some(ui_state.take_command_buffer());
+                                } else {
+                                    apply_command_action(action, &mut ui_state);
+                                }
+                                if matches!(action, InputAction::RefreshArmed) {
+                                    reload_url = self.controller.current_url().cloned();
+                                }
+                                let scroll_offset = scroll.offset();
+                                if let Some(link_url) = handle_navigation_action(
+                                    action,
+                                    &mut self.controller,
+                                    &mut ui_state,
+                                    &mut cache,
+                                    &mut scroll,
+                                    &mut self.view_state,
+                                    scroll_offset,
+                                ) {
+                                    navigate_to_url = Some(link_url);
+                                }
+                                ui_state.quit_armed = quit_armed_after(action);
+                                ui_state.refresh_armed = refresh_armed_after(action);
+                                if matches!(action, InputAction::ArmQuit) {
+                                    ui_state.set_transient_hint("Press Esc again to quit", now);
+                                } else if matches!(action, InputAction::ArmRefresh) {
+                                    ui_state.set_transient_hint("Press r again to refresh", now);
+                                }
+                            }
+                            Event::Mouse(mouse) => {
+                                handle_mouse_click(
+                                    mouse,
+                                    cache.as_ref().map(|cached| &cached.buffer),
+                                    scroll.offset(),
+                                    BODY_AREA_TOP_ROW,
+                                    &mut navigate_to_url,
+                                );
+                            }
+                            _ => {}
                         }
                     }
                     _ = tick.tick() => {}
@@ -278,39 +313,44 @@ impl TerminalApp {
                         cache = None;
                     }
                     Ok(url) => {
-                        let (progress_tx, progress_rx) = watch::channel(0usize);
-                        let loading_url = url.to_string();
-                        let mut taken = std::mem::take(&mut self.controller);
-                        let handle = tokio::spawn(async move {
-                            let result = taken.load_with_progress(url, progress_tx).await;
-                            (taken, result)
-                        });
-                        load_state = LoadState::Active {
-                            handle,
-                            progress_rx,
-                            spinner_frame: 0,
-                            loading_url,
-                        };
+                        load_state = self.start_load(url);
                     }
                 }
             }
 
             // Apply page refresh — re-fetch the current URL using the same load pipeline.
             if let Some(url) = reload_url {
-                let (progress_tx, progress_rx) = watch::channel(0usize);
-                let loading_url = url.to_string();
-                let mut taken = std::mem::take(&mut self.controller);
-                let handle = tokio::spawn(async move {
-                    let result = taken.load_with_progress(url, progress_tx).await;
-                    (taken, result)
-                });
-                load_state = LoadState::Active {
-                    handle,
-                    progress_rx,
-                    spinner_frame: 0,
-                    loading_url,
-                };
+                load_state = self.start_load(url);
             }
+
+            // Apply link navigation — a Tab+Enter activation or a mouse click on a link.
+            if let Some(link_url) = navigate_to_url {
+                load_state =
+                    self.start_link_load(link_url, &working_dir, &mut ui_state, &mut cache);
+            }
+        }
+    }
+
+    /// Marks a link URL visited, leaves link navigation, and starts loading it through
+    /// the shared load path after scheme validation. On an unresolvable URL it shows a
+    /// generic error rather than echoing the remote URL, so a malicious href can never
+    /// place raw bytes in terminal output.
+    fn start_link_load(
+        &mut self,
+        link_url: String,
+        working_dir: &std::path::Path,
+        ui_state: &mut UiState,
+        cache: &mut Option<CachedPage>,
+    ) -> LoadState {
+        ui_state.mark_visited(&link_url);
+        ui_state.exit_link_navigation();
+        match browser_core::resolve_address(&link_url, working_dir) {
+            Err(_) => {
+                self.view_state = ViewState::Error("Cannot open this link".to_string());
+                *cache = None;
+                LoadState::Idle
+            }
+            Ok(url) => self.start_load(url),
         }
     }
 
@@ -329,6 +369,26 @@ impl TerminalApp {
         let buffer = render_page(&self.controller, width)?;
         *cache = Some(CachedPage { width, buffer });
         Ok(())
+    }
+
+    /// Spawns the fetch/parse pipeline for `url` on a background task, moving the
+    /// controller into the task and returning the active load state that carries it back
+    /// on completion. Shared by command submission, page refresh, and link activation so
+    /// every navigation uses one load path.
+    fn start_load(&mut self, url: BrowserUrl) -> LoadState {
+        let (progress_tx, progress_rx) = watch::channel(0usize);
+        let loading_url = url.to_string();
+        let mut taken = std::mem::take(&mut self.controller);
+        let handle = tokio::spawn(async move {
+            let result = taken.load_with_progress(url, progress_tx).await;
+            (taken, result)
+        });
+        LoadState::Active {
+            handle,
+            progress_rx,
+            spinner_frame: 0,
+            loading_url,
+        }
     }
 
     fn status_label(&self) -> String {
@@ -414,7 +474,14 @@ fn draw_frame(
     ])
     .split(frame.area());
 
-    draw_body(frame, view, page, chunks[0], scroll_offset);
+    let focused_url = ui_state
+        .focused_link_index
+        .and_then(|index| page.and_then(|buffer| unique_links(buffer).get(index).copied()));
+    let link_context = LinkRenderContext {
+        focused_url,
+        ui_state,
+    };
+    draw_body(frame, view, page, chunks[0], scroll_offset, &link_context);
 
     draw_separator(frame, chunks[1]);
 
@@ -474,6 +541,7 @@ fn draw_body(
     page: Option<&CellBuffer>,
     area: Rect,
     scroll_offset: u16,
+    link_context: &LinkRenderContext<'_>,
 ) {
     let padded = Rect {
         x: area.x.saturating_add(CONTENT_PADDING),
@@ -482,7 +550,7 @@ fn draw_body(
         height: area.height,
     };
     match view {
-        ViewState::Page => draw_page(frame, page, area, padded, scroll_offset),
+        ViewState::Page => draw_page(frame, page, area, padded, scroll_offset, link_context),
         ViewState::Blank => draw_message(frame, padded, BLANK_PLACEHOLDER),
         ViewState::Error(message) => draw_message(frame, padded, message),
     }
@@ -494,6 +562,7 @@ fn draw_page(
     clear_area: Rect,
     blit_area: Rect,
     scroll_offset: u16,
+    link_context: &LinkRenderContext<'_>,
 ) {
     frame.render_widget(Clear, clear_area);
     let Some(cells) = page else {
@@ -501,19 +570,28 @@ fn draw_page(
     };
     let buffer = frame.buffer_mut();
     for row in 0..blit_area.height {
-        blit_row(buffer, blit_area, cells, scroll_offset, row);
+        blit_row(buffer, blit_area, cells, scroll_offset, row, link_context);
     }
 }
 
-fn blit_row(buffer: &mut Buffer, area: Rect, cells: &CellBuffer, scroll_offset: u16, row: u16) {
+fn blit_row(
+    buffer: &mut Buffer,
+    area: Rect,
+    cells: &CellBuffer,
+    scroll_offset: u16,
+    row: u16,
+    link_context: &LinkRenderContext<'_>,
+) {
     let source_row = scroll_offset.saturating_add(row);
     for column in 0..area.width {
-        copy_cell(buffer, area, cells, column, row, source_row);
+        copy_cell(buffer, area, cells, column, row, source_row, link_context);
     }
 }
 
 /// Copies one sanitized source cell into the target buffer, ignoring positions outside
-/// either buffer so a wide grapheme near an edge can never index out of bounds.
+/// either buffer so a wide grapheme near an edge can never index out of bounds. The link
+/// context recolours the cell when it falls inside a focused or visited link span.
+#[allow(clippy::too_many_arguments)]
 fn copy_cell(
     buffer: &mut Buffer,
     area: Rect,
@@ -521,6 +599,7 @@ fn copy_cell(
     column: u16,
     row: u16,
     source_row: u16,
+    link_context: &LinkRenderContext<'_>,
 ) {
     let Some(cell) = cells.cell_at(column, source_row) else {
         return;
@@ -530,7 +609,44 @@ fn copy_cell(
         return;
     };
     target.set_symbol(cell.grapheme());
-    target.set_style(cell_style(cell));
+    target.set_style(link_style(cell, column, source_row, cells, link_context));
+}
+
+/// The link colouring applied on top of the cascaded cell style during blit.
+///
+/// `focused_url` is the URL of the link the reader has Tab-focused, if any; it is a
+/// borrow of the loaded buffer's span data. `ui_state` supplies the session visited set.
+/// Only URLs are consulted, never rendered, so no remote text reaches the terminal here.
+struct LinkRenderContext<'a> {
+    focused_url: Option<&'a str>,
+    ui_state: &'a UiState,
+}
+
+/// The style for one cell, applying the focus and visited overrides when the cell falls
+/// inside a link span. A focused link is cyan, a visited link is dim yellow, and an
+/// unvisited, unfocused link keeps the bright colour from the cascade.
+fn link_style(
+    cell: &Cell,
+    column: u16,
+    row: u16,
+    buffer: &CellBuffer,
+    context: &LinkRenderContext<'_>,
+) -> Style {
+    let base = cell_style(cell);
+    let Some(span) = buffer
+        .links()
+        .iter()
+        .find(|&span| span_contains(span, row, column))
+    else {
+        return base;
+    };
+    if context.focused_url == Some(span.url.as_str()) {
+        return base.fg(TerminalColor::Cyan);
+    }
+    if context.ui_state.is_visited(&span.url) {
+        return base.fg(TerminalColor::Yellow);
+    }
+    base
 }
 
 fn cell_style(cell: &Cell) -> Style {
@@ -608,7 +724,11 @@ fn apply_scroll(
         | InputAction::CommandMoveCursorRight
         | InputAction::CommandDeleteBack
         | InputAction::CommandCancel
-        | InputAction::CommandSubmit => {}
+        | InputAction::CommandSubmit
+        | InputAction::FocusNextLink
+        | InputAction::FocusPreviousLink
+        | InputAction::ActivateFocusedLink
+        | InputAction::NavigateBack => {}
     }
 }
 
@@ -631,14 +751,208 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         | InputAction::ArmRefresh
         | InputAction::RefreshArmed
         | InputAction::Disarm
-        | InputAction::CommandSubmit => {}
+        | InputAction::CommandSubmit
+        | InputAction::FocusNextLink
+        | InputAction::FocusPreviousLink
+        | InputAction::ActivateFocusedLink
+        | InputAction::NavigateBack => {}
+    }
+}
+
+/// The unique link URLs in the order they first appear in the buffer (by row, then
+/// column). Each URL appears once regardless of how many spans it wraps across, so this
+/// is the list Tab navigation steps through.
+fn unique_links(buffer: &CellBuffer) -> Vec<&str> {
+    let mut seen: Vec<&str> = Vec::new();
+    for span in buffer.links() {
+        if !seen.contains(&span.url.as_str()) {
+            seen.push(span.url.as_str());
+        }
+    }
+    seen
+}
+
+/// The index within [`unique_links`] of the first link whose first span starts at or
+/// below `scroll_offset`, so Tab focuses a link the reader can actually see. Falls back
+/// to the first link when every link is above the viewport.
+fn first_visible_link_index(buffer: &CellBuffer, scroll_offset: u16) -> usize {
+    for (index, url) in unique_links(buffer).iter().enumerate() {
+        let first_span = buffer.links().iter().find(|span| span.url.as_str() == *url);
+        if let Some(span) = first_span {
+            if span.row >= scroll_offset {
+                return index;
+            }
+        }
+    }
+    0
+}
+
+/// Whether the cell at `column`, `row` falls within `span`'s extent on its row.
+fn span_contains(span: &LinkSpan, row: u16, column: u16) -> bool {
+    span.row == row && span.col_start <= column && column <= span.col_end
+}
+
+/// Applies a link-navigation or history action, returning the raw link URL to load when
+/// the action activates the focused link. Focus and back actions mutate UI and controller
+/// state directly and return `None`.
+fn handle_navigation_action(
+    action: InputAction,
+    controller: &mut NavigationController,
+    ui_state: &mut UiState,
+    cache: &mut Option<CachedPage>,
+    scroll: &mut ScrollState,
+    view_state: &mut ViewState,
+    scroll_offset: u16,
+) -> Option<String> {
+    match action {
+        InputAction::FocusNextLink => {
+            advance_link_focus(
+                ui_state,
+                cache.as_ref().map(|cached| &cached.buffer),
+                scroll_offset,
+            );
+            None
+        }
+        InputAction::FocusPreviousLink => {
+            retreat_link_focus(
+                ui_state,
+                cache.as_ref().map(|cached| &cached.buffer),
+                scroll_offset,
+            );
+            None
+        }
+        InputAction::ActivateFocusedLink => {
+            focused_link_url(ui_state, cache.as_ref().map(|cached| &cached.buffer))
+        }
+        InputAction::NavigateBack => {
+            navigate_back(controller, ui_state, cache, scroll, view_state);
+            None
+        }
+        InputAction::Disarm => {
+            if ui_state.is_in_link_navigation() {
+                ui_state.exit_link_navigation();
+            }
+            None
+        }
+        InputAction::ScrollLineDown
+        | InputAction::ScrollLineUp
+        | InputAction::ScrollPageDown
+        | InputAction::ScrollPageUp
+        | InputAction::ScrollToTop
+        | InputAction::ScrollToBottom
+        | InputAction::ArmQuit
+        | InputAction::Quit
+        | InputAction::ArmRefresh
+        | InputAction::RefreshArmed
+        | InputAction::EnterCommand(_)
+        | InputAction::CommandAppend(_)
+        | InputAction::CommandMoveCursorLeft
+        | InputAction::CommandMoveCursorRight
+        | InputAction::CommandDeleteBack
+        | InputAction::CommandCancel
+        | InputAction::CommandSubmit => None,
+    }
+}
+
+/// Moves focus to the next link, entering link navigation at the first visible link when
+/// nothing is focused yet.
+fn advance_link_focus(ui_state: &mut UiState, buffer: Option<&CellBuffer>, scroll_offset: u16) {
+    let Some(buffer) = buffer else {
+        return;
+    };
+    let count = unique_links(buffer).len();
+    if count == 0 {
+        return;
+    }
+    if ui_state.focused_link_index.is_none() {
+        ui_state.enter_link_navigation(first_visible_link_index(buffer, scroll_offset));
+        return;
+    }
+    ui_state.focus_next_link(count);
+}
+
+/// Moves focus to the previous link, entering link navigation at the first visible link
+/// when nothing is focused yet.
+fn retreat_link_focus(ui_state: &mut UiState, buffer: Option<&CellBuffer>, scroll_offset: u16) {
+    let Some(buffer) = buffer else {
+        return;
+    };
+    let count = unique_links(buffer).len();
+    if count == 0 {
+        return;
+    }
+    if ui_state.focused_link_index.is_none() {
+        ui_state.enter_link_navigation(first_visible_link_index(buffer, scroll_offset));
+        return;
+    }
+    ui_state.focus_previous_link(count);
+}
+
+/// The URL of the currently focused link, if link navigation is active and the focused
+/// index still points at a link in the buffer.
+fn focused_link_url(ui_state: &UiState, buffer: Option<&CellBuffer>) -> Option<String> {
+    let index = ui_state.focused_link_index?;
+    let buffer = buffer?;
+    unique_links(buffer).get(index).map(|url| url.to_string())
+}
+
+/// Restores the previous page from history and resets the viewport, clearing any focused
+/// link. Does nothing when there is no history to restore.
+fn navigate_back(
+    controller: &mut NavigationController,
+    ui_state: &mut UiState,
+    cache: &mut Option<CachedPage>,
+    scroll: &mut ScrollState,
+    view_state: &mut ViewState,
+) {
+    if !controller.go_back() {
+        return;
+    }
+    *view_state = ViewState::Page;
+    *cache = None;
+    *scroll = ScrollState::new();
+    ui_state.exit_link_navigation();
+}
+
+/// Resolves a left-click to a link URL to navigate, if the click landed on a link span.
+/// The screen row maps to a buffer row through the scroll offset, and the screen column
+/// is shifted back by the content padding so it aligns with buffer columns.
+fn handle_mouse_click(
+    mouse: MouseEvent,
+    buffer: Option<&CellBuffer>,
+    scroll_offset: u16,
+    body_area_top_row: u16,
+    navigate_to_url: &mut Option<String>,
+) {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        return;
+    }
+    let Some(buffer) = buffer else {
+        return;
+    };
+    let Some(document_row) = mouse
+        .row
+        .checked_sub(body_area_top_row)
+        .and_then(|row| row.checked_add(scroll_offset))
+    else {
+        return;
+    };
+    let Some(clicked_column) = mouse.column.checked_sub(CONTENT_PADDING) else {
+        return;
+    };
+    let clicked = buffer
+        .links()
+        .iter()
+        .find(|&span| span_contains(span, document_row, clicked_column));
+    if let Some(span) = clicked {
+        *navigate_to_url = Some(span.url.clone());
     }
 }
 
 fn install_terminal() -> Result<AppTerminal, TerminalError> {
     enable_raw_mode().map_err(|_| TerminalError::RenderFailed)?;
     let mut stdout = std::io::stdout();
-    if execute!(stdout, EnterAlternateScreen).is_err() {
+    if execute!(stdout, EnterAlternateScreen, EnableMouseCapture).is_err() {
         let _ = disable_raw_mode();
         return Err(TerminalError::RenderFailed);
     }
@@ -653,11 +967,15 @@ fn install_terminal() -> Result<AppTerminal, TerminalError> {
 
 fn restore_terminal(terminal: &mut AppTerminal) {
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
     let _ = terminal.show_cursor();
 }
 
 fn leave_alternate_screen_and_raw_mode() {
-    let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
