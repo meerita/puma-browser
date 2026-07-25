@@ -140,12 +140,7 @@ fn node_rows(
         SemanticNode::Warning { message } => {
             single_row(clip_line(message, style, width, width_config))
         }
-        SemanticNode::ImagePlaceholder { alt, title, .. } => single_row(clip_line(
-            &image_label(alt, title.as_deref()),
-            style,
-            width,
-            width_config,
-        )),
+        SemanticNode::ImagePlaceholder { .. } => Vec::new(),
         SemanticNode::Figure { children, caption } => {
             render_figure(children, caption, style, width, width_config)
         }
@@ -437,18 +432,6 @@ fn separator_row(style: &TextStyle, width: usize) -> Vec<Cell> {
     (0..width)
         .map(|_| Cell::new(String::from(SEPARATOR_GRAPHEME), style))
         .collect()
-}
-
-/// The bracketed placeholder for an image.
-///
-/// The alt text names the image; a distinct title is appended in parentheses so both are
-/// visible. An image with neither alt nor a useful title falls back to a generic label.
-fn image_label(alt: &str, title: Option<&str>) -> String {
-    let base = if alt.is_empty() { "image" } else { alt };
-    match title {
-        Some(title) if !title.is_empty() && title != base => format!("[{base} ({title})]"),
-        _ => format!("[{base}]"),
-    }
 }
 
 /// Render a figure: its content rows followed by the caption on its own wrapped lines.

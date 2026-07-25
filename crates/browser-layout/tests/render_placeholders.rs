@@ -126,7 +126,7 @@ fn landmark_renders_its_children_structurally() {
 }
 
 #[test]
-fn figure_renders_its_content_then_the_caption() {
+fn figure_with_suppressed_image_renders_only_the_caption() {
     let figure = SemanticNode::Figure {
         children: vec![SemanticNode::ImagePlaceholder {
             alt: "Chart".to_string(),
@@ -138,19 +138,18 @@ fn figure_renders_its_content_then_the_caption() {
     let buffer = render_document(&document_of(vec![figure]), 40, &WidthConfig::default())
         .expect("figure must lay out");
     let text = buffer_text(&buffer);
-    let image_row = text.find("[Chart]").expect("the image label renders");
-    let caption_row = text.find("Quarterly sales").expect("the caption renders");
-    assert!(image_row < caption_row, "the caption follows the content");
+    assert!(text.contains("Quarterly sales"), "the caption renders");
+    assert!(!text.contains("[Chart]"), "the image label is suppressed");
 }
 
 #[test]
-fn image_placeholder_includes_the_title_when_present() {
+fn image_placeholder_produces_no_output() {
     let image = SemanticNode::ImagePlaceholder {
         alt: "Logo".to_string(),
         title: Some("Company logo".to_string()),
         source: None,
     };
     let buffer = render_document(&document_of(vec![image]), 40, &WidthConfig::default())
-        .expect("image must lay out");
-    assert!(buffer_text(&buffer).contains("[Logo (Company logo)]"));
+        .expect("image must not error during layout");
+    assert_eq!(buffer.height(), 0, "an image placeholder produces no rows");
 }
