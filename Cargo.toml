@@ -35,7 +35,7 @@ ratatui = "0.30"
 crossterm = "0.29"
 
 # HTTP / TLS
-reqwest = { version = "0.13", features = ["rustls", "stream"], default-features = false }
+reqwest = { version = "0.13", features = ["rustls", "stream", "gzip", "brotli"], default-features = false }
 rustls = "0.23"
 url = "2"
 
