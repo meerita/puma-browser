@@ -7,7 +7,9 @@ use browser_css::{cascade, Emphasis, TextStyle};
 use browser_html::{InlineRun, SemanticNode};
 
 use crate::cell::Cell;
-use crate::render::{count_columns, graphemes_to_cells, runs_to_cells, space_cells, wrap_cells};
+use crate::render::{
+    count_columns, graphemes_to_cells, render_children, runs_to_cells, space_cells, wrap_cells,
+};
 use crate::width::{grapheme_columns, WidthConfig};
 
 /// Blank columns drawn between two native columns so their content stays separated.
@@ -29,12 +31,20 @@ const RECORD_INDENT_COLUMNS: usize = 2;
 /// columns only when every column stays within [`MAX_COLUMN_WIDTH_COLUMNS`] and the summed
 /// widths plus gaps fit the available `width`; otherwise each row renders as a record so no
 /// content is clipped away silently.
+///
+/// When any cell contains block-level children (nested tables, landmarks, forms), the table
+/// is treated as a layout container rather than a data table: each cell's children are
+/// rendered as ordinary block content. This handles pages that use `<table>` for page
+/// structure rather than for presenting tabular data.
 pub(crate) fn render_table(
     rows: &[SemanticNode],
     base: &TextStyle,
     width: usize,
     width_config: &WidthConfig,
 ) -> Vec<Vec<Cell>> {
+    if is_layout_table(rows) {
+        return render_layout_table(rows, base, width, width_config);
+    }
     let grid = build_grid(rows, base, width_config);
     if grid.is_empty() {
         return Vec::new();
@@ -44,6 +54,64 @@ pub(crate) fn render_table(
         return render_columns(&grid, &widths, base, width_config);
     }
     render_records(&grid, base, width, width_config)
+}
+
+/// A table is a layout table when any cell holds block-level children — nested tables,
+/// landmarks, or forms — that cannot be meaningfully flattened into a single text line.
+fn is_layout_table(rows: &[SemanticNode]) -> bool {
+    rows.iter().any(row_has_block_cell)
+}
+
+fn row_has_block_cell(node: &SemanticNode) -> bool {
+    let SemanticNode::TableRow { children } = node else {
+        return false;
+    };
+    children.iter().any(cell_has_block_children)
+}
+
+fn cell_has_block_children(node: &SemanticNode) -> bool {
+    let SemanticNode::TableCell { children, .. } = node else {
+        return false;
+    };
+    children.iter().any(is_block_node)
+}
+
+fn is_block_node(node: &SemanticNode) -> bool {
+    matches!(
+        node,
+        SemanticNode::Table { .. }
+            | SemanticNode::Landmark { .. }
+            | SemanticNode::Form { .. }
+            | SemanticNode::Details { .. }
+            | SemanticNode::List { .. }
+    )
+}
+
+/// Render a layout table by treating each cell as an ordinary block container.
+///
+/// Each row's cells are rendered in order using the normal block rendering path, so nested
+/// tables, landmarks, and other block content are fully laid out rather than flattened or
+/// dropped.
+fn render_layout_table(
+    rows: &[SemanticNode],
+    base: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
+    let mut output: Vec<Vec<Cell>> = Vec::new();
+    for row in rows {
+        let SemanticNode::TableRow { children } = row else {
+            continue;
+        };
+        for cell in children {
+            let SemanticNode::TableCell { children, .. } = cell else {
+                continue;
+            };
+            let cell_style = cascade(base, cell);
+            output.extend(render_children(children, width, &cell_style, width_config));
+        }
+    }
+    output
 }
 
 /// A table cell reduced to a single styled line of content and its display width.
@@ -341,18 +409,19 @@ fn append_record(
     }
 }
 
-/// The `  Label: ` prefix for a record field, taking the label from the header row when
-/// present and falling back to the column index otherwise.
+/// The prefix for a record field.
+///
+/// When the table has a header row, the prefix is `  Label: ` so each field is clearly
+/// labelled. Without headers, a plain indent is used instead of a numeric column index,
+/// so rows that would otherwise show `  1: title` show `  title` — cleaner for layout
+/// tables where column numbers carry no meaning for the reader.
 fn field_prefix(index: usize, labels: Option<&[String]>, base: &TextStyle) -> Vec<Cell> {
-    let label = field_label(index, labels);
-    let text = format!("{}{label}: ", " ".repeat(RECORD_INDENT_COLUMNS));
-    graphemes_to_cells(&text, base)
-}
-
-fn field_label(index: usize, labels: Option<&[String]>) -> String {
     match labels.and_then(|labels| labels.get(index)) {
-        Some(label) if !label.is_empty() => label.clone(),
-        _ => index.to_string(),
+        Some(label) if !label.is_empty() => {
+            let text = format!("{}{label}: ", " ".repeat(RECORD_INDENT_COLUMNS));
+            graphemes_to_cells(&text, base)
+        }
+        _ => space_cells(RECORD_INDENT_COLUMNS, base),
     }
 }
 
@@ -364,11 +433,13 @@ fn append_wrapped_field(
     base: &TextStyle,
     width_config: &WidthConfig,
 ) {
+    if content.is_empty() {
+        return;
+    }
     let prefix_columns = count_columns(&prefix, width_config);
     let content_width = record_content_width(width, prefix_columns);
     let wrapped = wrap_cells(content.to_vec(), content_width, width_config);
     if wrapped.is_empty() {
-        rows.push(prefix);
         return;
     }
     push_wrapped_lines(rows, &prefix, prefix_columns, wrapped, base);
