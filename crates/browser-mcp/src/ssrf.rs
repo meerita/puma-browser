@@ -10,16 +10,13 @@ use browser_core::BrowserUrl;
 use crate::McpError;
 
 pub(crate) fn ssrf_guard(url: &BrowserUrl) -> Result<(), McpError> {
-    let raw = url.as_str();
-
-    let scheme_end = raw.find("://").unwrap_or(0);
-    let scheme = &raw[..scheme_end];
+    let scheme = url.scheme();
     if scheme != "http" && scheme != "https" {
         return Err(McpError::SsrfBlocked);
     }
 
-    if let Some(host) = extract_host(raw) {
-        if let Ok(ip) = host
+    if let Some(host_str) = url.host_str() {
+        if let Ok(ip) = host_str
             .trim_matches(|c: char| c == '[' || c == ']')
             .parse::<IpAddr>()
         {
@@ -30,16 +27,6 @@ pub(crate) fn ssrf_guard(url: &BrowserUrl) -> Result<(), McpError> {
     }
 
     Ok(())
-}
-
-fn extract_host(url: &str) -> Option<&str> {
-    let after_scheme = url.find("://").map(|i| &url[i + 3..])?;
-    let host_and_port = after_scheme.split('/').next()?;
-    if host_and_port.starts_with('[') {
-        host_and_port.find(']').map(|i| &host_and_port[..=i])
-    } else {
-        Some(host_and_port.split(':').next().unwrap_or(host_and_port))
-    }
 }
 
 fn is_blocked_address(ip: IpAddr) -> bool {

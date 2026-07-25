@@ -44,3 +44,16 @@ fn file_scheme_is_blocked() {
     let url = BrowserUrl::parse("file:///etc/passwd").expect("BrowserUrl accepts file scheme");
     assert!(matches!(ssrf_guard(&url), Err(McpError::SsrfBlocked)));
 }
+
+#[test]
+fn loopback_with_userinfo_is_blocked() {
+    // Userinfo in the URL must not bypass the IP check.
+    let url = BrowserUrl::parse("http://attacker@127.0.0.1/").expect("valid URL");
+    assert!(matches!(ssrf_guard(&url), Err(McpError::SsrfBlocked)));
+}
+
+#[test]
+fn private_ip_with_userinfo_is_blocked() {
+    let url = BrowserUrl::parse("http://x@192.168.1.1/admin").expect("valid URL");
+    assert!(matches!(ssrf_guard(&url), Err(McpError::SsrfBlocked)));
+}
