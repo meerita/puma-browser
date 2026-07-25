@@ -3,8 +3,8 @@
 // @layer mcp
 // @created meerita <meerita@icloud.com>
 
-use browser_core::{CoreError, NavigationController};
-use browser_mcp::{McpError, McpServer};
+use browser_core::CoreError;
+use browser_mcp::McpError;
 use browser_network::NetworkError;
 
 #[test]
@@ -44,17 +44,13 @@ fn missing_document_reports_document_not_loaded_reason_code() {
 }
 
 #[test]
-fn placeholder_server_serve_returns_typed_error() {
-    let mut server = McpServer::new(NavigationController::new());
-    let error = server
-        .serve()
-        .expect_err("serve is a placeholder in this milestone and must return an error");
-    assert_eq!(error.reason_code(), "NAVIGATION_FAILED");
+fn ssrf_blocked_reports_ssrf_blocked_reason_code() {
+    let error = McpError::SsrfBlocked;
+    assert_eq!(error.reason_code(), "SSRF_BLOCKED");
 }
 
 #[test]
-fn placeholder_server_exposes_its_controller() {
-    let server = McpServer::new(NavigationController::new());
-    // The adapter holds the core it will serve; the getter proves the wiring exists.
-    let _controller: &NavigationController = server.controller();
+fn protocol_error_reports_protocol_error_reason_code() {
+    let error = McpError::Protocol(anyhow::anyhow!("transport failed"));
+    assert_eq!(error.reason_code(), "PROTOCOL_ERROR");
 }

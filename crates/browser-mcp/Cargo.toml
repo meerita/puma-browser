@@ -12,6 +12,9 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+browser-html = { path = "../browser-html" }
 
 [dev-dependencies]
 browser-network = { path = "../browser-network" }

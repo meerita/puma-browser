@@ -1,0 +1,148 @@
+// @file crates/browser-mcp/src/extract.rs
+// @description Text and link extraction from the SemanticNode tree for MCP responses.
+// @layer mcp
+// @created meerita <meerita@icloud.com>
+
+use browser_html::{InlineRun, SemanticNode};
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct LinkEntry {
+    pub text: String,
+    pub url: String,
+}
+
+pub(crate) fn extract_text(nodes: &[SemanticNode]) -> String {
+    let mut output = String::new();
+    for node in nodes {
+        let block = node_to_text(node);
+        if !block.is_empty() {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&block);
+        }
+    }
+    output
+}
+
+pub(crate) fn extract_links(nodes: &[SemanticNode]) -> Vec<LinkEntry> {
+    let mut links = Vec::new();
+    for node in nodes {
+        collect_links(node, &mut links);
+    }
+    links
+}
+
+fn node_to_text(node: &SemanticNode) -> String {
+    match node {
+        SemanticNode::Heading { level, runs, .. } => {
+            let prefix = "#".repeat(*level as usize);
+            format!("{} {}", prefix, runs_to_text(runs))
+        }
+        SemanticNode::Paragraph { runs, .. } => runs_to_text(runs),
+        SemanticNode::List { children, .. }
+        | SemanticNode::ListItem { children, .. }
+        | SemanticNode::Quote { children, .. }
+        | SemanticNode::Form { children }
+        | SemanticNode::Landmark { children, .. }
+        | SemanticNode::Details { children, .. }
+        | SemanticNode::Table { children }
+        | SemanticNode::TableRow { children }
+        | SemanticNode::TableCell { children, .. } => extract_text(children),
+        SemanticNode::Figure { children, caption } => {
+            let mut parts = extract_text(children);
+            if let Some(caption_runs) = caption {
+                let caption_text = runs_to_text(caption_runs);
+                if !caption_text.is_empty() {
+                    if !parts.is_empty() {
+                        parts.push('\n');
+                    }
+                    parts.push_str(&caption_text);
+                }
+            }
+            parts
+        }
+        SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => text.clone(),
+        SemanticNode::ImagePlaceholder { alt, .. } => {
+            if alt.is_empty() {
+                String::new()
+            } else {
+                format!("[Image: {}]", alt)
+            }
+        }
+        SemanticNode::Button { runs, .. } | SemanticNode::Summary { runs, .. } => {
+            runs_to_text(runs)
+        }
+        SemanticNode::Separator => "---".to_string(),
+        SemanticNode::EmbeddedContent { label } => format!("[Embedded: {}]", label),
+        SemanticNode::Warning { message } => format!("[Warning: {}]", message),
+        SemanticNode::Input { label, .. } => label.as_deref().unwrap_or("").to_string(),
+        SemanticNode::Select { label, .. } => label.as_deref().unwrap_or("").to_string(),
+    }
+}
+
+fn runs_to_text(runs: &[InlineRun]) -> String {
+    runs.iter()
+        .map(|run| run.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn collect_links(node: &SemanticNode, output: &mut Vec<LinkEntry>) {
+    match node {
+        SemanticNode::Heading { runs, .. }
+        | SemanticNode::Paragraph { runs, .. }
+        | SemanticNode::Button { runs, .. }
+        | SemanticNode::Summary { runs, .. } => {
+            collect_links_from_runs(runs, output);
+        }
+        SemanticNode::List { children, .. }
+        | SemanticNode::ListItem { children, .. }
+        | SemanticNode::Quote { children, .. }
+        | SemanticNode::Form { children }
+        | SemanticNode::Landmark { children, .. }
+        | SemanticNode::Details { children, .. }
+        | SemanticNode::Table { children }
+        | SemanticNode::TableRow { children }
+        | SemanticNode::TableCell { children, .. } => {
+            for child in children {
+                collect_links(child, output);
+            }
+        }
+        SemanticNode::Figure { children, caption } => {
+            for child in children {
+                collect_links(child, output);
+            }
+            if let Some(caption_runs) = caption {
+                collect_links_from_runs(caption_runs, output);
+            }
+        }
+        SemanticNode::CodeBlock { .. }
+        | SemanticNode::PreformattedBlock { .. }
+        | SemanticNode::ImagePlaceholder { .. }
+        | SemanticNode::Separator
+        | SemanticNode::EmbeddedContent { .. }
+        | SemanticNode::Warning { .. }
+        | SemanticNode::Input { .. }
+        | SemanticNode::Select { .. } => {}
+    }
+}
+
+fn collect_links_from_runs(runs: &[InlineRun], output: &mut Vec<LinkEntry>) {
+    for run in runs {
+        if let Some(url) = &run.link {
+            if !url.is_empty() {
+                output.push(LinkEntry {
+                    text: run.text.clone(),
+                    url: url.clone(),
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "extract_tests.rs"]
+mod tests;
