@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_TYPE, LOCATION};
+use tokio::sync::watch;
 use url::Url;
 
 use crate::browser_url::BrowserUrl;
@@ -29,9 +30,27 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The public signature is identical for both paths so callers do not distinguish
 /// local from remote acquisition.
 pub async fn fetch(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
+    let (progress_tx, _) = watch::channel(0usize);
+    fetch_with_progress(url, progress_tx).await
+}
+
+/// Acquire `url` and stream byte-count updates to `progress` as chunks arrive.
+///
+/// Behaves identically to [`fetch`] but reports the running total of bytes received
+/// through `progress` after each chunk. For `file://` URLs, which are read in one
+/// shot, the final file size is sent once after the read completes. The send is
+/// silently ignored when all receivers have been dropped.
+pub async fn fetch_with_progress(
+    url: &BrowserUrl,
+    progress: watch::Sender<usize>,
+) -> Result<FetchedDocument, NetworkError> {
     match url.scheme() {
-        "file" => read_local_file(url).await,
-        _ => fetch_over_http(url).await,
+        "file" => {
+            let document = read_local_file(url).await?;
+            let _ = progress.send(document.body_bytes().len());
+            Ok(document)
+        }
+        _ => fetch_over_http_with_progress(url, &progress).await,
     }
 }
 
@@ -78,14 +97,10 @@ fn content_type_for_path(path: &std::path::Path) -> String {
     }
 }
 
-/// Fetch `url` over HTTP or HTTPS and return the raw response.
-///
-/// Redirects are followed manually so each hop can be validated: the target scheme
-/// must stay `http` or `https`, an HTTPS to HTTP downgrade is refused, and the chain
-/// is capped at [`MAX_REDIRECT_COUNT`]. The body is bounded at [`MAX_RESPONSE_BYTES`]
-/// while streaming and returned undecoded; decoding to Unicode happens at the parse
-/// boundary, where a `<meta charset>` can be honored.
-async fn fetch_over_http(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
+async fn fetch_over_http_with_progress(
+    url: &BrowserUrl,
+    progress: &watch::Sender<usize>,
+) -> Result<FetchedDocument, NetworkError> {
     let client = build_client()?;
     let mut current = Url::parse(url.as_str()).map_err(|_| NetworkError::InvalidUrl)?;
     let mut redirect_count: usize = 0;
@@ -96,11 +111,11 @@ async fn fetch_over_http(url: &BrowserUrl) -> Result<FetchedDocument, NetworkErr
             .await
             .map_err(map_send_error)?;
         if !response.status().is_redirection() {
-            return collect_document(response).await;
+            return collect_document_reporting_progress(response, progress).await;
         }
         let location = redirect_location(&response);
         let Some(location) = location else {
-            return collect_document(response).await;
+            return collect_document_reporting_progress(response, progress).await;
         };
         let next = resolve_redirect(&current, &location)?;
         redirect_count += 1;
@@ -160,7 +175,10 @@ fn redirect_is_downgrade(current: &Url, next: &Url) -> bool {
     current.scheme() == "https" && next.scheme() == "http"
 }
 
-async fn collect_document(response: reqwest::Response) -> Result<FetchedDocument, NetworkError> {
+async fn collect_document_reporting_progress(
+    response: reqwest::Response,
+    progress: &watch::Sender<usize>,
+) -> Result<FetchedDocument, NetworkError> {
     let final_url = BrowserUrl::parse(response.url().as_str())?;
     let content_type = content_type_of(&response);
     let charset = charset_from_content_type(&content_type);
@@ -169,7 +187,7 @@ async fn collect_document(response: reqwest::Response) -> Result<FetchedDocument
             return Err(NetworkError::ResponseTooLarge);
         }
     }
-    let body = read_bounded_body(response).await?;
+    let body = read_bounded_body_reporting_progress(response, progress).await?;
     Ok(FetchedDocument::new(final_url, content_type, charset, body))
 }
 
@@ -204,9 +222,10 @@ fn charset_from_content_type(content_type: &str) -> Option<String> {
     Some(label.to_string())
 }
 
-/// Stream the body into memory, stopping as soon as the size cap is crossed, and return
-/// the raw bytes undecoded.
-async fn read_bounded_body(response: reqwest::Response) -> Result<Vec<u8>, NetworkError> {
+async fn read_bounded_body_reporting_progress(
+    response: reqwest::Response,
+    progress: &watch::Sender<usize>,
+) -> Result<Vec<u8>, NetworkError> {
     let mut collected: Vec<u8> = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -215,6 +234,7 @@ async fn read_bounded_body(response: reqwest::Response) -> Result<Vec<u8>, Netwo
         if collected.len() as u64 > MAX_RESPONSE_BYTES {
             return Err(NetworkError::ResponseTooLarge);
         }
+        let _ = progress.send(collected.len());
     }
     Ok(collected)
 }

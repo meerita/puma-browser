@@ -44,7 +44,21 @@ impl NavigationController {
     /// in [`render`](Self::render) because it depends on the terminal width. Network and
     /// parse failures are mapped into [`CoreError`] by `?`.
     pub async fn load(&mut self, url: BrowserUrl) -> Result<(), CoreError> {
-        let fetched = browser_network::fetch(&url).await?;
+        let (progress_tx, _) = tokio::sync::watch::channel(0usize);
+        self.load_with_progress(url, progress_tx).await
+    }
+
+    /// Fetch and parse the document at `url`, streaming byte-count updates to `progress`.
+    ///
+    /// Behaves identically to [`load`](Self::load) but reports the running total of bytes
+    /// received through `progress` after each chunk so callers can display live progress
+    /// without depending on network internals.
+    pub async fn load_with_progress(
+        &mut self,
+        url: BrowserUrl,
+        progress: tokio::sync::watch::Sender<usize>,
+    ) -> Result<(), CoreError> {
+        let fetched = browser_network::fetch_with_progress(&url, progress).await?;
         let byte_count = fetched.body_bytes().len();
         let document = browser_html::parse_html_with_base(
             fetched.body_bytes(),
@@ -107,13 +121,6 @@ impl NavigationController {
             Some(page) => page.document().script_count(),
             None => 0,
         }
-    }
-
-    /// Loads the document at the given location into the active tab.
-    ///
-    /// Not implemented in this milestone; returns [`CoreError::NavigationFailed`].
-    pub fn navigate(&mut self, _location: &str) -> Result<(), CoreError> {
-        Err(CoreError::NavigationFailed)
     }
 
     /// Closes the tab with the given identifier.

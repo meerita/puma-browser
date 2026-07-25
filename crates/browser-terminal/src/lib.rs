@@ -132,14 +132,9 @@ impl TerminalApp {
                 self.controller.script_count(),
                 self.controller.page_byte_count(),
             )?;
-            if let LoopControl::Quit = step_event(
-                &mut scroll,
-                &mut ui_state,
-                &mut self.controller,
-                viewport_height,
-                max_offset,
-                now,
-            )? {
+            if let LoopControl::Quit =
+                step_event(&mut scroll, &mut ui_state, viewport_height, max_offset, now)?
+            {
                 return Ok(());
             }
         }
@@ -218,7 +213,6 @@ impl TerminalApp {
 fn step_event(
     scroll: &mut ScrollState,
     ui_state: &mut UiState,
-    controller: &mut NavigationController,
     viewport_height: u16,
     max_offset: u16,
     now: Instant,
@@ -247,7 +241,7 @@ fn step_event(
     }
     ui_state.clear_transient();
     apply_scroll(action, scroll, viewport_height, max_offset);
-    apply_command_action(action, ui_state, controller);
+    apply_command_action(action, ui_state);
     ui_state.quit_armed = quit_armed_after(action);
     ui_state.refresh_armed = refresh_armed_after(action);
     if matches!(action, InputAction::ArmQuit) {
@@ -286,11 +280,7 @@ fn apply_scroll(
     }
 }
 
-fn apply_command_action(
-    action: InputAction,
-    ui_state: &mut UiState,
-    controller: &mut NavigationController,
-) {
+fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
     match action {
         InputAction::EnterCommand(ch) => ui_state.enter_command_mode(ch),
         InputAction::CommandAppend(ch) => ui_state.command_append_char(ch),
@@ -299,8 +289,7 @@ fn apply_command_action(
         InputAction::CommandDeleteBack => ui_state.command_delete_before_cursor(),
         InputAction::CommandCancel => ui_state.cancel_command_mode(),
         InputAction::CommandSubmit => {
-            let url = ui_state.take_command_buffer();
-            let _ = controller.navigate(&url);
+            let _ = ui_state.take_command_buffer();
         }
         InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
