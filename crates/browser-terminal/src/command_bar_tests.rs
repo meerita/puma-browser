@@ -5,7 +5,10 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{command_cursor_col, compose_command_bar_command, compose_command_bar_reading};
+use super::{
+    command_cursor_col, compose_command_bar_command, compose_command_bar_loading,
+    compose_command_bar_reading,
+};
 
 #[test]
 fn reading_mode_shows_hint_with_prompt_prefix() {
@@ -94,4 +97,31 @@ fn command_cursor_col_accounts_for_multibyte_chars_by_byte_offset() {
     let byte_len = ch.len_utf8();
     let buffer = ch.to_string();
     assert_eq!(command_cursor_col(&buffer, byte_len), 3);
+}
+
+#[test]
+fn loading_bar_shows_spinner_url_and_kb() {
+    let result = compose_command_bar_loading(0, "https://example.com", 42 * 1024, 80);
+    assert!(
+        result.contains("⠋"),
+        "expected spinner char for frame 0: {result}"
+    );
+    assert!(
+        result.contains("https://example.com"),
+        "expected URL in loading bar: {result}"
+    );
+    assert!(
+        result.contains("42 KB"),
+        "expected KB count in loading bar: {result}"
+    );
+}
+
+#[test]
+fn loading_bar_advances_spinner_frame() {
+    let frame0 = compose_command_bar_loading(0, "https://example.com", 0, 80);
+    let frame1 = compose_command_bar_loading(1, "https://example.com", 0, 80);
+    assert_ne!(
+        frame0, frame1,
+        "consecutive spinner frames must produce different output"
+    );
 }

@@ -4,18 +4,18 @@
 // @created meerita <meerita@icloud.com>
 
 use browser_core::NavigationController;
-use browser_terminal::{InitialView, TerminalApp};
+use browser_terminal::{TerminalApp, ViewState};
 
 #[test]
 fn app_constructs_with_a_blank_initial_view() {
-    let app = TerminalApp::new(NavigationController::new(), InitialView::Blank);
+    let app = TerminalApp::new(NavigationController::new(), ViewState::Blank);
     // Reading the controller back confirms construction wired it in.
     let _controller = app.controller();
 }
 
 #[test]
 fn app_constructs_with_an_error_initial_view() {
-    let view = InitialView::Error("Connection failed".to_string());
+    let view = ViewState::Error("Connection failed".to_string());
     let app = TerminalApp::new(NavigationController::new(), view);
     let _controller = app.controller();
 }

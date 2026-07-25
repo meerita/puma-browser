@@ -9,7 +9,8 @@ browser-core = { path = "../browser-core" }
 browser-css = { path = "../browser-css" }
 browser-layout = { path = "../browser-layout" }
 ratatui = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
+futures-util = "0.3"
 tokio = { workspace = true }
 unicode-width = { workspace = true }
 serde = { workspace = true }
