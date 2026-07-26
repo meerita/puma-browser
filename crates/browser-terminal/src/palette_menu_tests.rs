@@ -5,7 +5,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use super::compose_palette_menu;
+use super::{compose_arg_hint_row, compose_palette_menu};
 use crate::command::filter;
 
 #[test]
@@ -100,4 +100,17 @@ fn zero_width_produces_no_rows() {
     let matches = filter("");
     let menu = compose_palette_menu(&matches, 0, 0, 8);
     assert!(menu.rows.is_empty());
+}
+
+#[test]
+fn arg_hint_row_carries_the_hint_and_fills_the_width() {
+    let row = compose_arg_hint_row("/open <url>", 40);
+    assert!(row.contains("/open <url>"));
+    assert_eq!(UnicodeWidthStr::width(row.as_str()), 40);
+}
+
+#[test]
+fn arg_hint_row_truncates_to_the_available_width() {
+    let row = compose_arg_hint_row("/open <url>", 4);
+    assert_eq!(UnicodeWidthStr::width(row.as_str()), 4);
 }

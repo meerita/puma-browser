@@ -3,7 +3,7 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
-use super::{filter, parse_command_input, registry, resolve, CommandKind, MatchRank};
+use super::{arg_hint, filter, parse_command_input, registry, resolve, CommandKind, MatchRank};
 
 #[test]
 fn registry_holds_exactly_the_six_commands() {
@@ -172,4 +172,16 @@ fn a_parsed_alias_resolves_to_the_settings_kind() {
 fn a_parsed_unknown_token_resolves_to_none() {
     let (token, _) = parse_command_input("/bogus");
     assert!(resolve(token).is_none());
+}
+
+#[test]
+fn arg_hint_formats_an_argument_command_in_angle_brackets() {
+    let spec = resolve("open").expect("open must resolve");
+    assert_eq!(arg_hint(spec).as_deref(), Some("/open <url>"));
+}
+
+#[test]
+fn arg_hint_is_none_for_a_command_without_arguments() {
+    let spec = resolve("reload").expect("reload must resolve");
+    assert_eq!(arg_hint(spec), None);
 }

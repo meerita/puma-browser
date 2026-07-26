@@ -56,7 +56,7 @@ use command_bar::{
 };
 use hints_bar::compose_hints_bar;
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
-use palette_menu::{compose_palette_menu, MENU_MAX_ROWS};
+use palette_menu::{compose_arg_hint_row, compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
 use selection::TextSelection;
 use title_bar::compose_title_bar;
 use ui_state::UiState;
@@ -275,12 +275,14 @@ impl TerminalApp {
                             Event::Key(key) if key.kind != KeyEventKind::Release => {
                                 let in_command_mode = ui_state.is_in_command_mode();
                                 let in_link_navigation = ui_state.is_in_link_navigation();
+                                let palette_active = ui_state.is_palette_active();
                                 let action = map_key_event(
                                     key,
                                     ui_state.quit_armed,
                                     ui_state.refresh_armed,
                                     in_command_mode,
                                     in_link_navigation,
+                                    palette_active,
                                 );
                                 if matches!(action, InputAction::Quit) {
                                     return Ok(());
@@ -288,7 +290,7 @@ impl TerminalApp {
                                 ui_state.clear_transient();
                                 apply_scroll(action, &mut scroll, viewport_height, max_offset);
                                 if matches!(action, InputAction::CommandSubmit) {
-                                    command_to_submit = Some(ui_state.take_command_buffer());
+                                    command_to_submit = Some(ui_state.take_submit_buffer());
                                 } else {
                                     apply_command_action(action, &mut ui_state);
                                 }
@@ -449,7 +451,7 @@ impl TerminalApp {
             CommandKind::Back => self.run_back(ui_state, cache, scroll, now),
             CommandKind::Quit => CommandOutcome::Quit,
             CommandKind::Help => {
-                ui_state.set_transient_message("type / then a command name".to_string(), now);
+                ui_state.enter_command_mode('/');
                 CommandOutcome::None
             }
             CommandKind::Settings => {
@@ -720,7 +722,10 @@ fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
     if matches.is_empty() || content_area.width == 0 || content_area.height == 0 {
         return;
     }
-    let max_rows = MENU_MAX_ROWS.min(content_area.height as usize);
+    let hint = ui_state.palette_arg_hint();
+    let reserved_rows = usize::from(hint.is_some());
+    let available_rows = (content_area.height as usize).saturating_sub(reserved_rows);
+    let max_rows = MENU_MAX_ROWS.min(available_rows);
     let menu = compose_palette_menu(
         matches,
         ui_state.palette_selected(),
@@ -730,14 +735,23 @@ fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
     if menu.rows.is_empty() {
         return;
     }
-    let popup_height = menu.rows.len() as u16;
+    let lines = palette_popup_lines(&menu, hint.as_deref(), content_area.width);
+    let popup_height = lines.len() as u16;
     let popup_area = Rect {
         x: content_area.x,
         y: content_area.y + content_area.height - popup_height,
         width: content_area.width,
         height: popup_height,
     };
-    let lines: Vec<Line> = menu
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(Paragraph::new(lines), popup_area);
+}
+
+/// Builds the popup's styled lines: one per visible menu row with the selection
+/// highlighted, then an optional dimmed argument-hint row beneath them. Every string is
+/// local registry text, so no page content reaches the terminal here.
+fn palette_popup_lines(menu: &PaletteMenu, hint: Option<&str>, width: u16) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = menu
         .rows
         .iter()
         .enumerate()
@@ -746,8 +760,13 @@ fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
             Line::styled(row_text.clone(), style)
         })
         .collect();
-    frame.render_widget(Clear, popup_area);
-    frame.render_widget(Paragraph::new(lines), popup_area);
+    let Some(hint) = hint else {
+        return lines;
+    };
+    let row = compose_arg_hint_row(hint, width);
+    let hint_style = Style::default().fg(TerminalColor::DarkGray);
+    lines.push(Line::styled(row, hint_style));
+    lines
 }
 
 /// Style for a palette row: the selected row is reversed to match the chrome bars; other
@@ -1029,6 +1048,9 @@ fn apply_scroll(
         | InputAction::CommandDeleteBack
         | InputAction::CommandCancel
         | InputAction::CommandSubmit
+        | InputAction::PaletteSelectPrev
+        | InputAction::PaletteSelectNext
+        | InputAction::PaletteComplete
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
         | InputAction::ActivateFocusedLink
@@ -1042,8 +1064,11 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         InputAction::CommandAppend(ch) => ui_state.command_append_char(ch),
         InputAction::CommandMoveCursorLeft => ui_state.command_move_left(),
         InputAction::CommandMoveCursorRight => ui_state.command_move_right(),
-        InputAction::CommandDeleteBack => ui_state.command_delete_before_cursor(),
+        InputAction::CommandDeleteBack => ui_state.command_delete_or_exit(),
         InputAction::CommandCancel => ui_state.cancel_command_mode(),
+        InputAction::PaletteSelectPrev => ui_state.palette_select_prev(),
+        InputAction::PaletteSelectNext => ui_state.palette_select_next(),
+        InputAction::PaletteComplete => ui_state.palette_complete(),
         InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
         | InputAction::ScrollPageDown
@@ -1154,7 +1179,10 @@ fn handle_navigation_action(
         | InputAction::CommandMoveCursorRight
         | InputAction::CommandDeleteBack
         | InputAction::CommandCancel
-        | InputAction::CommandSubmit => None,
+        | InputAction::CommandSubmit
+        | InputAction::PaletteSelectPrev
+        | InputAction::PaletteSelectNext
+        | InputAction::PaletteComplete => None,
     }
 }
 

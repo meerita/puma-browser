@@ -195,11 +195,11 @@ fn cancel_command_mode_clears_buffer_and_returns_to_reading() {
 }
 
 #[test]
-fn take_command_buffer_returns_content_and_returns_to_reading() {
+fn take_submit_buffer_returns_a_url_buffer_verbatim_and_returns_to_reading() {
     let mut state = UiState::new();
     state.enter_command_mode('h');
     state.command_append_char('i');
-    let url = state.take_command_buffer();
+    let url = state.take_submit_buffer();
     assert_eq!(url, "hi");
     assert!(!state.is_in_command_mode());
     assert_eq!(state.command_buffer(), "");
@@ -321,12 +321,160 @@ fn cancel_command_mode_clears_the_palette() {
 }
 
 #[test]
-fn take_command_buffer_clears_the_palette() {
+fn take_submit_buffer_clears_the_palette() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('r');
+    let buffer = state.take_submit_buffer();
+    assert_eq!(buffer, "/reload");
+    assert!(!state.is_in_command_mode());
+    assert!(state.palette_matches().is_empty());
+    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn palette_select_next_wraps_around_the_match_list() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    assert_eq!(state.palette_selected(), 0);
+    state.palette_select_next();
+    assert_eq!(state.palette_selected(), 1);
+    for _ in 0..5 {
+        state.palette_select_next();
+    }
+    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn palette_select_prev_wraps_to_the_last_row() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.palette_select_prev();
+    assert_eq!(state.palette_selected(), state.palette_matches().len() - 1);
+}
+
+#[test]
+fn palette_select_on_an_empty_list_is_a_no_op() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('z');
+    state.command_append_char('z');
+    assert!(state.palette_matches().is_empty());
+    state.palette_select_next();
+    state.palette_select_prev();
+    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn palette_complete_fills_the_buffer_with_the_selected_command() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('r');
+    state.palette_complete();
+    assert_eq!(state.command_buffer(), "/reload");
+    assert_eq!(state.cursor_byte_offset(), "/reload".len());
+}
+
+#[test]
+fn palette_complete_appends_a_space_for_a_command_that_takes_an_argument() {
     let mut state = UiState::new();
     state.enter_command_mode('/');
     state.command_append_char('o');
-    let buffer = state.take_command_buffer();
-    assert_eq!(buffer, "/o");
+    state.palette_complete();
+    assert_eq!(state.command_buffer(), "/open ");
+    assert_eq!(state.cursor_byte_offset(), "/open ".len());
+}
+
+#[test]
+fn palette_complete_keeps_the_command_visible_for_its_hint() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('o');
+    state.palette_complete();
+    assert_eq!(state.palette_matches().len(), 1);
+    assert_eq!(state.palette_matches()[0].spec.name, "open");
+}
+
+#[test]
+fn palette_complete_on_an_empty_list_is_a_no_op() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('z');
+    state.command_append_char('z');
+    state.palette_complete();
+    assert_eq!(state.command_buffer(), "/zz");
+}
+
+#[test]
+fn palette_arg_hint_is_shown_only_for_a_command_with_arguments() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('o');
+    assert_eq!(state.palette_arg_hint().as_deref(), Some("/open <url>"));
+    state.command_delete_before_cursor();
+    state.command_append_char('r');
+    assert_eq!(state.palette_arg_hint(), None);
+}
+
+#[test]
+fn take_submit_buffer_runs_the_highlighted_command_when_the_token_is_not_exact() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('o');
+    let buffer = state.take_submit_buffer();
+    assert_eq!(buffer, "/open");
+}
+
+#[test]
+fn take_submit_buffer_keeps_the_typed_argument_when_resolving_the_selection() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('o');
+    state.command_append_char(' ');
+    state.command_append_char('a');
+    let buffer = state.take_submit_buffer();
+    assert_eq!(buffer, "/open a");
+}
+
+#[test]
+fn take_submit_buffer_runs_the_exact_command_over_the_highlighted_row() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('b');
+    state.command_append_char('a');
+    state.command_append_char('c');
+    state.command_append_char('k');
+    let buffer = state.take_submit_buffer();
+    assert_eq!(buffer, "/back");
+}
+
+#[test]
+fn take_submit_buffer_returns_an_unmatched_slash_token_unchanged() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('z');
+    state.command_append_char('z');
+    let buffer = state.take_submit_buffer();
+    assert_eq!(buffer, "/zz");
+}
+
+#[test]
+fn backspace_deleting_the_leading_slash_exits_command_mode() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_delete_or_exit();
+    assert!(!state.is_in_command_mode());
+    assert_eq!(state.command_buffer(), "");
     assert!(state.palette_matches().is_empty());
-    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn backspace_before_the_leading_slash_only_deletes_a_character() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('o');
+    state.command_delete_or_exit();
+    assert!(state.is_in_command_mode());
+    assert_eq!(state.command_buffer(), "/");
+    assert_eq!(state.palette_matches().len(), 6);
 }

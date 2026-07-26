@@ -14,6 +14,9 @@ pub(crate) const MENU_MAX_ROWS: usize = 8;
 /// Columns of blank space between the command-name column and the description column.
 const DESCRIPTION_GAP: &str = "  ";
 
+/// Marker shown before the argument hint, echoing the Tab key that completes the command.
+const ARG_HINT_PREFIX: &str = "↹ ";
+
 /// A composed palette popup: the visible rows, each already truncated and padded to the
 /// popup width, and which of those rows carries the selection highlight.
 pub(crate) struct PaletteMenu {
@@ -56,6 +59,14 @@ pub(crate) fn compose_palette_menu(
         rows,
         selected_row: selected - window_start,
     }
+}
+
+/// Formats the argument-hint row (for example `↹ /open <url>`) shown beneath the menu,
+/// fitted to `width` columns so it spans the popup line like the command rows. The hint
+/// text comes from the static registry, so the row never carries page content.
+pub(crate) fn compose_arg_hint_row(hint: &str, width: u16) -> String {
+    let prefixed = format!("{ARG_HINT_PREFIX}{hint}");
+    fit_to_width(&prefixed, width as usize)
 }
 
 /// Chooses which slice of the match list is visible so the selected row stays on screen.

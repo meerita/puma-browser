@@ -128,6 +128,22 @@ pub(crate) fn resolve(token: &str) -> Option<&'static CommandSpec> {
         .find(|spec| spec.name == token || spec.aliases.contains(&token))
 }
 
+/// The argument-usage hint for a command, for example `/open <url>`, or `None` when the
+/// command declares no arguments. Every argument is shown in angle brackets. The string is
+/// built only from static registry data, so it is always safe to display.
+pub(crate) fn arg_hint(spec: &CommandSpec) -> Option<String> {
+    if spec.args.is_empty() {
+        return None;
+    }
+    let arguments = spec
+        .args
+        .iter()
+        .map(|argument| format!("<{}>", argument.name))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!("/{} {arguments}", spec.name))
+}
+
 /// Filter the registry against a query (the text after `/`, possibly empty), returning
 /// ranked matches. Prefix matches come first in registry order, then subsequence matches
 /// in registry order. Each command appears at most once, taking its best rank.
