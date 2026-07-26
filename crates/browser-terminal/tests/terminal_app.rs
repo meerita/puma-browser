@@ -10,6 +10,7 @@ fn settings() -> TerminalSettings {
     TerminalSettings {
         copy_on_select: true,
         force_osc52: false,
+        search_enabled: true,
     }
 }
 

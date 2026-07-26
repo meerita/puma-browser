@@ -21,6 +21,9 @@ const COPY_ON_SELECT_ENV: &str = "PUMA_COPY_ON_SELECT";
 /// `true`, for terminals reached over SSH where the native clipboard path is absent.
 const CLIPBOARD_OSC52_ENV: &str = "PUMA_CLIPBOARD_OSC52";
 
+/// Environment variable that disables the `/search` command when set to `0` or `false`.
+const SEARCH_ENV: &str = "PUMA_SEARCH";
+
 /// The mode keyword that selects the terminal adapter; kept for symmetry with `mcp`.
 const TERMINAL_MODE_KEYWORD: &str = "terminal";
 
@@ -159,9 +162,11 @@ async fn run_terminal_app(
 fn terminal_settings_from_env() -> TerminalSettings {
     let copy_on_select = copy_on_select_enabled(std::env::var(COPY_ON_SELECT_ENV).ok().as_deref());
     let force_osc52 = force_osc52_enabled(std::env::var(CLIPBOARD_OSC52_ENV).ok().as_deref());
+    let search_enabled = search_enabled(std::env::var(SEARCH_ENV).ok().as_deref());
     TerminalSettings {
         copy_on_select,
         force_osc52,
+        search_enabled,
     }
 }
 
@@ -181,6 +186,15 @@ fn copy_on_select_enabled(value: Option<&str>) -> bool {
 /// it. Taking the value as an argument keeps this testable without the real environment.
 fn force_osc52_enabled(value: Option<&str>) -> bool {
     matches!(value, Some("1") | Some("true"))
+}
+
+/// Whether the `/search` command is enabled given the raw value of `PUMA_SEARCH`.
+///
+/// Enabled by default and when the variable is unset; only an explicit `0` or `false`
+/// turns it off. Taking the value as an argument keeps this testable without touching
+/// the real process environment.
+fn search_enabled(value: Option<&str>) -> bool {
+    !matches!(value, Some("0") | Some("false"))
 }
 
 async fn run_mcp() -> Result<()> {

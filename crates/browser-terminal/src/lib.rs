@@ -25,7 +25,7 @@ use std::io::Stdout;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use browser_core::{BrowserUrl, CoreError, NavigationController, NavigationTarget};
+use browser_core::{BrowserUrl, CoreError, NavigationController, NavigationTarget, SearchEngine};
 use browser_css::{Color, Emphasis};
 use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkSpan};
 use crossterm::event::{
@@ -124,10 +124,13 @@ pub struct TerminalApp {
 /// highlights text but releasing the button copies nothing and shows no confirmation.
 /// `force_osc52` routes every clipboard write through the OSC 52 escape path instead of
 /// the native clipboard, for terminals reached over SSH where the native path is absent.
+/// `search_enabled` gates the `/search` command: when it is false the command is hidden
+/// from the palette and rejected on dispatch.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalSettings {
     pub copy_on_select: bool,
     pub force_osc52: bool,
+    pub search_enabled: bool,
 }
 
 /// A cell buffer cached alongside the content width it was laid out for, so the page
@@ -183,10 +186,11 @@ impl TerminalApp {
         let TerminalSettings {
             copy_on_select,
             force_osc52,
+            search_enabled,
         } = self.settings;
         let mut scroll = ScrollState::new();
         let mut selection = TextSelection::new();
-        let mut ui_state = UiState::new();
+        let mut ui_state = UiState::new(search_enabled);
         // A fragment on the startup URL is honored through the same deferred path a
         // cross-page link uses: seed it here so the first render positions the viewport.
         ui_state.set_pending_fragment(self.initial_fragment.take());
@@ -596,6 +600,7 @@ impl TerminalApp {
                 max_offset,
                 now,
             ),
+            CommandKind::Search => self.run_search(remainder, ui_state, now),
             CommandKind::Reload => self.run_reload(ui_state, now),
             CommandKind::Back => self.run_back(ui_state, cache, scroll, now),
             CommandKind::Quit => CommandOutcome::Quit,
@@ -636,6 +641,34 @@ impl TerminalApp {
             max_offset,
             now,
         )
+    }
+
+    /// `/search <query>`: turns the query into a results URL and loads it through the
+    /// shared load path. Rejected with a fixed message when search is disabled, and shows a
+    /// usage message when no query was given. The query and any build error are never echoed
+    /// into terminal output; only the fixed local messages below can appear there.
+    fn run_search(
+        &mut self,
+        remainder: &str,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) -> CommandOutcome {
+        if !self.settings.search_enabled {
+            ui_state.set_transient_message("search is disabled".to_string(), now);
+            return CommandOutcome::None;
+        }
+        let query = remainder.trim();
+        if query.is_empty() {
+            ui_state.set_transient_message("usage: /search <query>".to_string(), now);
+            return CommandOutcome::None;
+        }
+        match SearchEngine::default().result_url(query) {
+            Ok(url) => CommandOutcome::Load(self.start_load(url)),
+            Err(_) => {
+                ui_state.set_transient_message("could not build search URL".to_string(), now);
+                CommandOutcome::None
+            }
+        }
     }
 
     /// `/reload`: re-fetches the current URL through the shared load path, or reports that
