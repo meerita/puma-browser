@@ -57,8 +57,42 @@ fn terminal_app_with_search(search_enabled: bool) -> TerminalApp {
             copy_on_select: false,
             force_osc52: false,
             search_enabled,
+            unwrap_tracking: true,
         },
     )
+}
+
+fn terminal_app_with_unwrap_tracking(unwrap_tracking: bool) -> TerminalApp {
+    TerminalApp::new(
+        NavigationController::new(),
+        ViewState::Page,
+        TerminalSettings {
+            copy_on_select: false,
+            force_osc52: false,
+            search_enabled: true,
+            unwrap_tracking,
+        },
+    )
+}
+
+#[test]
+fn an_enabled_unwrap_tracking_setting_maps_to_the_enabled_mode() {
+    let app = terminal_app_with_unwrap_tracking(true);
+
+    assert_eq!(
+        app.tracking_unwrap_mode(),
+        browser_core::TrackingUnwrap::Enabled
+    );
+}
+
+#[test]
+fn a_disabled_unwrap_tracking_setting_maps_to_the_disabled_mode() {
+    let app = terminal_app_with_unwrap_tracking(false);
+
+    assert_eq!(
+        app.tracking_unwrap_mode(),
+        browser_core::TrackingUnwrap::Disabled
+    );
 }
 
 #[test]

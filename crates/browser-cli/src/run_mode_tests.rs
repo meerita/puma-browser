@@ -8,7 +8,8 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use super::{
-    copy_on_select_enabled, force_osc52_enabled, resolve_mode, search_enabled, ResolvedMode,
+    copy_on_select_enabled, force_osc52_enabled, resolve_mode, search_enabled,
+    unwrap_tracking_enabled, ResolvedMode,
 };
 
 fn resolved_in(working_directory: &Path, arguments: &[&str]) -> ResolvedMode {
@@ -176,4 +177,22 @@ fn search_stays_enabled_for_any_other_value() {
     assert!(search_enabled(Some("1")));
     assert!(search_enabled(Some("true")));
     assert!(search_enabled(Some("")));
+}
+
+#[test]
+fn unwrap_tracking_is_enabled_when_the_variable_is_unset() {
+    assert!(unwrap_tracking_enabled(None));
+}
+
+#[test]
+fn unwrap_tracking_is_disabled_by_zero_or_false() {
+    assert!(!unwrap_tracking_enabled(Some("0")));
+    assert!(!unwrap_tracking_enabled(Some("false")));
+}
+
+#[test]
+fn unwrap_tracking_stays_enabled_for_any_other_value() {
+    assert!(unwrap_tracking_enabled(Some("1")));
+    assert!(unwrap_tracking_enabled(Some("true")));
+    assert!(unwrap_tracking_enabled(Some("")));
 }

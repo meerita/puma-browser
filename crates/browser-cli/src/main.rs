@@ -24,6 +24,10 @@ const CLIPBOARD_OSC52_ENV: &str = "PUMA_CLIPBOARD_OSC52";
 /// Environment variable that disables the `/search` command when set to `0` or `false`.
 const SEARCH_ENV: &str = "PUMA_SEARCH";
 
+/// Environment variable that disables tracking-redirect unwrapping when set to `0` or
+/// `false`.
+const UNWRAP_TRACKING_ENV: &str = "PUMA_UNWRAP_TRACKING";
+
 /// The mode keyword that selects the terminal adapter; kept for symmetry with `mcp`.
 const TERMINAL_MODE_KEYWORD: &str = "terminal";
 
@@ -163,10 +167,13 @@ fn terminal_settings_from_env() -> TerminalSettings {
     let copy_on_select = copy_on_select_enabled(std::env::var(COPY_ON_SELECT_ENV).ok().as_deref());
     let force_osc52 = force_osc52_enabled(std::env::var(CLIPBOARD_OSC52_ENV).ok().as_deref());
     let search_enabled = search_enabled(std::env::var(SEARCH_ENV).ok().as_deref());
+    let unwrap_tracking =
+        unwrap_tracking_enabled(std::env::var(UNWRAP_TRACKING_ENV).ok().as_deref());
     TerminalSettings {
         copy_on_select,
         force_osc52,
         search_enabled,
+        unwrap_tracking,
     }
 }
 
@@ -194,6 +201,16 @@ fn force_osc52_enabled(value: Option<&str>) -> bool {
 /// turns it off. Taking the value as an argument keeps this testable without touching
 /// the real process environment.
 fn search_enabled(value: Option<&str>) -> bool {
+    !matches!(value, Some("0") | Some("false"))
+}
+
+/// Whether tracking-redirect unwrapping is enabled given the raw value of
+/// `PUMA_UNWRAP_TRACKING`.
+///
+/// Enabled by default and when the variable is unset; only an explicit `0` or `false`
+/// turns it off. Taking the value as an argument keeps this testable without touching the
+/// real process environment.
+fn unwrap_tracking_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0") | Some("false"))
 }
 

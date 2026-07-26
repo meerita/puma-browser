@@ -18,7 +18,7 @@ pub use browser_layout::CellBuffer;
 pub use browser_network::BrowserUrl;
 pub use error::CoreError;
 pub use ids::{BookmarkId, HistoryEntryId};
-pub use navigation_target::{classify_navigation, NavigationTarget};
+pub use navigation_target::{classify_navigation, NavigationTarget, TrackingUnwrap};
 pub use search_engine::SearchEngine;
 pub use tab_id::TabId;
 pub use tab_state::TabState;

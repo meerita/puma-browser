@@ -28,6 +28,15 @@ pub enum NavigationTarget {
     },
 }
 
+/// Whether `classify_navigation` should try to unwrap a known tracking-redirect wrapper
+/// into its real destination before classifying. The caller decides; the default product
+/// behavior is `Enabled`, disabled only by the user's environment toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackingUnwrap {
+    Enabled,
+    Disabled,
+}
+
 /// Classify `target_reference` against the currently loaded page.
 ///
 /// A bare `#fragment` is always a same-page jump and requires a current page; with none it
@@ -40,6 +49,7 @@ pub fn classify_navigation(
     current: Option<&BrowserUrl>,
     target_reference: &str,
     working_directory: &Path,
+    tracking_unwrap: TrackingUnwrap,
 ) -> Result<NavigationTarget, CoreError> {
     let trimmed = target_reference.trim();
     if let Some(fragment) = trimmed.strip_prefix('#') {
@@ -51,6 +61,7 @@ pub fn classify_navigation(
         });
     }
     let resolved = resolve_address(trimmed, working_directory)?;
+    let resolved = unwrap_when_enabled(current, resolved, tracking_unwrap);
     let fragment = resolved.fragment().map(str::to_string);
     let base = resolved.without_fragment();
     if is_same_page(current, &base) {
@@ -60,6 +71,60 @@ pub fn classify_navigation(
         url: base,
         fragment,
     })
+}
+
+/// Replace a tracking-redirect wrapper with its decoded destination when unwrapping is
+/// enabled and the destination is safe, otherwise return `resolved` unchanged.
+///
+/// The unwrap is skipped when disabled, when `resolved` is not a known wrapper, when the
+/// decoded destination fails to parse, or when it fails the origin-aware safety check. Any
+/// of those cases falls back to the wrapper URL, so the feature never widens what a link can
+/// reach and never errors.
+fn unwrap_when_enabled(
+    current: Option<&BrowserUrl>,
+    resolved: BrowserUrl,
+    tracking_unwrap: TrackingUnwrap,
+) -> BrowserUrl {
+    if tracking_unwrap == TrackingUnwrap::Disabled {
+        return resolved;
+    }
+    let Some(destination) = browser_privacy::unwrap_tracking_redirect(resolved.as_str()) else {
+        return resolved;
+    };
+    let Ok(destination_url) = BrowserUrl::parse(&destination) else {
+        return resolved;
+    };
+    if !unwrapped_destination_is_safe(current, &destination_url) {
+        return resolved;
+    }
+    destination_url
+}
+
+/// Whether a destination decoded from a tracking-redirect wrapper is safe to navigate to.
+///
+/// The unwrap is a redirect the browser performs itself, so it obeys the same
+/// unsafe-transition rules a server redirect from a web origin obeys: the destination must
+/// be `http` or `https` (never `file://`, which `BrowserUrl::parse` would otherwise accept),
+/// and an `https` origin may not be downgraded to `http`. A destination that fails either
+/// rule falls back to the wrapper, so the unwrap can never widen what a link can reach.
+fn unwrapped_destination_is_safe(current: Option<&BrowserUrl>, destination: &BrowserUrl) -> bool {
+    if !destination_scheme_is_web(destination) {
+        return false;
+    }
+    !is_downgrade(current, destination)
+}
+
+/// Whether `destination` uses an `http` or `https` scheme.
+fn destination_scheme_is_web(destination: &BrowserUrl) -> bool {
+    destination.scheme() == "http" || destination.scheme() == "https"
+}
+
+/// Whether navigating from `current` to `destination` downgrades an `https` origin to `http`.
+fn is_downgrade(current: Option<&BrowserUrl>, destination: &BrowserUrl) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    current.scheme() == "https" && destination.scheme() == "http"
 }
 
 /// Whether `base` names the same page as the currently loaded one, comparing without
