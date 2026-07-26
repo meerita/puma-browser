@@ -47,6 +47,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
 use clipboard::{copy_to_clipboard, ClipboardOutcome};
+use command::{parse_command_input, CommandKind};
 use command_bar::{
     command_cursor_col, compose_command_bar_command, compose_command_bar_loading,
     compose_command_bar_reading,
@@ -88,6 +89,14 @@ enum LoadState {
         spinner_frame: usize,
         loading_url: String,
     },
+}
+
+/// The result of submitting a command-bar buffer: nothing further to do, a new load to
+/// track, or a request to leave the event loop.
+enum CommandOutcome {
+    None,
+    Load(LoadState),
+    Quit,
 }
 
 /// Drives the terminal user interface over the navigation core.
@@ -345,16 +354,20 @@ impl TerminalApp {
                 }
             }
 
-            // Apply command submission.
+            // Apply command submission. A leading `/` routes to the command dispatcher;
+            // anything else is a URL, exactly as before.
             if let Some(input) = command_to_submit {
-                match browser_core::resolve_address(&input, &working_dir) {
-                    Err(_) => {
-                        self.view_state = ViewState::Error(format!("Not a valid address: {input}"));
-                        cache = None;
-                    }
-                    Ok(url) => {
-                        load_state = self.start_load(url);
-                    }
+                match self.submit_command_input(
+                    input,
+                    &working_dir,
+                    &mut ui_state,
+                    &mut cache,
+                    &mut scroll,
+                    now,
+                ) {
+                    CommandOutcome::Quit => return Ok(()),
+                    CommandOutcome::Load(state) => load_state = state,
+                    CommandOutcome::None => {}
                 }
             }
 
@@ -369,6 +382,128 @@ impl TerminalApp {
                     self.start_link_load(link_url, &working_dir, &mut ui_state, &mut cache);
             }
         }
+    }
+
+    /// Routes a submitted command-bar buffer. A buffer whose trimmed text starts with `/`
+    /// is a slash command; anything else is a URL and takes the unchanged address path.
+    fn submit_command_input(
+        &mut self,
+        input: String,
+        working_dir: &std::path::Path,
+        ui_state: &mut UiState,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        now: Instant,
+    ) -> CommandOutcome {
+        if !input.trim_start().starts_with('/') {
+            return self.submit_address(&input, working_dir, cache);
+        }
+        self.dispatch_command(&input, working_dir, ui_state, cache, scroll, now)
+    }
+
+    /// Resolves a URL buffer through the same scheme validation as normal address entry
+    /// and starts the load, or shows a generic error without echoing the raw input.
+    fn submit_address(
+        &mut self,
+        input: &str,
+        working_dir: &std::path::Path,
+        cache: &mut Option<CachedPage>,
+    ) -> CommandOutcome {
+        match browser_core::resolve_address(input, working_dir) {
+            Err(_) => {
+                self.view_state = ViewState::Error(format!("Not a valid address: {input}"));
+                *cache = None;
+                CommandOutcome::None
+            }
+            Ok(url) => CommandOutcome::Load(self.start_load(url)),
+        }
+    }
+
+    /// Parses a slash-command buffer and runs the matching handler. An empty token (the
+    /// buffer was just `/`) re-opens command mode without loading anything; an unknown
+    /// token shows a transient message and never falls through to a URL load.
+    fn dispatch_command(
+        &mut self,
+        input: &str,
+        working_dir: &std::path::Path,
+        ui_state: &mut UiState,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        now: Instant,
+    ) -> CommandOutcome {
+        let (token, remainder) = parse_command_input(input);
+        if token.is_empty() {
+            ui_state.enter_command_mode('/');
+            return CommandOutcome::None;
+        }
+        let Some(spec) = command::resolve(token) else {
+            ui_state.set_transient_message(format!("unknown command: /{token}"), now);
+            return CommandOutcome::None;
+        };
+        match spec.kind {
+            CommandKind::Open => self.run_open(remainder, working_dir, cache, ui_state, now),
+            CommandKind::Reload => self.run_reload(ui_state, now),
+            CommandKind::Back => self.run_back(ui_state, cache, scroll, now),
+            CommandKind::Quit => CommandOutcome::Quit,
+            CommandKind::Help => {
+                ui_state.set_transient_message("type / then a command name".to_string(), now);
+                CommandOutcome::None
+            }
+            CommandKind::Settings => {
+                ui_state.set_transient_message("Settings panel coming soon".to_string(), now);
+                CommandOutcome::None
+            }
+        }
+    }
+
+    /// `/open <url>`: loads the argument through the address path, or shows a usage
+    /// message when no URL was given.
+    fn run_open(
+        &mut self,
+        remainder: &str,
+        working_dir: &std::path::Path,
+        cache: &mut Option<CachedPage>,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) -> CommandOutcome {
+        if remainder.is_empty() {
+            ui_state.set_transient_message("usage: /open <url>".to_string(), now);
+            return CommandOutcome::None;
+        }
+        self.submit_address(remainder, working_dir, cache)
+    }
+
+    /// `/reload`: re-fetches the current URL through the shared load path, or reports that
+    /// there is nothing to reload on a blank page.
+    fn run_reload(&mut self, ui_state: &mut UiState, now: Instant) -> CommandOutcome {
+        let Some(url) = self.controller.current_url().cloned() else {
+            ui_state.set_transient_message("nothing to reload".to_string(), now);
+            return CommandOutcome::None;
+        };
+        CommandOutcome::Load(self.start_load(url))
+    }
+
+    /// `/back`: restores the previous page from history, or reports that there is no page
+    /// to go back to.
+    fn run_back(
+        &mut self,
+        ui_state: &mut UiState,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        now: Instant,
+    ) -> CommandOutcome {
+        if !self.controller.can_go_back() {
+            ui_state.set_transient_message("no page to go back to".to_string(), now);
+            return CommandOutcome::None;
+        }
+        navigate_back(
+            &mut self.controller,
+            ui_state,
+            cache,
+            scroll,
+            &mut self.view_state,
+        );
+        CommandOutcome::None
     }
 
     /// Marks a link URL visited, leaves link navigation, and starts loading it through

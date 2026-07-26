@@ -106,6 +106,20 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
     REGISTRY
 }
 
+/// Split a command-bar buffer into its command token and argument remainder. The leading
+/// `/` is stripped, the token is the run of non-space characters that follows, and the
+/// remainder is everything after the first whitespace, trimmed. A buffer of just `/`
+/// yields an empty token and empty remainder; the caller treats an empty token as "no
+/// command entered" rather than an error.
+pub(crate) fn parse_command_input(buffer: &str) -> (&str, &str) {
+    let trimmed = buffer.trim();
+    let without_prefix = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    match without_prefix.split_once(char::is_whitespace) {
+        Some((token, remainder)) => (token, remainder.trim()),
+        None => (without_prefix, ""),
+    }
+}
+
 /// Resolve a bare command token (no leading `/`) to its spec by exact match on the
 /// canonical name or any alias. Case-sensitive.
 pub(crate) fn resolve(token: &str) -> Option<&'static CommandSpec> {

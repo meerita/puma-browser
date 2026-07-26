@@ -3,7 +3,7 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
-use super::{filter, registry, resolve, CommandKind, MatchRank};
+use super::{filter, parse_command_input, registry, resolve, CommandKind, MatchRank};
 
 #[test]
 fn registry_holds_exactly_the_six_commands() {
@@ -117,4 +117,59 @@ fn a_command_matching_by_both_name_and_alias_appears_once() {
 #[test]
 fn a_query_matching_nothing_returns_empty() {
     assert!(filter("zzz").is_empty());
+}
+
+#[test]
+fn parse_splits_a_bare_command_into_token_and_empty_remainder() {
+    let (token, remainder) = parse_command_input("/reload");
+    assert_eq!(token, "reload");
+    assert_eq!(remainder, "");
+}
+
+#[test]
+fn parse_splits_a_command_with_an_argument() {
+    let (token, remainder) = parse_command_input("/open example.com");
+    assert_eq!(token, "open");
+    assert_eq!(remainder, "example.com");
+}
+
+#[test]
+fn parse_collapses_leading_and_trailing_whitespace_around_the_remainder() {
+    let (token, remainder) = parse_command_input("  /open    https://example.com  ");
+    assert_eq!(token, "open");
+    assert_eq!(remainder, "https://example.com");
+}
+
+#[test]
+fn parse_of_a_lone_slash_yields_an_empty_token() {
+    let (token, remainder) = parse_command_input("/");
+    assert_eq!(token, "");
+    assert_eq!(remainder, "");
+}
+
+#[test]
+fn parse_keeps_the_first_token_and_the_rest_as_remainder() {
+    let (token, remainder) = parse_command_input("/open example.com extra");
+    assert_eq!(token, "open");
+    assert_eq!(remainder, "example.com extra");
+}
+
+#[test]
+fn a_parsed_token_resolves_to_its_command_kind() {
+    let (token, _) = parse_command_input("/back");
+    let spec = resolve(token).expect("back must resolve");
+    assert_eq!(spec.kind, CommandKind::Back);
+}
+
+#[test]
+fn a_parsed_alias_resolves_to_the_settings_kind() {
+    let (token, _) = parse_command_input("/config");
+    let spec = resolve(token).expect("config alias must resolve");
+    assert_eq!(spec.kind, CommandKind::Settings);
+}
+
+#[test]
+fn a_parsed_unknown_token_resolves_to_none() {
+    let (token, _) = parse_command_input("/bogus");
+    assert!(resolve(token).is_none());
 }
