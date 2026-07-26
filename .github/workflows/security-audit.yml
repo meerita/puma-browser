@@ -1,0 +1,27 @@
+# Security audit — runs cargo-audit once a day and on demand. When a newly
+# published advisory affects a dependency, it opens or updates a tracking issue.
+# This is separate from the blocking audit in ci.yml so advisories surface even
+# during quiet periods with no pushes or pull requests.
+name: Security audit
+
+on:
+  schedule:
+    # 06:00 UTC daily — off-peak, avoids the top-of-hour scheduling backlog.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+# issues: write is the only elevated scope, needed to open or update the
+# advisory tracking issue. Nothing else is granted.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
