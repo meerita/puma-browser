@@ -3,9 +3,11 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
+use std::time::Instant;
+
 use super::{
-    cell_is_selected, clamped_document_coordinate, document_coordinate, handle_mouse_event,
-    TextSelection, BODY_AREA_TOP_ROW, CONTENT_PADDING,
+    cell_is_selected, clamped_document_coordinate, copied_message, document_coordinate,
+    handle_mouse_event, TextSelection, UiState, BODY_AREA_TOP_ROW, CONTENT_PADDING,
 };
 use browser_layout::{CellBuffer, CellPosition};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -72,6 +74,8 @@ fn press_begins_a_selection_without_a_range() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
+        &mut UiState::new(),
+        Instant::now(),
     );
     assert!(selection.is_dragging());
     assert!(!selection.has_moved());
@@ -98,6 +102,8 @@ fn press_drag_release_keeps_the_highlighted_range() {
             BODY_AREA_TOP_ROW,
             &mut selection,
             &mut navigate_to_url,
+            &mut UiState::new(),
+            Instant::now(),
         );
     }
     assert!(selection.has_moved());
@@ -123,6 +129,8 @@ fn press_release_without_movement_clears_the_selection() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
+        &mut UiState::new(),
+        Instant::now(),
     );
     handle_mouse_event(
         mouse(MouseEventKind::Up(MouseButton::Left), 5, 2),
@@ -131,6 +139,8 @@ fn press_release_without_movement_clears_the_selection() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
+        &mut UiState::new(),
+        Instant::now(),
     );
     assert!(!selection.is_dragging());
     assert_eq!(selection.range(), None);
@@ -149,6 +159,8 @@ fn a_drag_without_a_prior_press_is_ignored() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
+        &mut UiState::new(),
+        Instant::now(),
     );
     assert!(!selection.is_dragging());
     assert_eq!(selection.range(), None);
@@ -166,6 +178,8 @@ fn wheel_scroll_events_do_not_touch_the_selection() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
+        &mut UiState::new(),
+        Instant::now(),
     );
     handle_mouse_event(
         mouse(MouseEventKind::ScrollDown, 5, 2),
@@ -174,6 +188,8 @@ fn wheel_scroll_events_do_not_touch_the_selection() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
+        &mut UiState::new(),
+        Instant::now(),
     );
     assert!(selection.is_dragging());
     assert!(!selection.has_moved());
@@ -203,4 +219,22 @@ fn cell_is_selected_covers_interior_rows_fully_and_ends_partially() {
 #[test]
 fn cell_is_selected_is_false_without_a_range() {
     assert!(!cell_is_selected(3, 1, None));
+}
+
+#[test]
+fn copied_message_reports_the_ascii_grapheme_count() {
+    assert_eq!(copied_message("hello"), "copied 5 chars to clipboard");
+}
+
+#[test]
+fn copied_message_counts_multibyte_characters_as_one_grapheme_each() {
+    // "café" is five UTF-8 bytes but four grapheme clusters; a combined-emoji family is
+    // many bytes yet a single grapheme. The count must be graphemes, not bytes.
+    assert_eq!(copied_message("café"), "copied 4 chars to clipboard");
+    assert_eq!(copied_message("👨‍👩‍👧"), "copied 1 chars to clipboard");
+}
+
+#[test]
+fn copied_message_reports_zero_for_empty_text() {
+    assert_eq!(copied_message(""), "copied 0 chars to clipboard");
 }

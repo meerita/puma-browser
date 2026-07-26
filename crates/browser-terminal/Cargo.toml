@@ -15,6 +15,7 @@ base64 = { workspace = true }
 futures-util = "0.3"
 tokio = { workspace = true }
 unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

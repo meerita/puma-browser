@@ -30,7 +30,7 @@ pub(crate) struct UiState {
     pub(crate) visited_urls: HashSet<String>,
     hint_index: usize,
     last_hint_advance: Instant,
-    transient_hint: Option<&'static str>,
+    transient_message: Option<String>,
     transient_set_at: Option<Instant>,
     command_buffer: String,
     cursor_byte_offset: usize,
@@ -46,7 +46,7 @@ impl UiState {
             visited_urls: HashSet::new(),
             hint_index: 0,
             last_hint_advance: Instant::now(),
-            transient_hint: None,
+            transient_message: None,
             transient_set_at: None,
             command_buffer: String::new(),
             cursor_byte_offset: 0,
@@ -170,8 +170,15 @@ impl UiState {
     }
 
     pub(crate) fn current_hint(&self) -> &str {
-        self.transient_hint
+        self.transient_message
+            .as_deref()
             .unwrap_or(READING_HINTS[self.hint_index])
+    }
+
+    /// The active transient message, if one is set and unexpired. Feeds the hints bar's
+    /// system-message slot; `None` leaves that slot empty.
+    pub(crate) fn transient_message(&self) -> Option<&str> {
+        self.transient_message.as_deref()
     }
 
     pub(crate) fn advance_hint_if_due(&mut self, now: Instant) {
@@ -188,18 +195,25 @@ impl UiState {
         if now.duration_since(set_at) >= TRANSIENT_HINT_DURATION {
             self.quit_armed = false;
             self.refresh_armed = false;
-            self.transient_hint = None;
+            self.transient_message = None;
             self.transient_set_at = None;
         }
     }
 
     pub(crate) fn set_transient_hint(&mut self, hint: &'static str, now: Instant) {
-        self.transient_hint = Some(hint);
+        self.transient_message = Some(hint.to_string());
+        self.transient_set_at = Some(now);
+    }
+
+    /// Sets an owned transient message with the same five-second expiry as the static
+    /// arm hints, used for runtime confirmations like the copy-count message.
+    pub(crate) fn set_transient_message(&mut self, message: String, now: Instant) {
+        self.transient_message = Some(message);
         self.transient_set_at = Some(now);
     }
 
     pub(crate) fn clear_transient(&mut self) {
-        self.transient_hint = None;
+        self.transient_message = None;
         self.transient_set_at = None;
     }
 }

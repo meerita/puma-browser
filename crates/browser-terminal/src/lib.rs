@@ -3,9 +3,6 @@
 //! @layer terminal
 //! @created meerita <meerita@icloud.com>
 
-// The copy entry point is invoked from the mouse-release path added later on
-// this branch; until that lands the module has no in-crate caller.
-#[allow(dead_code)]
 mod clipboard;
 mod command_bar;
 mod error;
@@ -46,6 +43,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
+use clipboard::{copy_to_clipboard, ClipboardOutcome};
 use command_bar::{
     command_cursor_col, compose_command_bar_command, compose_command_bar_loading,
     compose_command_bar_reading,
@@ -55,6 +53,7 @@ use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use selection::TextSelection;
 use title_bar::compose_title_bar;
 use ui_state::UiState;
+use unicode_segmentation::UnicodeSegmentation;
 use viewport::{max_scroll_offset, scroll_percentage, ScrollState};
 
 /// Rows consumed by the five fixed chrome zones (title + sep + cmd + sep + hints).
@@ -287,6 +286,8 @@ impl TerminalApp {
                                     BODY_AREA_TOP_ROW,
                                     &mut selection,
                                     &mut navigate_to_url,
+                                    &mut ui_state,
+                                    now,
                                 );
                             }
                             _ => {}
@@ -536,7 +537,7 @@ fn draw_frame(
     );
     draw_chrome_row(frame, chunks[4], &title_text);
 
-    let hints_text = compose_hints_bar(None, terminal_width);
+    let hints_text = compose_hints_bar(ui_state.transient_message(), terminal_width);
     frame.render_widget(Paragraph::new(hints_text), chunks[5]);
 }
 
@@ -1006,6 +1007,7 @@ fn navigate_back(
 /// highlight (the gesture moved, so it is a selection) or activates a link (the gesture did
 /// not move, so it is a click). Wheel and other events are ignored so scrolling is
 /// untouched.
+#[allow(clippy::too_many_arguments)]
 fn handle_mouse_event(
     mouse: MouseEvent,
     buffer: Option<&CellBuffer>,
@@ -1013,6 +1015,8 @@ fn handle_mouse_event(
     body_area_top_row: u16,
     selection: &mut TextSelection,
     navigate_to_url: &mut Option<String>,
+    ui_state: &mut UiState,
+    now: Instant,
 ) {
     let Some(buffer) = buffer else {
         return;
@@ -1034,6 +1038,7 @@ fn handle_mouse_event(
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if selection.has_moved() {
+                copy_selection(buffer, selection, ui_state, now);
                 return;
             }
             activate_link_under_pointer(
@@ -1047,6 +1052,45 @@ fn handle_mouse_event(
         }
         _ => {}
     }
+}
+
+/// Copies the highlighted selection to the clipboard on button release. Extracts the
+/// selection text, skips a zero-length or whitespace-only selection, and on a successful
+/// clipboard write shows the `copied N chars to clipboard` confirmation for five seconds.
+/// The highlight is left in place so the user sees what was copied until the next press.
+fn copy_selection(
+    buffer: &CellBuffer,
+    selection: &TextSelection,
+    ui_state: &mut UiState,
+    now: Instant,
+) {
+    let Some((start, end)) = selection.range() else {
+        return;
+    };
+    let text = buffer.text_in_range(start, end);
+    if text.trim().is_empty() {
+        return;
+    }
+    if !clipboard_write_succeeded(copy_to_clipboard(&text, false)) {
+        return;
+    }
+    ui_state.set_transient_message(copied_message(&text), now);
+}
+
+/// Whether a clipboard write reported success through either the native path or OSC 52.
+fn clipboard_write_succeeded(outcome: ClipboardOutcome) -> bool {
+    matches!(
+        outcome,
+        ClipboardOutcome::CopiedNative | ClipboardOutcome::CopiedOsc52
+    )
+}
+
+/// The copy confirmation for `text`: `copied N chars to clipboard`, where `N` counts
+/// grapheme clusters so a multi-byte character or a combined emoji counts as one. Carries
+/// only the count; the copied text itself never appears in the message.
+fn copied_message(text: &str) -> String {
+    let grapheme_count = text.graphemes(true).count();
+    format!("copied {grapheme_count} chars to clipboard")
 }
 
 /// Maps a mouse position to a document coordinate: the screen row maps to a buffer row
