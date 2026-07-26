@@ -5,6 +5,8 @@
 
 mod cookie_policy;
 mod error;
+mod tracking_redirect;
 
 pub use cookie_policy::CookiePolicy;
 pub use error::PrivacyError;
+pub use tracking_redirect::unwrap_tracking_redirect;
