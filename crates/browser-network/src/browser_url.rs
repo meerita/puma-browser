@@ -42,6 +42,28 @@ impl BrowserUrl {
         Ok(Self(parsed))
     }
 
+    /// Build a URL from a base and a single query parameter, percent-encoding the value.
+    ///
+    /// The base is parsed and scheme-validated exactly as [`parse`](Self::parse) does, then
+    /// the parameter is appended through `query_pairs_mut`, which percent-encodes spaces and
+    /// reserved characters so the value cannot alter the URL structure. Used to turn a
+    /// user's search text into a results URL without hand-building a query string.
+    pub fn with_query_parameter(
+        base: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<Self, NetworkError> {
+        let mut parsed = parse_with_default_scheme(base.trim())?;
+        let scheme = parsed.scheme();
+        if !ALLOWED_SCHEMES.contains(&scheme) {
+            return Err(NetworkError::UnsupportedScheme {
+                scheme: scheme.to_string(),
+            });
+        }
+        parsed.query_pairs_mut().append_pair(name, value);
+        Ok(Self(parsed))
+    }
+
     /// Construct a `file://` URL from an absolute filesystem path.
     ///
     /// This is pure: it constructs the URL and nothing more. It does not probe the

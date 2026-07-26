@@ -94,6 +94,44 @@ fn without_fragment_drops_the_fragment_and_keeps_the_base() {
 }
 
 #[test]
+fn with_query_parameter_percent_encodes_a_spaced_value() {
+    let url = BrowserUrl::with_query_parameter("https://lite.duckduckgo.com/lite/", "q", "a b")
+        .expect("a valid base and query must build a URL");
+    assert_eq!(url.host_str(), Some("lite.duckduckgo.com"));
+    assert!(
+        url.as_str().contains("q=a+b") || url.as_str().contains("q=a%20b"),
+        "the spaced value must be percent-encoded: {}",
+        url.as_str()
+    );
+}
+
+#[test]
+fn with_query_parameter_encodes_reserved_characters_as_data() {
+    let url =
+        BrowserUrl::with_query_parameter("https://lite.duckduckgo.com/lite/", "q", "a&b=c#d?e")
+            .expect("a valid base and query must build a URL");
+    assert_eq!(url.host_str(), Some("lite.duckduckgo.com"));
+    // The reserved characters must be encoded into the value, never treated as URL
+    // structure: no extra query key, fragment, or nested query survives.
+    assert_eq!(url.fragment(), None);
+    assert!(!url.as_str().contains("=c#d"), "got {}", url.as_str());
+}
+
+#[test]
+fn with_query_parameter_accepts_an_empty_value() {
+    let url = BrowserUrl::with_query_parameter("https://lite.duckduckgo.com/lite/", "q", "")
+        .expect("an empty value must still build a valid URL");
+    assert!(url.as_str().contains("q="), "got {}", url.as_str());
+}
+
+#[test]
+fn with_query_parameter_rejects_an_unsupported_scheme() {
+    let error = BrowserUrl::with_query_parameter("ftp://example.com/", "q", "term")
+        .expect_err("an unsupported scheme must be rejected");
+    assert!(matches!(error, NetworkError::UnsupportedScheme { .. }));
+}
+
+#[test]
 fn debug_output_omits_url_credentials() {
     let url = BrowserUrl::parse("https://user:secret@example.com/")
         .expect("URL with credentials must parse");
