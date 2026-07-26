@@ -6,11 +6,190 @@
 use std::time::Instant;
 
 use super::{
-    cell_is_selected, clamped_document_coordinate, copied_message, document_coordinate,
-    handle_mouse_event, TextSelection, UiState, BODY_AREA_TOP_ROW, CONTENT_PADDING,
+    cell_is_selected, clamped_document_coordinate, copied_message, decode_fragment,
+    document_coordinate, handle_mouse_event, resolve_anchor_row, sanitize_fragment_for_display,
+    CachedPage, ScrollState, TerminalApp, TerminalSettings, TextSelection, UiState, ViewState,
+    BODY_AREA_TOP_ROW, CONTENT_PADDING,
 };
-use browser_layout::{CellBuffer, CellPosition};
+use browser_core::NavigationController;
+use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
+use browser_layout::{render_document, AnchorSpan, CellBuffer, CellPosition, WidthConfig};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+fn anchor(name: &str, row: u16) -> AnchorSpan {
+    AnchorSpan {
+        name: name.to_string(),
+        row,
+    }
+}
+
+/// A cached page whose second paragraph carries `anchor_name`, so the anchor sits on a
+/// non-zero row and a jump to it is observable as a changed scroll offset.
+fn cache_with_anchor(anchor_name: &str) -> CachedPage {
+    let first = SemanticNode::Paragraph {
+        runs: vec![InlineRun::plain("First paragraph".to_string())],
+        inline_style: None,
+    };
+    let target = SemanticNode::Paragraph {
+        runs: vec![InlineRun {
+            text: "Target paragraph".to_string(),
+            emphasis: InlineEmphasis::none(),
+            link: None,
+            anchors: vec![anchor_name.to_string()],
+        }],
+        inline_style: None,
+    };
+    let document = Document::new(vec![first, target], None, 0);
+    let buffer = render_document(&document, 40, &WidthConfig::default())
+        .expect("document must lay out for the anchor test");
+    CachedPage { width: 40, buffer }
+}
+
+fn terminal_app() -> TerminalApp {
+    TerminalApp::new(
+        NavigationController::new(),
+        ViewState::Page,
+        TerminalSettings {
+            copy_on_select: false,
+            force_osc52: false,
+        },
+    )
+}
+
+#[test]
+fn resolve_anchor_row_sends_an_empty_fragment_to_the_top() {
+    assert_eq!(resolve_anchor_row(Some(""), &[]), Some(0));
+    assert_eq!(resolve_anchor_row(None, &[]), Some(0));
+}
+
+#[test]
+fn resolve_anchor_row_sends_top_to_the_top_regardless_of_case() {
+    let anchors = [anchor("body", 9)];
+    assert_eq!(resolve_anchor_row(Some("top"), &anchors), Some(0));
+    assert_eq!(resolve_anchor_row(Some("TOP"), &anchors), Some(0));
+}
+
+#[test]
+fn resolve_anchor_row_matches_an_exact_name() {
+    let anchors = [anchor("intro", 3), anchor("details", 8)];
+    assert_eq!(resolve_anchor_row(Some("details"), &anchors), Some(8));
+}
+
+#[test]
+fn resolve_anchor_row_falls_back_to_a_case_insensitive_match() {
+    let anchors = [anchor("Details", 8)];
+    assert_eq!(resolve_anchor_row(Some("details"), &anchors), Some(8));
+}
+
+#[test]
+fn resolve_anchor_row_prefers_an_exact_match_over_a_case_insensitive_one() {
+    let anchors = [anchor("Section", 2), anchor("section", 6)];
+    assert_eq!(resolve_anchor_row(Some("section"), &anchors), Some(6));
+}
+
+#[test]
+fn resolve_anchor_row_returns_the_first_anchor_of_a_shared_name() {
+    let anchors = [anchor("dup", 4), anchor("dup", 11)];
+    assert_eq!(resolve_anchor_row(Some("dup"), &anchors), Some(4));
+}
+
+#[test]
+fn resolve_anchor_row_reports_no_row_for_an_unknown_fragment() {
+    let anchors = [anchor("intro", 3)];
+    assert_eq!(resolve_anchor_row(Some("missing"), &anchors), None);
+}
+
+#[test]
+fn resolve_anchor_row_decodes_a_percent_encoded_fragment() {
+    let anchors = [anchor("a b", 5)];
+    assert_eq!(resolve_anchor_row(Some("a%20b"), &anchors), Some(5));
+}
+
+#[test]
+fn decode_fragment_of_none_is_empty() {
+    assert_eq!(decode_fragment(None), "");
+}
+
+#[test]
+fn sanitize_fragment_for_display_strips_control_characters() {
+    assert_eq!(sanitize_fragment_for_display("a\u{1b}b"), "ab");
+}
+
+#[test]
+fn a_same_page_jump_to_a_present_anchor_moves_the_viewport_there() {
+    let application = terminal_app();
+    let cache = Some(cache_with_anchor("target"));
+    let target_row = cache.as_ref().unwrap().buffer.anchors()[0].row;
+    assert!(
+        target_row > 0,
+        "the anchor must sit below the top of the page"
+    );
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new();
+
+    application.jump_to_anchor(
+        Some("target"),
+        &cache,
+        &mut scroll,
+        80,
+        &mut ui_state,
+        Instant::now(),
+    );
+
+    assert_eq!(scroll.offset(), target_row);
+    assert_eq!(ui_state.transient_message(), None);
+}
+
+#[test]
+fn a_same_page_jump_to_a_missing_anchor_reports_it_and_does_not_move() {
+    let application = terminal_app();
+    let cache = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new();
+
+    application.jump_to_anchor(
+        Some("absent"),
+        &cache,
+        &mut scroll,
+        80,
+        &mut ui_state,
+        Instant::now(),
+    );
+
+    assert_eq!(scroll.offset(), 0);
+    assert_eq!(
+        ui_state.transient_message(),
+        Some("anchor not found: absent")
+    );
+}
+
+#[test]
+fn a_pending_fragment_is_applied_and_cleared_after_the_page_renders() {
+    let application = terminal_app();
+    let cache = Some(cache_with_anchor("target"));
+    let target_row = cache.as_ref().unwrap().buffer.anchors()[0].row;
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new();
+    ui_state.set_pending_fragment(Some("target".to_string()));
+
+    application.apply_pending_fragment(&mut ui_state, &cache, &mut scroll, 80);
+
+    assert_eq!(scroll.offset(), target_row);
+    assert!(!ui_state.has_pending_fragment());
+}
+
+#[test]
+fn apply_pending_fragment_does_nothing_without_a_pending_fragment() {
+    let application = terminal_app();
+    let cache = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new();
+
+    application.apply_pending_fragment(&mut ui_state, &cache, &mut scroll, 80);
+
+    assert_eq!(scroll.offset(), 0);
+    assert!(!ui_state.has_pending_fragment());
+}
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     MouseEvent {
