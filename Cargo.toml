@@ -42,6 +42,7 @@ base64 = "0.23"
 reqwest = { version = "0.13", features = ["rustls", "stream", "gzip", "brotli"], default-features = false }
 rustls = "0.23"
 url = "2"
+percent-encoding = "2"
 
 # Document processing
 html5ever = "0.39"

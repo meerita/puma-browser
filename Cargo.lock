@@ -282,6 +282,7 @@ dependencies = [
  "anyhow",
  "encoding_rs",
  "html5ever",
+ "percent-encoding",
  "serde",
  "thiserror 2.0.19",
  "tracing",

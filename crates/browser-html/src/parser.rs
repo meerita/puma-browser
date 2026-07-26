@@ -9,6 +9,7 @@ use std::cell::{Cell, Ref, RefCell};
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::{parse_document, Attribute, LocalName, Namespace, ParseOpts, QualName};
+use percent_encoding::percent_decode_str;
 use url::Url;
 
 use crate::document::{Document, DocumentTitle};
@@ -433,6 +434,12 @@ struct TreeExtractor<'a> {
     arena: &'a [Node],
     script_count: usize,
     base_url: Option<Url>,
+    /// Anchor names (`id` and `<a name>`) seen but not yet attached to a run.
+    ///
+    /// An anchor names a point in the document, so it is held here until the next run is
+    /// built and absorbs it. The buffer persists across the block boundary so an `id` on a
+    /// container reaches the first run of the block nested inside it.
+    pending_anchors: Vec<String>,
 }
 
 impl<'a> TreeExtractor<'a> {
@@ -441,7 +448,48 @@ impl<'a> TreeExtractor<'a> {
             arena,
             script_count: 0,
             base_url,
+            pending_anchors: Vec::new(),
         }
+    }
+
+    /// Record this element's anchor names so the next run built absorbs them.
+    ///
+    /// Every element contributes its `id`; an `<a>` also contributes its `name`. Names are
+    /// decoded and control-stripped so they match a decoded fragment, and a name already
+    /// pending is not added twice, which keeps the block walk and the inline walk from
+    /// recording the same element's `id` twice.
+    fn enter_anchor_names(&mut self, element: usize) {
+        self.record_anchor_name(self.attribute(element, "id"));
+        if local_name(&self.arena[element].name) == "a" {
+            self.record_anchor_name(self.attribute(element, "name"));
+        }
+    }
+
+    fn record_anchor_name(&mut self, raw: Option<String>) {
+        let Some(raw) = raw else {
+            return;
+        };
+        let name = decode_anchor_name(&raw);
+        if name.is_empty() {
+            return;
+        }
+        if self.pending_anchors.contains(&name) {
+            return;
+        }
+        self.pending_anchors.push(name);
+    }
+
+    /// Drain the anchors pending at a block's end into a trailing anchor-only segment.
+    ///
+    /// An anchor that follows the block's last text has nothing after it to absorb it, so
+    /// it is carried out on an empty segment and attached to the block's last run.
+    fn take_pending_anchor_segment(&mut self) -> Option<Segment> {
+        if self.pending_anchors.is_empty() {
+            return None;
+        }
+        Some(Segment::anchor_only(std::mem::take(
+            &mut self.pending_anchors,
+        )))
     }
 
     fn script_count(&self) -> usize {
@@ -473,6 +521,7 @@ impl<'a> TreeExtractor<'a> {
     }
 
     fn handle_element(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        self.enter_anchor_names(element);
         let tag = local_name(&self.arena[element].name).to_string();
         if let Some(level) = heading_level(&tag) {
             self.push_heading(element, level, output);
@@ -744,6 +793,7 @@ impl<'a> TreeExtractor<'a> {
         for child in inline_children {
             self.gather_segments(*child, &context, &mut segments);
         }
+        segments.extend(self.take_pending_anchor_segment());
         let runs = collapse_segments(segments);
         if runs.is_empty() {
             return;
@@ -766,6 +816,7 @@ impl<'a> TreeExtractor<'a> {
     fn block_runs(&mut self, element: usize) -> Vec<InlineRun> {
         let mut segments = Vec::new();
         self.gather_segments(element, &InlineContext::root(), &mut segments);
+        segments.extend(self.take_pending_anchor_segment());
         collapse_segments(segments)
     }
 
@@ -779,7 +830,8 @@ impl<'a> TreeExtractor<'a> {
     ) {
         let entry = &self.arena[node];
         if let Some(text) = &entry.text {
-            segments.push(Segment::new(text, context));
+            let anchors = std::mem::take(&mut self.pending_anchors);
+            segments.push(Segment::with_anchors(text, context, anchors));
             return;
         }
         if entry.is_element {
@@ -795,6 +847,7 @@ impl<'a> TreeExtractor<'a> {
         context: &InlineContext,
         segments: &mut Vec<Segment>,
     ) {
+        self.enter_anchor_names(element);
         let tag = local_name(&self.arena[element].name).to_string();
         if tag == "script" {
             self.script_count += 1;
@@ -1119,14 +1172,28 @@ struct Segment {
     text: String,
     emphasis: InlineEmphasis,
     link: Option<String>,
+    anchors: Vec<String>,
 }
 
 impl Segment {
-    fn new(raw: &str, context: &InlineContext) -> Segment {
+    /// A text segment that carries the anchor names pending when it was produced.
+    fn with_anchors(raw: &str, context: &InlineContext, anchors: Vec<String>) -> Segment {
         Segment {
             text: strip_control_characters_preserving_layout(raw),
             emphasis: context.emphasis.clone(),
             link: context.link.clone(),
+            anchors,
+        }
+    }
+
+    /// A text-less segment that carries only anchor names, used to flush anchors left
+    /// pending at the end of a block onto its last run.
+    fn anchor_only(anchors: Vec<String>) -> Segment {
+        Segment {
+            text: String::new(),
+            emphasis: InlineEmphasis::none(),
+            link: None,
+            anchors,
         }
     }
 }
@@ -1149,6 +1216,7 @@ struct RunBuilder {
     runs: Vec<InlineRun>,
     current: Option<InlineRun>,
     last_was_space: bool,
+    pending_anchors: Vec<String>,
 }
 
 impl RunBuilder {
@@ -1158,10 +1226,12 @@ impl RunBuilder {
             current: None,
             // Start as though a space preceded the block so leading whitespace is dropped.
             last_was_space: true,
+            pending_anchors: Vec::new(),
         }
     }
 
     fn push_segment(&mut self, segment: &Segment) {
+        push_unique_anchors(&mut self.pending_anchors, &segment.anchors);
         for character in segment.text.chars() {
             self.push_character(character, &segment.emphasis, &segment.link);
         }
@@ -1182,10 +1252,25 @@ impl RunBuilder {
 
     fn push_visible(&mut self, character: char, emphasis: &InlineEmphasis, link: &Option<String>) {
         self.open_run(emphasis, link);
+        self.absorb_pending_anchors();
         if let Some(run) = self.current.as_mut() {
             run.text.push(character);
         }
         self.last_was_space = false;
+    }
+
+    /// Attach the anchors pending on the run now open, so the first visible text after an
+    /// anchor carries it. Absorbing only on visible text keeps a collapsed space between an
+    /// anchor and the text it targets from landing the anchor on the wrong run.
+    fn absorb_pending_anchors(&mut self) {
+        if self.pending_anchors.is_empty() {
+            return;
+        }
+        let Some(run) = self.current.as_mut() else {
+            return;
+        };
+        let names = std::mem::take(&mut self.pending_anchors);
+        push_unique_anchors(&mut run.anchors, &names);
     }
 
     fn push_space(&mut self, emphasis: &InlineEmphasis, link: &Option<String>) {
@@ -1210,6 +1295,7 @@ impl RunBuilder {
             text: String::new(),
             emphasis: emphasis.clone(),
             link: link.clone(),
+            anchors: Vec::new(),
         });
     }
 
@@ -1233,7 +1319,28 @@ impl RunBuilder {
     fn finish(mut self) -> Vec<InlineRun> {
         self.trim_trailing_space();
         self.flush_current();
+        self.attach_trailing_anchors();
         self.runs
+    }
+
+    /// Attach anchors still pending after the last run to that run, or emit a text-less run
+    /// to hold them when the block produced no run at all. Either way an anchor that trails
+    /// the block's text is never lost.
+    fn attach_trailing_anchors(&mut self) {
+        if self.pending_anchors.is_empty() {
+            return;
+        }
+        let names = std::mem::take(&mut self.pending_anchors);
+        if let Some(last) = self.runs.last_mut() {
+            push_unique_anchors(&mut last.anchors, &names);
+            return;
+        }
+        self.runs.push(InlineRun {
+            text: String::new(),
+            emphasis: InlineEmphasis::none(),
+            link: None,
+            anchors: names,
+        });
     }
 
     /// Drop a single trailing space left on the final run, matching how plain block text
@@ -1245,6 +1352,30 @@ impl RunBuilder {
         if run.text.ends_with(' ') {
             run.text.pop();
         }
+    }
+}
+
+/// Decode an anchor name into the form a fragment is compared against.
+///
+/// The value is percent-decoded so `id="a%20b"` and a link to `#a%20b` name the same
+/// target, then control-stripped so no escape sequence from remote markup survives in a
+/// name that later reaches the terminal.
+fn decode_anchor_name(raw: &str) -> String {
+    let decoded = percent_decode_str(raw).decode_utf8_lossy();
+    strip_control_characters(&decoded)
+}
+
+/// Append each name not already present, preserving order.
+///
+/// Anchor names are compared by value, and an `id` is unique in a document, so appending
+/// only new names collapses the duplicate an element produces when both the block walk and
+/// the inline walk record it.
+fn push_unique_anchors(destination: &mut Vec<String>, names: &[String]) {
+    for name in names {
+        if destination.contains(name) {
+            continue;
+        }
+        destination.push(name.clone());
     }
 }
 

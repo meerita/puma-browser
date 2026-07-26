@@ -272,6 +272,7 @@ fn strong_run(text: &str) -> InlineRun {
             code: false,
         },
         link: None,
+        anchors: Vec::new(),
     }
 }
 
@@ -280,6 +281,7 @@ fn linked_run(text: &str, href: &str) -> InlineRun {
         text: text.to_string(),
         emphasis: InlineEmphasis::none(),
         link: Some(href.to_string()),
+        anchors: Vec::new(),
     }
 }
 
