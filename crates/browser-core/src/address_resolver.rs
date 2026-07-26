@@ -56,7 +56,34 @@ pub fn resolve_address(input: &str, working_directory: &Path) -> Result<BrowserU
 
 /// Whether `input` begins with a marker that unambiguously names a local path.
 fn has_path_marker(input: &str) -> bool {
-    input.starts_with('/') || input.starts_with("./") || input.starts_with("../")
+    input.starts_with('/')
+        || input.starts_with("./")
+        || input.starts_with("../")
+        || is_windows_absolute_path(input)
+}
+
+/// Whether `input` is a Windows-style absolute path.
+///
+/// Recognizes drive-letter roots (`C:\…` or `C:/…`) and UNC roots
+/// (`\\server\share`). The check is a pure string inspection with no platform
+/// gate, so a Windows absolute path is resolved as a local path on every OS
+/// rather than being misread as a web address. Without this, a drive-letter
+/// path begins with a letter, matches no POSIX marker, and falls through to the
+/// web-address rule.
+fn is_windows_absolute_path(input: &str) -> bool {
+    if input.starts_with("\\\\") {
+        return true;
+    }
+    has_drive_letter_root(input)
+}
+
+/// Whether `input` starts with a drive-letter root such as `C:\` or `C:/`.
+fn has_drive_letter_root(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
 /// Expand a leading `~/` against the home directory, returning the joined path.
@@ -96,3 +123,7 @@ fn absolutize(path: &Path, working_directory: &Path) -> PathBuf {
     }
     working_directory.join(path)
 }
+
+#[cfg(test)]
+#[path = "address_resolver_tests.rs"]
+mod tests;
