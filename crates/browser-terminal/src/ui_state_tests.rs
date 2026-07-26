@@ -254,3 +254,79 @@ fn mark_visited_and_is_visited() {
     assert!(state.is_visited("https://a.test/"));
     assert!(!state.is_visited("https://b.test/"));
 }
+
+#[test]
+fn new_state_has_no_palette_matches() {
+    let state = UiState::new();
+    assert!(!state.is_palette_active());
+    assert!(state.palette_matches().is_empty());
+    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn entering_slash_fills_the_palette_with_all_commands() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    assert!(state.is_palette_active());
+    assert_eq!(state.palette_matches().len(), 6);
+    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn typing_filters_the_palette_and_resets_selection() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('r');
+    assert_eq!(state.palette_matches().len(), 1);
+    assert_eq!(state.palette_matches()[0].spec.name, "reload");
+    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn deleting_a_character_rewidens_the_palette() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('r');
+    assert_eq!(state.palette_matches().len(), 1);
+    state.command_delete_before_cursor();
+    assert_eq!(state.palette_matches().len(), 6);
+}
+
+#[test]
+fn no_matching_command_leaves_an_empty_palette() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('z');
+    state.command_append_char('z');
+    assert!(state.palette_matches().is_empty());
+    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn non_slash_buffer_is_not_palette_active() {
+    let mut state = UiState::new();
+    state.enter_command_mode('h');
+    assert!(!state.is_palette_active());
+    assert!(state.palette_matches().is_empty());
+}
+
+#[test]
+fn cancel_command_mode_clears_the_palette() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.cancel_command_mode();
+    assert!(!state.is_palette_active());
+    assert!(state.palette_matches().is_empty());
+    assert_eq!(state.palette_selected(), 0);
+}
+
+#[test]
+fn take_command_buffer_clears_the_palette() {
+    let mut state = UiState::new();
+    state.enter_command_mode('/');
+    state.command_append_char('o');
+    let buffer = state.take_command_buffer();
+    assert_eq!(buffer, "/o");
+    assert!(state.palette_matches().is_empty());
+    assert_eq!(state.palette_selected(), 0);
+}

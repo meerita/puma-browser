@@ -6,6 +6,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use crate::command::{self, CommandMatch};
+
 pub(crate) const READING_HINTS: &[&str] = &[
     "Type a URL or press / for commands",
     "j · k or ↑ · ↓ to scroll  ·  Space / b to page",
@@ -34,6 +36,8 @@ pub(crate) struct UiState {
     transient_set_at: Option<Instant>,
     command_buffer: String,
     cursor_byte_offset: usize,
+    palette_matches: Vec<CommandMatch>,
+    palette_selected_index: usize,
 }
 
 impl UiState {
@@ -50,6 +54,8 @@ impl UiState {
             transient_set_at: None,
             command_buffer: String::new(),
             cursor_byte_offset: 0,
+            palette_matches: Vec::new(),
+            palette_selected_index: 0,
         }
     }
 
@@ -111,6 +117,7 @@ impl UiState {
         self.cursor_byte_offset = 0;
         self.command_buffer.push(first_char);
         self.cursor_byte_offset = first_char.len_utf8();
+        self.refresh_palette();
     }
 
     pub(crate) fn command_buffer(&self) -> &str {
@@ -124,6 +131,7 @@ impl UiState {
     pub(crate) fn command_append_char(&mut self, ch: char) {
         self.command_buffer.insert(self.cursor_byte_offset, ch);
         self.cursor_byte_offset += ch.len_utf8();
+        self.refresh_palette();
     }
 
     pub(crate) fn command_move_left(&mut self) {
@@ -154,19 +162,58 @@ impl UiState {
         self.command_buffer
             .drain(new_offset..self.cursor_byte_offset);
         self.cursor_byte_offset = new_offset;
+        self.refresh_palette();
     }
 
     pub(crate) fn cancel_command_mode(&mut self) {
         self.interaction_mode = InteractionMode::Reading;
         self.command_buffer.clear();
         self.cursor_byte_offset = 0;
+        self.clear_palette();
     }
 
     pub(crate) fn take_command_buffer(&mut self) -> String {
         let buffer = std::mem::take(&mut self.command_buffer);
         self.cursor_byte_offset = 0;
         self.interaction_mode = InteractionMode::Reading;
+        self.clear_palette();
         buffer
+    }
+
+    /// True when the command buffer begins with `/`, meaning the slash-command palette is
+    /// filtering rather than the bar accepting a URL. Derived from the buffer so there is
+    /// no separate flag to keep in sync.
+    pub(crate) fn is_palette_active(&self) -> bool {
+        self.command_buffer.starts_with('/')
+    }
+
+    /// The ranked command matches shown in the palette for the current buffer. Empty when
+    /// the palette is inactive or nothing matches.
+    pub(crate) fn palette_matches(&self) -> &[CommandMatch] {
+        &self.palette_matches
+    }
+
+    /// Index of the highlighted palette row within `palette_matches`.
+    pub(crate) fn palette_selected(&self) -> usize {
+        self.palette_selected_index
+    }
+
+    /// Recomputes the filtered command list from the text after the leading `/` and resets
+    /// the selection to the first row. A changed filter always starts the selection at the
+    /// top; the selection only moves via `palette_select_next`/`palette_select_prev`.
+    fn refresh_palette(&mut self) {
+        if !self.is_palette_active() {
+            self.clear_palette();
+            return;
+        }
+        let query = self.command_buffer[1..].to_string();
+        self.palette_matches = command::filter(&query);
+        self.palette_selected_index = 0;
+    }
+
+    fn clear_palette(&mut self) {
+        self.palette_matches.clear();
+        self.palette_selected_index = 0;
     }
 
     pub(crate) fn current_hint(&self) -> &str {
