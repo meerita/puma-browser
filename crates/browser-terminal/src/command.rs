@@ -8,6 +8,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandKind {
     Open,
+    Search,
     Reload,
     Back,
     Help,
@@ -49,6 +50,13 @@ const REGISTRY: &[CommandSpec] = &[
         description: "open a URL in the current tab",
         takes_argument: true,
         kind: CommandKind::Open,
+    },
+    CommandSpec {
+        name: "search",
+        aliases: &[],
+        description: "search the web for a query",
+        takes_argument: true,
+        kind: CommandKind::Search,
     },
     CommandSpec {
         name: "reload",

@@ -8,8 +8,8 @@ use std::time::Instant;
 use super::{
     cell_is_selected, clamped_document_coordinate, copied_message, decode_fragment,
     document_coordinate, handle_mouse_event, resolve_anchor_row, sanitize_fragment_for_display,
-    CachedPage, ScrollState, TerminalApp, TerminalSettings, TextSelection, UiState, ViewState,
-    BODY_AREA_TOP_ROW, CONTENT_PADDING,
+    CachedPage, CommandOutcome, LoadState, ScrollState, TerminalApp, TerminalSettings,
+    TextSelection, UiState, ViewState, BODY_AREA_TOP_ROW, CONTENT_PADDING,
 };
 use browser_core::NavigationController;
 use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
@@ -46,12 +46,17 @@ fn cache_with_anchor(anchor_name: &str) -> CachedPage {
 }
 
 fn terminal_app() -> TerminalApp {
+    terminal_app_with_search(true)
+}
+
+fn terminal_app_with_search(search_enabled: bool) -> TerminalApp {
     TerminalApp::new(
         NavigationController::new(),
         ViewState::Page,
         TerminalSettings {
             copy_on_select: false,
             force_osc52: false,
+            search_enabled,
         },
     )
 }
@@ -125,7 +130,7 @@ fn a_same_page_jump_to_a_present_anchor_moves_the_viewport_there() {
         "the anchor must sit below the top of the page"
     );
     let mut scroll = ScrollState::new();
-    let mut ui_state = UiState::new();
+    let mut ui_state = UiState::new(true);
 
     application.jump_to_anchor(
         Some("target"),
@@ -145,7 +150,7 @@ fn a_same_page_jump_to_a_missing_anchor_reports_it_and_does_not_move() {
     let application = terminal_app();
     let cache = Some(cache_with_anchor("target"));
     let mut scroll = ScrollState::new();
-    let mut ui_state = UiState::new();
+    let mut ui_state = UiState::new(true);
 
     application.jump_to_anchor(
         Some("absent"),
@@ -169,7 +174,7 @@ fn a_pending_fragment_is_applied_and_cleared_after_the_page_renders() {
     let cache = Some(cache_with_anchor("target"));
     let target_row = cache.as_ref().unwrap().buffer.anchors()[0].row;
     let mut scroll = ScrollState::new();
-    let mut ui_state = UiState::new();
+    let mut ui_state = UiState::new(true);
     ui_state.set_pending_fragment(Some("target".to_string()));
 
     application.apply_pending_fragment(&mut ui_state, &cache, &mut scroll, 80);
@@ -183,7 +188,7 @@ fn apply_pending_fragment_does_nothing_without_a_pending_fragment() {
     let application = terminal_app();
     let cache = Some(cache_with_anchor("target"));
     let mut scroll = ScrollState::new();
-    let mut ui_state = UiState::new();
+    let mut ui_state = UiState::new(true);
 
     application.apply_pending_fragment(&mut ui_state, &cache, &mut scroll, 80);
 
@@ -253,7 +258,7 @@ fn press_begins_a_selection_without_a_range() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
-        &mut UiState::new(),
+        &mut UiState::new(true),
         Instant::now(),
         true,
         false,
@@ -283,7 +288,7 @@ fn press_drag_release_keeps_the_highlighted_range() {
             BODY_AREA_TOP_ROW,
             &mut selection,
             &mut navigate_to_url,
-            &mut UiState::new(),
+            &mut UiState::new(true),
             Instant::now(),
             true,
             false,
@@ -305,7 +310,7 @@ fn release_with_copy_disabled_keeps_the_highlight_and_sets_no_message() {
     let buffer = CellBuffer::new(10, 6);
     let mut selection = TextSelection::new();
     let mut navigate_to_url = None;
-    let mut ui_state = UiState::new();
+    let mut ui_state = UiState::new(true);
     let now = Instant::now();
     let steps = [
         MouseEventKind::Down(MouseButton::Left),
@@ -352,7 +357,7 @@ fn press_release_without_movement_clears_the_selection() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
-        &mut UiState::new(),
+        &mut UiState::new(true),
         Instant::now(),
         true,
         false,
@@ -364,7 +369,7 @@ fn press_release_without_movement_clears_the_selection() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
-        &mut UiState::new(),
+        &mut UiState::new(true),
         Instant::now(),
         true,
         false,
@@ -386,7 +391,7 @@ fn a_drag_without_a_prior_press_is_ignored() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
-        &mut UiState::new(),
+        &mut UiState::new(true),
         Instant::now(),
         true,
         false,
@@ -407,7 +412,7 @@ fn wheel_scroll_events_do_not_touch_the_selection() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
-        &mut UiState::new(),
+        &mut UiState::new(true),
         Instant::now(),
         true,
         false,
@@ -419,7 +424,7 @@ fn wheel_scroll_events_do_not_touch_the_selection() {
         BODY_AREA_TOP_ROW,
         &mut selection,
         &mut navigate_to_url,
-        &mut UiState::new(),
+        &mut UiState::new(true),
         Instant::now(),
         true,
         false,
@@ -470,4 +475,36 @@ fn copied_message_counts_multibyte_characters_as_one_grapheme_each() {
 #[test]
 fn copied_message_reports_zero_for_empty_text() {
     assert_eq!(copied_message(""), "copied 0 chars to clipboard");
+}
+
+#[test]
+fn run_search_is_rejected_with_a_fixed_message_when_search_is_disabled() {
+    let mut application = terminal_app_with_search(false);
+    let mut ui_state = UiState::new(false);
+    let outcome = application.run_search("rust", &mut ui_state, Instant::now());
+    assert!(matches!(outcome, CommandOutcome::None));
+    assert_eq!(ui_state.transient_message(), Some("search is disabled"));
+}
+
+#[test]
+fn run_search_with_an_empty_query_shows_the_usage_message_and_loads_nothing() {
+    let mut application = terminal_app();
+    let mut ui_state = UiState::new(true);
+    let outcome = application.run_search("   ", &mut ui_state, Instant::now());
+    assert!(matches!(outcome, CommandOutcome::None));
+    assert_eq!(ui_state.transient_message(), Some("usage: /search <query>"));
+}
+
+#[tokio::test]
+async fn run_search_with_a_query_starts_a_load() {
+    let mut application = terminal_app();
+    let mut ui_state = UiState::new(true);
+    let outcome = application.run_search("rust", &mut ui_state, Instant::now());
+    // The single-threaded test runtime never polls the spawned load task before it is
+    // aborted here, so asserting the Load variant performs no real fetch.
+    match outcome {
+        CommandOutcome::Load(LoadState::Active { handle, .. }) => handle.abort(),
+        _ => panic!("a query with search enabled must start a load"),
+    }
+    assert_eq!(ui_state.transient_message(), None);
 }

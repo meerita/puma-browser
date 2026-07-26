@@ -6,12 +6,19 @@
 use super::{filter, parse_command_input, registry, resolve, CommandKind, MatchRank};
 
 #[test]
-fn registry_holds_exactly_the_six_commands() {
+fn registry_holds_exactly_the_seven_commands() {
     let names: Vec<&str> = registry().iter().map(|spec| spec.name).collect();
     assert_eq!(
         names,
-        vec!["open", "reload", "back", "help", "quit", "settings"]
+        vec!["open", "search", "reload", "back", "help", "quit", "settings"]
     );
+}
+
+#[test]
+fn search_resolves_and_takes_an_argument() {
+    let search = resolve("search").expect("search command must exist");
+    assert!(search.takes_argument);
+    assert_eq!(search.kind, CommandKind::Search);
 }
 
 #[test]
@@ -60,7 +67,7 @@ fn empty_query_returns_all_commands_in_registry_order() {
     let names: Vec<&str> = matches.iter().map(|found| found.spec.name).collect();
     assert_eq!(
         names,
-        vec!["open", "reload", "back", "help", "quit", "settings"]
+        vec!["open", "search", "reload", "back", "help", "quit", "settings"]
     );
     assert!(matches.iter().all(|found| found.rank == MatchRank::Prefix));
 }

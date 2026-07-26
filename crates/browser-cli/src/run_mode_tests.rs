@@ -7,7 +7,9 @@ use std::path::Path;
 
 use tempfile::tempdir;
 
-use super::{copy_on_select_enabled, force_osc52_enabled, resolve_mode, ResolvedMode};
+use super::{
+    copy_on_select_enabled, force_osc52_enabled, resolve_mode, search_enabled, ResolvedMode,
+};
 
 fn resolved_in(working_directory: &Path, arguments: &[&str]) -> ResolvedMode {
     resolve_mode(
@@ -156,4 +158,22 @@ fn force_osc52_is_on_only_for_one_or_true() {
     assert!(force_osc52_enabled(Some("true")));
     assert!(!force_osc52_enabled(Some("0")));
     assert!(!force_osc52_enabled(Some("yes")));
+}
+
+#[test]
+fn search_is_enabled_when_the_variable_is_unset() {
+    assert!(search_enabled(None));
+}
+
+#[test]
+fn search_is_disabled_by_zero_or_false() {
+    assert!(!search_enabled(Some("0")));
+    assert!(!search_enabled(Some("false")));
+}
+
+#[test]
+fn search_stays_enabled_for_any_other_value() {
+    assert!(search_enabled(Some("1")));
+    assert!(search_enabled(Some("true")));
+    assert!(search_enabled(Some("")));
 }

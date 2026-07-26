@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::command::{self, CommandMatch};
+use crate::command::{self, CommandKind, CommandMatch};
 
 pub(crate) const READING_HINTS: &[&str] = &[
     "Type a URL or press / for commands",
@@ -39,10 +39,11 @@ pub(crate) struct UiState {
     palette_matches: Vec<CommandMatch>,
     palette_selected_index: usize,
     pending_fragment: Option<String>,
+    search_enabled: bool,
 }
 
 impl UiState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(search_enabled: bool) -> Self {
         Self {
             interaction_mode: InteractionMode::Reading,
             quit_armed: false,
@@ -58,6 +59,7 @@ impl UiState {
             palette_matches: Vec::new(),
             palette_selected_index: 0,
             pending_fragment: None,
+            search_enabled,
         }
     }
 
@@ -310,6 +312,10 @@ impl UiState {
         let (token, _remainder) = command::parse_command_input(&self.command_buffer);
         let query = token.to_string();
         self.palette_matches = command::filter(&query);
+        if !self.search_enabled {
+            self.palette_matches
+                .retain(|found| found.spec.kind != CommandKind::Search);
+        }
         self.palette_selected_index = 0;
     }
 

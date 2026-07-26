@@ -8,6 +8,7 @@ mod current_page;
 mod error;
 mod ids;
 mod navigation_target;
+mod search_engine;
 mod tab_id;
 mod tab_state;
 
@@ -18,6 +19,7 @@ pub use browser_network::BrowserUrl;
 pub use error::CoreError;
 pub use ids::{BookmarkId, HistoryEntryId};
 pub use navigation_target::{classify_navigation, NavigationTarget};
+pub use search_engine::SearchEngine;
 pub use tab_id::TabId;
 pub use tab_state::TabState;
 
