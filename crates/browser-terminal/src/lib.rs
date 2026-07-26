@@ -4,10 +4,14 @@
 //! @created meerita <meerita@icloud.com>
 
 mod clipboard;
+// The registry and matcher land ahead of the dispatch and palette code that call them.
+#[allow(dead_code)]
+mod command;
 mod command_bar;
 mod error;
 mod hints_bar;
 mod input;
+mod palette_menu;
 mod selection;
 mod title_bar;
 mod ui_state;
@@ -37,6 +41,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color as TerminalColor, Modifier, Style};
+use ratatui::text::Line;
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::watch;
@@ -44,12 +49,14 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
 use clipboard::{copy_to_clipboard, ClipboardOutcome};
+use command::{parse_command_input, CommandKind};
 use command_bar::{
     command_cursor_col, compose_command_bar_command, compose_command_bar_loading,
     compose_command_bar_reading,
 };
 use hints_bar::compose_hints_bar;
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
+use palette_menu::{compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
 use selection::TextSelection;
 use title_bar::compose_title_bar;
 use ui_state::UiState;
@@ -85,6 +92,14 @@ enum LoadState {
         spinner_frame: usize,
         loading_url: String,
     },
+}
+
+/// The result of submitting a command-bar buffer: nothing further to do, a new load to
+/// track, or a request to leave the event loop.
+enum CommandOutcome {
+    None,
+    Load(LoadState),
+    Quit,
 }
 
 /// Drives the terminal user interface over the navigation core.
@@ -260,12 +275,14 @@ impl TerminalApp {
                             Event::Key(key) if key.kind != KeyEventKind::Release => {
                                 let in_command_mode = ui_state.is_in_command_mode();
                                 let in_link_navigation = ui_state.is_in_link_navigation();
+                                let palette_active = ui_state.is_palette_active();
                                 let action = map_key_event(
                                     key,
                                     ui_state.quit_armed,
                                     ui_state.refresh_armed,
                                     in_command_mode,
                                     in_link_navigation,
+                                    palette_active,
                                 );
                                 if matches!(action, InputAction::Quit) {
                                     return Ok(());
@@ -273,7 +290,7 @@ impl TerminalApp {
                                 ui_state.clear_transient();
                                 apply_scroll(action, &mut scroll, viewport_height, max_offset);
                                 if matches!(action, InputAction::CommandSubmit) {
-                                    command_to_submit = Some(ui_state.take_command_buffer());
+                                    command_to_submit = Some(ui_state.take_submit_buffer());
                                 } else {
                                     apply_command_action(action, &mut ui_state);
                                 }
@@ -342,16 +359,20 @@ impl TerminalApp {
                 }
             }
 
-            // Apply command submission.
+            // Apply command submission. A leading `/` routes to the command dispatcher;
+            // anything else is a URL, exactly as before.
             if let Some(input) = command_to_submit {
-                match browser_core::resolve_address(&input, &working_dir) {
-                    Err(_) => {
-                        self.view_state = ViewState::Error(format!("Not a valid address: {input}"));
-                        cache = None;
-                    }
-                    Ok(url) => {
-                        load_state = self.start_load(url);
-                    }
+                match self.submit_command_input(
+                    input,
+                    &working_dir,
+                    &mut ui_state,
+                    &mut cache,
+                    &mut scroll,
+                    now,
+                ) {
+                    CommandOutcome::Quit => return Ok(()),
+                    CommandOutcome::Load(state) => load_state = state,
+                    CommandOutcome::None => {}
                 }
             }
 
@@ -366,6 +387,128 @@ impl TerminalApp {
                     self.start_link_load(link_url, &working_dir, &mut ui_state, &mut cache);
             }
         }
+    }
+
+    /// Routes a submitted command-bar buffer. A buffer whose trimmed text starts with `/`
+    /// is a slash command; anything else is a URL and takes the unchanged address path.
+    fn submit_command_input(
+        &mut self,
+        input: String,
+        working_dir: &std::path::Path,
+        ui_state: &mut UiState,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        now: Instant,
+    ) -> CommandOutcome {
+        if !input.trim_start().starts_with('/') {
+            return self.submit_address(&input, working_dir, cache);
+        }
+        self.dispatch_command(&input, working_dir, ui_state, cache, scroll, now)
+    }
+
+    /// Resolves a URL buffer through the same scheme validation as normal address entry
+    /// and starts the load, or shows a generic error without echoing the raw input.
+    fn submit_address(
+        &mut self,
+        input: &str,
+        working_dir: &std::path::Path,
+        cache: &mut Option<CachedPage>,
+    ) -> CommandOutcome {
+        match browser_core::resolve_address(input, working_dir) {
+            Err(_) => {
+                self.view_state = ViewState::Error(format!("Not a valid address: {input}"));
+                *cache = None;
+                CommandOutcome::None
+            }
+            Ok(url) => CommandOutcome::Load(self.start_load(url)),
+        }
+    }
+
+    /// Parses a slash-command buffer and runs the matching handler. An empty token (the
+    /// buffer was just `/`) re-opens command mode without loading anything; an unknown
+    /// token shows a transient message and never falls through to a URL load.
+    fn dispatch_command(
+        &mut self,
+        input: &str,
+        working_dir: &std::path::Path,
+        ui_state: &mut UiState,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        now: Instant,
+    ) -> CommandOutcome {
+        let (token, remainder) = parse_command_input(input);
+        if token.is_empty() {
+            ui_state.enter_command_mode('/');
+            return CommandOutcome::None;
+        }
+        let Some(spec) = command::resolve(token) else {
+            ui_state.set_transient_message(format!("unknown command: /{token}"), now);
+            return CommandOutcome::None;
+        };
+        match spec.kind {
+            CommandKind::Open => self.run_open(remainder, working_dir, cache, ui_state, now),
+            CommandKind::Reload => self.run_reload(ui_state, now),
+            CommandKind::Back => self.run_back(ui_state, cache, scroll, now),
+            CommandKind::Quit => CommandOutcome::Quit,
+            CommandKind::Help => {
+                ui_state.enter_command_mode('/');
+                CommandOutcome::None
+            }
+            CommandKind::Settings => {
+                ui_state.set_transient_message("Settings panel coming soon".to_string(), now);
+                CommandOutcome::None
+            }
+        }
+    }
+
+    /// `/open <url>`: loads the argument through the address path, or shows a usage
+    /// message when no URL was given.
+    fn run_open(
+        &mut self,
+        remainder: &str,
+        working_dir: &std::path::Path,
+        cache: &mut Option<CachedPage>,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) -> CommandOutcome {
+        if remainder.is_empty() {
+            ui_state.set_transient_message("usage: /open <url>".to_string(), now);
+            return CommandOutcome::None;
+        }
+        self.submit_address(remainder, working_dir, cache)
+    }
+
+    /// `/reload`: re-fetches the current URL through the shared load path, or reports that
+    /// there is nothing to reload on a blank page.
+    fn run_reload(&mut self, ui_state: &mut UiState, now: Instant) -> CommandOutcome {
+        let Some(url) = self.controller.current_url().cloned() else {
+            ui_state.set_transient_message("nothing to reload".to_string(), now);
+            return CommandOutcome::None;
+        };
+        CommandOutcome::Load(self.start_load(url))
+    }
+
+    /// `/back`: restores the previous page from history, or reports that there is no page
+    /// to go back to.
+    fn run_back(
+        &mut self,
+        ui_state: &mut UiState,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        now: Instant,
+    ) -> CommandOutcome {
+        if !self.controller.can_go_back() {
+            ui_state.set_transient_message("no page to go back to".to_string(), now);
+            return CommandOutcome::None;
+        }
+        navigate_back(
+            &mut self.controller,
+            ui_state,
+            cache,
+            scroll,
+            &mut self.view_state,
+        );
+        CommandOutcome::None
     }
 
     /// Marks a link URL visited, leaves link navigation, and starts loading it through
@@ -531,6 +674,8 @@ fn draw_frame(
         selection_range,
     );
 
+    draw_palette_popup(frame, chunks[0], ui_state);
+
     draw_separator(frame, chunks[1]);
 
     if let Some((spinner_frame, loading_url, bytes_received)) = loading {
@@ -563,6 +708,63 @@ fn draw_frame(
 
     let hints_text = compose_hints_bar(ui_state.transient_message(), terminal_width);
     frame.render_widget(Paragraph::new(hints_text), chunks[5]);
+}
+
+/// Draws the slash-command palette popup over the bottom of the content area, its last
+/// row sitting just above the separator and command bar. Renders nothing when the palette
+/// is inactive or empty, so a stale list can never linger. The popup shows only local,
+/// static command names and descriptions through the normal widget path, never page bytes.
+fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState) {
+    if !ui_state.is_palette_active() {
+        return;
+    }
+    let matches = ui_state.palette_matches();
+    if matches.is_empty() || content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let max_rows = MENU_MAX_ROWS.min(content_area.height as usize);
+    let menu = compose_palette_menu(
+        matches,
+        ui_state.palette_selected(),
+        content_area.width,
+        max_rows,
+    );
+    if menu.rows.is_empty() {
+        return;
+    }
+    let lines = palette_popup_lines(&menu);
+    let popup_height = lines.len() as u16;
+    let popup_area = Rect {
+        x: content_area.x,
+        y: content_area.y + content_area.height - popup_height,
+        width: content_area.width,
+        height: popup_height,
+    };
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(Paragraph::new(lines), popup_area);
+}
+
+/// Builds the popup's styled lines: one per visible menu row with the selection
+/// highlighted. Every string is local registry text, so no page content reaches the
+/// terminal here.
+fn palette_popup_lines(menu: &PaletteMenu) -> Vec<Line<'static>> {
+    menu.rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, row_text)| {
+            let style = palette_row_style(row_index == menu.selected_row);
+            Line::styled(row_text.clone(), style)
+        })
+        .collect()
+}
+
+/// Style for a palette row: the selected row is reversed to match the chrome bars; other
+/// rows render as plain text over the cleared popup area.
+fn palette_row_style(is_selected: bool) -> Style {
+    if is_selected {
+        return Style::default().add_modifier(Modifier::REVERSED);
+    }
+    Style::default()
 }
 
 /// Renders a reversed-style chrome row (title bar or hints bar).
@@ -835,6 +1037,9 @@ fn apply_scroll(
         | InputAction::CommandDeleteBack
         | InputAction::CommandCancel
         | InputAction::CommandSubmit
+        | InputAction::PaletteSelectPrev
+        | InputAction::PaletteSelectNext
+        | InputAction::PaletteComplete
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
         | InputAction::ActivateFocusedLink
@@ -848,8 +1053,11 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         InputAction::CommandAppend(ch) => ui_state.command_append_char(ch),
         InputAction::CommandMoveCursorLeft => ui_state.command_move_left(),
         InputAction::CommandMoveCursorRight => ui_state.command_move_right(),
-        InputAction::CommandDeleteBack => ui_state.command_delete_before_cursor(),
+        InputAction::CommandDeleteBack => ui_state.command_delete_or_exit(),
         InputAction::CommandCancel => ui_state.cancel_command_mode(),
+        InputAction::PaletteSelectPrev => ui_state.palette_select_prev(),
+        InputAction::PaletteSelectNext => ui_state.palette_select_next(),
+        InputAction::PaletteComplete => ui_state.palette_complete(),
         InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
         | InputAction::ScrollPageDown
@@ -960,7 +1168,10 @@ fn handle_navigation_action(
         | InputAction::CommandMoveCursorRight
         | InputAction::CommandDeleteBack
         | InputAction::CommandCancel
-        | InputAction::CommandSubmit => None,
+        | InputAction::CommandSubmit
+        | InputAction::PaletteSelectPrev
+        | InputAction::PaletteSelectNext
+        | InputAction::PaletteComplete => None,
     }
 }
 

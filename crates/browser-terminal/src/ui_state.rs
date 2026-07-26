@@ -6,6 +6,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use crate::command::{self, CommandMatch};
+
 pub(crate) const READING_HINTS: &[&str] = &[
     "Type a URL or press / for commands",
     "j · k or ↑ · ↓ to scroll  ·  Space / b to page",
@@ -34,6 +36,8 @@ pub(crate) struct UiState {
     transient_set_at: Option<Instant>,
     command_buffer: String,
     cursor_byte_offset: usize,
+    palette_matches: Vec<CommandMatch>,
+    palette_selected_index: usize,
 }
 
 impl UiState {
@@ -50,6 +54,8 @@ impl UiState {
             transient_set_at: None,
             command_buffer: String::new(),
             cursor_byte_offset: 0,
+            palette_matches: Vec::new(),
+            palette_selected_index: 0,
         }
     }
 
@@ -111,6 +117,7 @@ impl UiState {
         self.cursor_byte_offset = 0;
         self.command_buffer.push(first_char);
         self.cursor_byte_offset = first_char.len_utf8();
+        self.refresh_palette();
     }
 
     pub(crate) fn command_buffer(&self) -> &str {
@@ -124,6 +131,7 @@ impl UiState {
     pub(crate) fn command_append_char(&mut self, ch: char) {
         self.command_buffer.insert(self.cursor_byte_offset, ch);
         self.cursor_byte_offset += ch.len_utf8();
+        self.refresh_palette();
     }
 
     pub(crate) fn command_move_left(&mut self) {
@@ -154,19 +162,141 @@ impl UiState {
         self.command_buffer
             .drain(new_offset..self.cursor_byte_offset);
         self.cursor_byte_offset = new_offset;
+        self.refresh_palette();
     }
 
     pub(crate) fn cancel_command_mode(&mut self) {
         self.interaction_mode = InteractionMode::Reading;
         self.command_buffer.clear();
         self.cursor_byte_offset = 0;
+        self.clear_palette();
     }
 
-    pub(crate) fn take_command_buffer(&mut self) -> String {
-        let buffer = std::mem::take(&mut self.command_buffer);
+    /// Handles a backspace in command mode. Deleting the leading `/` exits command mode
+    /// entirely, the same as cancelling, since a buffer without the `/` is no longer a
+    /// command. Any other backspace deletes the character before the cursor and refreshes
+    /// the palette.
+    pub(crate) fn command_delete_or_exit(&mut self) {
+        if self.deletes_leading_slash() {
+            self.cancel_command_mode();
+            return;
+        }
+        self.command_delete_before_cursor();
+    }
+
+    /// True when the next backspace would remove the leading `/`, that is, the buffer is a
+    /// slash buffer and the cursor sits just after that `/`.
+    fn deletes_leading_slash(&self) -> bool {
+        self.is_palette_active() && self.cursor_byte_offset == '/'.len_utf8()
+    }
+
+    /// The buffer to dispatch on Enter, resolving the palette selection. When the palette
+    /// is active, the typed token is not itself an exact command, and a row is highlighted,
+    /// the highlighted command's canonical name replaces the typed token (its argument
+    /// remainder is preserved). Otherwise the raw buffer is dispatched, so an exactly typed
+    /// command runs directly and an empty match list falls through to the unknown-command
+    /// path. Leaves command mode and clears the palette as it hands the buffer back.
+    pub(crate) fn take_submit_buffer(&mut self) -> String {
+        let resolved = self.resolved_submit_buffer();
+        self.command_buffer.clear();
         self.cursor_byte_offset = 0;
         self.interaction_mode = InteractionMode::Reading;
-        buffer
+        self.clear_palette();
+        resolved
+    }
+
+    fn resolved_submit_buffer(&self) -> String {
+        if !self.is_palette_active() {
+            return self.command_buffer.clone();
+        }
+        let (token, remainder) = command::parse_command_input(&self.command_buffer);
+        if command::resolve(token).is_some() {
+            return self.command_buffer.clone();
+        }
+        let Some(selected) = self.palette_matches.get(self.palette_selected_index) else {
+            return self.command_buffer.clone();
+        };
+        if remainder.is_empty() {
+            return format!("/{}", selected.spec.name);
+        }
+        format!("/{} {remainder}", selected.spec.name)
+    }
+
+    /// True when the command buffer begins with `/`, meaning the slash-command palette is
+    /// filtering rather than the bar accepting a URL. Derived from the buffer so there is
+    /// no separate flag to keep in sync.
+    pub(crate) fn is_palette_active(&self) -> bool {
+        self.command_buffer.starts_with('/')
+    }
+
+    /// The ranked command matches shown in the palette for the current buffer. Empty when
+    /// the palette is inactive or nothing matches.
+    pub(crate) fn palette_matches(&self) -> &[CommandMatch] {
+        &self.palette_matches
+    }
+
+    /// Index of the highlighted palette row within `palette_matches`.
+    pub(crate) fn palette_selected(&self) -> usize {
+        self.palette_selected_index
+    }
+
+    /// Moves the palette highlight to the next row, wrapping from the last back to the
+    /// first. A no-op when nothing matches.
+    pub(crate) fn palette_select_next(&mut self) {
+        if self.palette_matches.is_empty() {
+            return;
+        }
+        self.palette_selected_index =
+            (self.palette_selected_index + 1) % self.palette_matches.len();
+    }
+
+    /// Moves the palette highlight to the previous row, wrapping from the first back to the
+    /// last. A no-op when nothing matches.
+    pub(crate) fn palette_select_prev(&mut self) {
+        if self.palette_matches.is_empty() {
+            return;
+        }
+        self.palette_selected_index = self
+            .palette_selected_index
+            .checked_sub(1)
+            .unwrap_or(self.palette_matches.len() - 1);
+    }
+
+    /// Completes the buffer to the highlighted command: `/` plus its canonical name, cursor
+    /// at the end, and a trailing space when the command takes an argument so the user can
+    /// type it. A no-op when nothing matches.
+    pub(crate) fn palette_complete(&mut self) {
+        let Some(selected) = self.palette_matches.get(self.palette_selected_index) else {
+            return;
+        };
+        let mut completed = format!("/{}", selected.spec.name);
+        if selected.spec.takes_argument {
+            completed.push(' ');
+        }
+        self.command_buffer = completed;
+        self.cursor_byte_offset = self.command_buffer.len();
+        self.refresh_palette();
+    }
+
+    /// Recomputes the filtered command list from the command token (the run after the
+    /// leading `/` up to the first space) and resets the selection to the first row. Using
+    /// the token, not the whole buffer, keeps the palette focused on the command while the
+    /// user types its argument. A changed filter always starts the selection at the top; the
+    /// selection only moves via `palette_select_next`/`palette_select_prev`.
+    fn refresh_palette(&mut self) {
+        if !self.is_palette_active() {
+            self.clear_palette();
+            return;
+        }
+        let (token, _remainder) = command::parse_command_input(&self.command_buffer);
+        let query = token.to_string();
+        self.palette_matches = command::filter(&query);
+        self.palette_selected_index = 0;
+    }
+
+    fn clear_palette(&mut self) {
+        self.palette_matches.clear();
+        self.palette_selected_index = 0;
     }
 
     pub(crate) fn current_hint(&self) -> &str {

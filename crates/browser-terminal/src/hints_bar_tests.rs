@@ -11,8 +11,17 @@ use super::compose_hints_bar;
 fn no_system_message_shows_shortcuts_only() {
     let result = compose_hints_bar(None, 80);
     assert!(
-        result.starts_with("? for shortcuts · r for refresh"),
+        result.starts_with("? for shortcuts · / for commands · r for refresh"),
         "unexpected content: {result}"
+    );
+}
+
+#[test]
+fn shortcuts_advertise_slash_for_commands() {
+    let result = compose_hints_bar(None, 80);
+    assert!(
+        result.contains("/ for commands"),
+        "expected the palette hint: {result}"
     );
 }
 
@@ -24,7 +33,7 @@ fn system_message_appears_on_right() {
         "expected message on right: {result}"
     );
     assert!(
-        result.starts_with("? for shortcuts · r for refresh"),
+        result.starts_with("? for shortcuts · / for commands · r for refresh"),
         "expected shortcuts on left: {result}"
     );
 }

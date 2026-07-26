@@ -26,6 +26,9 @@ pub(crate) enum InputAction {
     CommandDeleteBack,
     CommandCancel,
     CommandSubmit,
+    PaletteSelectPrev,
+    PaletteSelectNext,
+    PaletteComplete,
     FocusNextLink,
     FocusPreviousLink,
     ActivateFocusedLink,
@@ -38,19 +41,21 @@ pub(crate) enum InputAction {
 /// `Esc`/`r` arm their respective two-press confirmations; any other printable character
 /// enters command mode seeded with that character. In command mode, `Esc` cancels,
 /// `Enter` submits, arrow keys move the cursor, `Backspace` deletes, and printable
-/// characters append to the buffer.
+/// characters append to the buffer. When the slash-command palette is active, the arrow
+/// keys move the highlighted row and `Tab` completes the buffer to it instead.
 pub(crate) fn map_key_event(
     event: KeyEvent,
     quit_armed: bool,
     refresh_armed: bool,
     in_command_mode: bool,
     in_link_navigation: bool,
+    palette_active: bool,
 ) -> InputAction {
     if is_quit_combination(event) {
         return InputAction::Quit;
     }
     if in_command_mode {
-        return map_command_mode_key(event);
+        return map_command_mode_key(event, palette_active);
     }
     if in_link_navigation {
         return map_link_navigation_key(event);
@@ -111,7 +116,12 @@ fn map_link_navigation_key(event: KeyEvent) -> InputAction {
     }
 }
 
-fn map_command_mode_key(event: KeyEvent) -> InputAction {
+fn map_command_mode_key(event: KeyEvent, palette_active: bool) -> InputAction {
+    if palette_active {
+        if let Some(action) = map_palette_key(event) {
+            return action;
+        }
+    }
     match event.code {
         KeyCode::Esc => InputAction::CommandCancel,
         KeyCode::Enter => InputAction::CommandSubmit,
@@ -120,6 +130,20 @@ fn map_command_mode_key(event: KeyEvent) -> InputAction {
         KeyCode::Backspace => InputAction::CommandDeleteBack,
         KeyCode::Char(ch) => InputAction::CommandAppend(ch),
         _ => InputAction::Disarm,
+    }
+}
+
+/// Palette-only keys layered over command mode: the arrows move the highlighted row and
+/// `Tab` completes the buffer to it. Returns `None` for every other key so the base
+/// command-mode map still handles `Esc`, `Enter`, `Backspace`, cursor moves, and typing.
+/// These bindings apply only while the buffer is a slash buffer, so plain URL editing keeps
+/// its existing behavior.
+fn map_palette_key(event: KeyEvent) -> Option<InputAction> {
+    match event.code {
+        KeyCode::Up => Some(InputAction::PaletteSelectPrev),
+        KeyCode::Down => Some(InputAction::PaletteSelectNext),
+        KeyCode::Tab => Some(InputAction::PaletteComplete),
+        _ => None,
     }
 }
 
