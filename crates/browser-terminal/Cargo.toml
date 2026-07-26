@@ -10,6 +10,8 @@ browser-css = { path = "../browser-css" }
 browser-layout = { path = "../browser-layout" }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
+arboard = { workspace = true }
+base64 = { workspace = true }
 futures-util = "0.3"
 tokio = { workspace = true }
 unicode-width = { workspace = true }

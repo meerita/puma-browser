@@ -3,6 +3,10 @@
 //! @layer terminal
 //! @created meerita <meerita@icloud.com>
 
+// The copy entry point is invoked from the mouse-release path added later on
+// this branch; until that lands the module has no in-crate caller.
+#[allow(dead_code)]
+mod clipboard;
 mod command_bar;
 mod error;
 mod hints_bar;
