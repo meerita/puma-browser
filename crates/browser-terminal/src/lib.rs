@@ -115,6 +115,7 @@ pub struct TerminalApp {
     controller: NavigationController,
     view_state: ViewState,
     settings: TerminalSettings,
+    initial_fragment: Option<String>,
 }
 
 /// Runtime settings for the terminal adapter, resolved once at startup.
@@ -146,7 +147,18 @@ impl TerminalApp {
             controller,
             view_state,
             settings,
+            initial_fragment: None,
         }
+    }
+
+    /// Sets the fragment to position the initial page on once it first renders.
+    ///
+    /// The startup page is loaded before the event loop begins, so its fragment cannot go
+    /// through the normal load path. Seeding it here lets the same deferred positioning that
+    /// serves cross-page links land the opening viewport on the anchor.
+    pub fn with_initial_fragment(mut self, fragment: Option<String>) -> Self {
+        self.initial_fragment = fragment;
+        self
     }
 
     /// Borrows the navigation core this adapter drives.
@@ -175,6 +187,9 @@ impl TerminalApp {
         let mut scroll = ScrollState::new();
         let mut selection = TextSelection::new();
         let mut ui_state = UiState::new();
+        // A fragment on the startup URL is honored through the same deferred path a
+        // cross-page link uses: seed it here so the first render positions the viewport.
+        ui_state.set_pending_fragment(self.initial_fragment.take());
         let mut cache: Option<CachedPage> = None;
         let mut load_state = LoadState::Idle;
         let mut tick = interval(Duration::from_millis(80));

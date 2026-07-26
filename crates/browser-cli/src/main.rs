@@ -104,7 +104,7 @@ async fn run(resolved: ResolvedMode) -> Result<()> {
     match resolved {
         ResolvedMode::Mcp => run_mcp().await,
         ResolvedMode::TerminalBlank => {
-            run_terminal_app(NavigationController::new(), ViewState::Blank).await
+            run_terminal_app(NavigationController::new(), ViewState::Blank, None).await
         }
         ResolvedMode::TerminalUrl(url) => run_terminal_with_url(url).await,
         ResolvedMode::UsageError(message) => Err(anyhow!(message)),
@@ -113,13 +113,17 @@ async fn run(resolved: ResolvedMode) -> Result<()> {
 
 /// Loads the page at `url`, then opens the terminal on the result.
 ///
-/// The load runs once here, before the synchronous event loop starts. A failed load
-/// still opens the terminal on an error page so the user sees a safe message and quits
-/// with `Esc Esc`; it is never a hard exit.
+/// A fragment on the startup URL is split off before the load and carried into the
+/// terminal, which positions the opening viewport on the matching anchor once the page
+/// renders. The load runs once here, before the synchronous event loop starts. A failed
+/// load still opens the terminal on an error page so the user sees a safe message and
+/// quits with `Esc Esc`; it is never a hard exit.
 async fn run_terminal_with_url(url: BrowserUrl) -> Result<()> {
+    let fragment = url.fragment().map(str::to_string);
+    let base = url.without_fragment();
     let mut controller = NavigationController::new();
-    let view_state = load_initial_view(&mut controller, url).await;
-    run_terminal_app(controller, view_state).await
+    let view_state = load_initial_view(&mut controller, base).await;
+    run_terminal_app(controller, view_state, fragment).await
 }
 
 /// Resolves a load into the initial view the terminal opens on.
@@ -133,9 +137,14 @@ async fn load_initial_view(controller: &mut NavigationController, url: BrowserUr
     }
 }
 
-async fn run_terminal_app(controller: NavigationController, view_state: ViewState) -> Result<()> {
+async fn run_terminal_app(
+    controller: NavigationController,
+    view_state: ViewState,
+    initial_fragment: Option<String>,
+) -> Result<()> {
     let settings = terminal_settings_from_env();
-    let mut app = TerminalApp::new(controller, view_state, settings);
+    let mut app =
+        TerminalApp::new(controller, view_state, settings).with_initial_fragment(initial_fragment);
     // Surface only the adapter's safe status message, never raw error detail.
     app.run()
         .await

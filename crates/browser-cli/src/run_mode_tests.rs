@@ -49,6 +49,15 @@ fn valid_url_argument_becomes_the_terminal_load_target() {
 }
 
 #[test]
+fn a_startup_url_keeps_its_fragment_for_the_opening_viewport() {
+    let resolved = resolved_for(&["https://example.com/page#section"]);
+    let ResolvedMode::TerminalUrl(url) = resolved else {
+        panic!("a valid URL with a fragment must resolve to a terminal load target");
+    };
+    assert_eq!(url.fragment(), Some("section"));
+}
+
+#[test]
 fn bare_host_argument_is_assumed_to_be_https() {
     let resolved = resolved_for(&["example.com"]);
     let ResolvedMode::TerminalUrl(url) = resolved else {
