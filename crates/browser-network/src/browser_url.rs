@@ -73,6 +73,24 @@ impl BrowserUrl {
         self.0.as_str()
     }
 
+    /// The fragment (the part after `#`), or `None` when the URL carries none.
+    ///
+    /// The value is returned as it appears in the URL, still percent-encoded; decoding is
+    /// left to the consumer that matches it against an anchor name.
+    pub fn fragment(&self) -> Option<&str> {
+        self.0.fragment()
+    }
+
+    /// A copy of this URL with any fragment removed.
+    ///
+    /// Used to compare two URLs by their base, so a link to `#section` on the current page
+    /// is recognized as the same page rather than a new request.
+    pub fn without_fragment(&self) -> BrowserUrl {
+        let mut base = self.0.clone();
+        base.set_fragment(None);
+        BrowserUrl(base)
+    }
+
     /// A copy of the URL string with any username and password removed.
     fn credential_safe_string(&self) -> String {
         let mut sanitized = self.0.clone();
