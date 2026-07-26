@@ -4,6 +4,9 @@
 //! @created meerita <meerita@icloud.com>
 
 mod clipboard;
+// The registry and matcher land ahead of the dispatch and palette code that call them.
+#[allow(dead_code)]
+mod command;
 mod command_bar;
 mod error;
 mod hints_bar;

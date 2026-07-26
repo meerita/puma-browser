@@ -1,0 +1,177 @@
+// @file crates/browser-terminal/src/command.rs
+// @description Slash-command registry and ranked prefix/subsequence matcher for the palette.
+// @layer terminal
+// @created meerita <meerita@icloud.com>
+
+/// Stable identity of a palette command. Dispatch matches on this to select a handler;
+/// it carries no behavior of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandKind {
+    Open,
+    Reload,
+    Back,
+    Help,
+    Quit,
+    Settings,
+}
+
+/// One declared argument of a command, used to render an argument hint once the command
+/// is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CommandArg {
+    pub(crate) name: &'static str,
+    pub(crate) required: bool,
+}
+
+/// A single command definition. The `name` and every alias are stored without the leading
+/// `/`; the palette adds it when rendering.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CommandSpec {
+    pub(crate) name: &'static str,
+    pub(crate) aliases: &'static [&'static str],
+    pub(crate) description: &'static str,
+    pub(crate) args: &'static [CommandArg],
+    pub(crate) kind: CommandKind,
+}
+
+/// How well a command matched a query. Prefix matches always rank above subsequence
+/// matches in the filtered palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchRank {
+    Prefix,
+    Subsequence,
+}
+
+/// A command that survived filtering, paired with the rank it matched at.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CommandMatch {
+    pub(crate) spec: &'static CommandSpec,
+    pub(crate) rank: MatchRank,
+}
+
+const OPEN_ARGS: &[CommandArg] = &[CommandArg {
+    name: "url",
+    required: false,
+}];
+
+const NO_ARGS: &[CommandArg] = &[];
+
+const REGISTRY: &[CommandSpec] = &[
+    CommandSpec {
+        name: "open",
+        aliases: &[],
+        description: "open a URL in the current tab",
+        args: OPEN_ARGS,
+        kind: CommandKind::Open,
+    },
+    CommandSpec {
+        name: "reload",
+        aliases: &[],
+        description: "reload the current page",
+        args: NO_ARGS,
+        kind: CommandKind::Reload,
+    },
+    CommandSpec {
+        name: "back",
+        aliases: &[],
+        description: "go back to the previous page",
+        args: NO_ARGS,
+        kind: CommandKind::Back,
+    },
+    CommandSpec {
+        name: "help",
+        aliases: &[],
+        description: "list the available commands",
+        args: NO_ARGS,
+        kind: CommandKind::Help,
+    },
+    CommandSpec {
+        name: "quit",
+        aliases: &[],
+        description: "exit the browser",
+        args: NO_ARGS,
+        kind: CommandKind::Quit,
+    },
+    CommandSpec {
+        name: "settings",
+        aliases: &["config"],
+        description: "open browser settings (coming soon)",
+        args: NO_ARGS,
+        kind: CommandKind::Settings,
+    },
+];
+
+/// Every registered command, in registry order.
+pub(crate) fn registry() -> &'static [CommandSpec] {
+    REGISTRY
+}
+
+/// Resolve a bare command token (no leading `/`) to its spec by exact match on the
+/// canonical name or any alias. Case-sensitive.
+pub(crate) fn resolve(token: &str) -> Option<&'static CommandSpec> {
+    REGISTRY
+        .iter()
+        .find(|spec| spec.name == token || spec.aliases.contains(&token))
+}
+
+/// Filter the registry against a query (the text after `/`, possibly empty), returning
+/// ranked matches. Prefix matches come first in registry order, then subsequence matches
+/// in registry order. Each command appears at most once, taking its best rank.
+pub(crate) fn filter(query: &str) -> Vec<CommandMatch> {
+    if query.is_empty() {
+        return REGISTRY
+            .iter()
+            .map(|spec| CommandMatch {
+                spec,
+                rank: MatchRank::Prefix,
+            })
+            .collect();
+    }
+
+    let ranked: Vec<Option<MatchRank>> =
+        REGISTRY.iter().map(|spec| rank_spec(spec, query)).collect();
+
+    let mut matches: Vec<CommandMatch> = collect_by_rank(&ranked, MatchRank::Prefix);
+    matches.extend(collect_by_rank(&ranked, MatchRank::Subsequence));
+    matches
+}
+
+/// Best rank of a single spec against the query across its name and aliases.
+fn rank_spec(spec: &CommandSpec, query: &str) -> Option<MatchRank> {
+    let candidates = std::iter::once(spec.name).chain(spec.aliases.iter().copied());
+    let mut best: Option<MatchRank> = None;
+    for candidate in candidates {
+        if candidate.starts_with(query) {
+            return Some(MatchRank::Prefix);
+        }
+        if is_subsequence(query, candidate) {
+            best = Some(MatchRank::Subsequence);
+        }
+    }
+    best
+}
+
+/// Gather commands whose best rank equals `wanted`, preserving registry order.
+fn collect_by_rank(ranked: &[Option<MatchRank>], wanted: MatchRank) -> Vec<CommandMatch> {
+    REGISTRY
+        .iter()
+        .zip(ranked)
+        .filter_map(|(spec, rank)| match rank {
+            Some(rank) if *rank == wanted => Some(CommandMatch { spec, rank: *rank }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// True when every character of `query` appears in `candidate` in order, not necessarily
+/// adjacent.
+fn is_subsequence(query: &str, candidate: &str) -> bool {
+    let mut candidate_chars = candidate.chars();
+    query
+        .chars()
+        .all(|needle| candidate_chars.any(|current| current == needle))
+}
+
+#[cfg(test)]
+#[path = "command_tests.rs"]
+mod tests;
