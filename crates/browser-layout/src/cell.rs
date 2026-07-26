@@ -106,6 +106,16 @@ impl Cell {
     }
 }
 
+/// A single cell position in the buffer, addressed by column and row.
+///
+/// Used to pass the two ends of a linear text selection to `text_in_range` without
+/// coupling the layout stage to any terminal coordinate type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellPosition {
+    pub column: u16,
+    pub row: u16,
+}
+
 /// A fixed-size grid of terminal cells, addressed by column and row.
 ///
 /// This is the output contract of the layout stage: the layout engine writes into the
@@ -166,6 +176,75 @@ impl CellBuffer {
         }
     }
 
+    /// Extracts the text of a linear selection between two document coordinates.
+    ///
+    /// The two ends are given in any order; they are normalized into reading order
+    /// (earlier row first, then smaller column) and both ends are inclusive. On a single
+    /// row the selection spans the two columns; across rows it runs from the anchor
+    /// column to the end of its row, covers interior rows in full, and ends at the cursor
+    /// column on the final row. Each row's trailing blank cells are trimmed and rows are
+    /// joined with `'\n'`. Coordinates outside the buffer contribute nothing, and an
+    /// empty buffer or an empty range yields an empty string.
+    pub fn text_in_range(&self, anchor: CellPosition, cursor: CellPosition) -> String {
+        if self.width == 0 || self.height == 0 {
+            return String::new();
+        }
+        let (start, end) = Self::reading_order(anchor, cursor);
+        if start.row >= self.height {
+            return String::new();
+        }
+        let final_row = end.row.min(self.height - 1);
+        let mut rows_text: Vec<String> = Vec::new();
+        for row in start.row..=final_row {
+            let (first_column, last_column) = self.selected_columns(row, start, end);
+            rows_text.push(self.row_text(row, first_column, last_column));
+        }
+        rows_text.join("\n")
+    }
+
+    /// Orders two positions into `(start, end)` so that `start` is the earlier cell in
+    /// row-major reading order: earlier row first, then smaller column on the same row.
+    fn reading_order(anchor: CellPosition, cursor: CellPosition) -> (CellPosition, CellPosition) {
+        let anchor_is_first =
+            anchor.row < cursor.row || (anchor.row == cursor.row && anchor.column <= cursor.column);
+        if anchor_is_first {
+            return (anchor, cursor);
+        }
+        (cursor, anchor)
+    }
+
+    /// The inclusive column bounds selected on `row` for a selection from `start` to
+    /// `end`, clamped to the last column of the buffer.
+    fn selected_columns(&self, row: u16, start: CellPosition, end: CellPosition) -> (u16, u16) {
+        let last_column = self.width - 1;
+        if start.row == end.row {
+            return (start.column, end.column.min(last_column));
+        }
+        if row == start.row {
+            return (start.column, last_column);
+        }
+        if row == end.row {
+            return (0, end.column.min(last_column));
+        }
+        (0, last_column)
+    }
+
+    /// The text of `row` from `first_column` to `last_column` inclusive, with trailing
+    /// blank cells trimmed. Columns outside the buffer contribute nothing.
+    fn row_text(&self, row: u16, first_column: u16, last_column: u16) -> String {
+        let mut graphemes: Vec<&str> = Vec::new();
+        for column in first_column..=last_column {
+            let Some(cell) = self.cell_at(column, row) else {
+                continue;
+            };
+            graphemes.push(cell.grapheme());
+        }
+        while graphemes.last() == Some(&" ") {
+            graphemes.pop();
+        }
+        graphemes.concat()
+    }
+
     /// Returns the cell at `column`, `row`, or `None` when the position lies outside the
     /// buffer's dimensions.
     pub fn cell_at(&self, column: u16, row: u16) -> Option<&Cell> {
@@ -179,3 +258,7 @@ impl CellBuffer {
         self.cells.get(index)
     }
 }
+
+#[cfg(test)]
+#[path = "cell_tests.rs"]
+mod tests;

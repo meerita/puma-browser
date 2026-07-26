@@ -54,6 +54,45 @@ fn clear_transient_restores_the_rotating_hint() {
 }
 
 #[test]
+fn transient_message_overrides_the_rotating_hint() {
+    let mut state = UiState::new();
+    state.set_transient_message("copied 12 chars to clipboard".to_string(), Instant::now());
+    assert_eq!(state.current_hint(), "copied 12 chars to clipboard");
+    assert_eq!(
+        state.transient_message(),
+        Some("copied 12 chars to clipboard")
+    );
+}
+
+#[test]
+fn transient_message_clears_after_five_seconds() {
+    let mut state = UiState::new();
+    let stale = Instant::now() - Duration::from_secs(6);
+    state.set_transient_message("copied 3 chars to clipboard".to_string(), stale);
+    state.clear_transient_if_expired(Instant::now());
+    assert_eq!(state.current_hint(), READING_HINTS[0]);
+    assert_eq!(state.transient_message(), None);
+}
+
+#[test]
+fn transient_message_survives_before_five_seconds() {
+    let mut state = UiState::new();
+    let recent = Instant::now() - Duration::from_secs(2);
+    state.set_transient_message("copied 7 chars to clipboard".to_string(), recent);
+    state.clear_transient_if_expired(Instant::now());
+    assert_eq!(
+        state.transient_message(),
+        Some("copied 7 chars to clipboard")
+    );
+}
+
+#[test]
+fn new_state_has_no_transient_message() {
+    let state = UiState::new();
+    assert_eq!(state.transient_message(), None);
+}
+
+#[test]
 fn new_state_is_not_in_command_mode() {
     let state = UiState::new();
     assert!(!state.is_in_command_mode());

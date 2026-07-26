@@ -9,7 +9,7 @@ mod render;
 mod table;
 mod width;
 
-pub use cell::{Cell, CellBuffer, LinkSpan};
+pub use cell::{Cell, CellBuffer, CellPosition, LinkSpan};
 pub use error::LayoutError;
 pub use render::render_document;
 pub use width::{AmbiguousWidth, EmojiWidth, WidthConfig};

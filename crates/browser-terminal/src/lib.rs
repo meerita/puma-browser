@@ -3,10 +3,12 @@
 //! @layer terminal
 //! @created meerita <meerita@icloud.com>
 
+mod clipboard;
 mod command_bar;
 mod error;
 mod hints_bar;
 mod input;
+mod selection;
 mod title_bar;
 mod ui_state;
 mod view_state;
@@ -21,7 +23,7 @@ use std::time::Instant;
 
 use browser_core::{BrowserUrl, CoreError, NavigationController};
 use browser_css::{Color, Emphasis};
-use browser_layout::{Cell, CellBuffer, LinkSpan};
+use browser_layout::{Cell, CellBuffer, CellPosition, LinkSpan};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -41,14 +43,17 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
+use clipboard::{copy_to_clipboard, ClipboardOutcome};
 use command_bar::{
     command_cursor_col, compose_command_bar_command, compose_command_bar_loading,
     compose_command_bar_reading,
 };
 use hints_bar::compose_hints_bar;
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
+use selection::TextSelection;
 use title_bar::compose_title_bar;
 use ui_state::UiState;
+use unicode_segmentation::UnicodeSegmentation;
 use viewport::{max_scroll_offset, scroll_percentage, ScrollState};
 
 /// Rows consumed by the five fixed chrome zones (title + sep + cmd + sep + hints).
@@ -93,6 +98,19 @@ enum LoadState {
 pub struct TerminalApp {
     controller: NavigationController,
     view_state: ViewState,
+    settings: TerminalSettings,
+}
+
+/// Runtime settings for the terminal adapter, resolved once at startup.
+///
+/// `copy_on_select` gates the copy-on-release behavior: when it is false a drag still
+/// highlights text but releasing the button copies nothing and shows no confirmation.
+/// `force_osc52` routes every clipboard write through the OSC 52 escape path instead of
+/// the native clipboard, for terminals reached over SSH where the native path is absent.
+#[derive(Debug, Clone, Copy)]
+pub struct TerminalSettings {
+    pub copy_on_select: bool,
+    pub force_osc52: bool,
 }
 
 /// A cell buffer cached alongside the content width it was laid out for, so the page
@@ -103,10 +121,15 @@ struct CachedPage {
 }
 
 impl TerminalApp {
-    pub fn new(controller: NavigationController, view_state: ViewState) -> Self {
+    pub fn new(
+        controller: NavigationController,
+        view_state: ViewState,
+        settings: TerminalSettings,
+    ) -> Self {
         Self {
             controller,
             view_state,
+            settings,
         }
     }
 
@@ -129,7 +152,12 @@ impl TerminalApp {
     }
 
     async fn drive(&mut self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
+        let TerminalSettings {
+            copy_on_select,
+            force_osc52,
+        } = self.settings;
         let mut scroll = ScrollState::new();
+        let mut selection = TextSelection::new();
         let mut ui_state = UiState::new();
         let mut cache: Option<CachedPage> = None;
         let mut load_state = LoadState::Idle;
@@ -178,6 +206,7 @@ impl TerminalApp {
                 .map(|(frame, url, bytes)| (*frame, url.as_str(), *bytes));
             let page = cache.as_ref().map(|cached| &cached.buffer);
             let scroll_percent_val = scroll_percentage(scroll.offset(), max_offset);
+            let selection_range = selection.range();
             self.draw(
                 terminal,
                 page,
@@ -188,6 +217,7 @@ impl TerminalApp {
                 self.controller.script_count(),
                 self.controller.page_byte_count(),
                 loading_ref,
+                selection_range,
             )?;
 
             // Accumulators for state transitions; populated inside the select! arms and
@@ -271,12 +301,17 @@ impl TerminalApp {
                                 }
                             }
                             Event::Mouse(mouse) => {
-                                handle_mouse_click(
+                                handle_mouse_event(
                                     mouse,
                                     cache.as_ref().map(|cached| &cached.buffer),
                                     scroll.offset(),
                                     BODY_AREA_TOP_ROW,
+                                    &mut selection,
                                     &mut navigate_to_url,
+                                    &mut ui_state,
+                                    now,
+                                    copy_on_select,
+                                    force_osc52,
                                 );
                             }
                             _ => {}
@@ -286,10 +321,12 @@ impl TerminalApp {
                 }
             }
 
-            // Apply completed load — borrow on load_state has ended.
+            // Apply completed load — borrow on load_state has ended. A new page invalidates
+            // any highlight held over document coordinates from the previous page.
             if let Some((ctrl, result)) = completed_load {
                 self.controller = ctrl;
                 load_state = LoadState::Idle;
+                selection.clear();
                 match result {
                     Ok(()) => {
                         self.view_state = ViewState::Page;
@@ -421,6 +458,7 @@ impl TerminalApp {
         script_count: usize,
         page_byte_count: usize,
         loading: Option<(usize, &str, usize)>,
+        selection_range: Option<(CellPosition, CellPosition)>,
     ) -> Result<(), TerminalError> {
         terminal
             .draw(|frame| {
@@ -435,6 +473,7 @@ impl TerminalApp {
                     script_count,
                     page_byte_count,
                     loading,
+                    selection_range,
                 )
             })
             .map_err(|_| TerminalError::RenderFailed)?;
@@ -462,6 +501,7 @@ fn draw_frame(
     script_count: usize,
     page_byte_count: usize,
     loading: Option<(usize, &str, usize)>,
+    selection_range: Option<(CellPosition, CellPosition)>,
 ) {
     let terminal_width = frame.area().width;
     let chunks = Layout::vertical([
@@ -481,7 +521,15 @@ fn draw_frame(
         focused_url,
         ui_state,
     };
-    draw_body(frame, view, page, chunks[0], scroll_offset, &link_context);
+    draw_body(
+        frame,
+        view,
+        page,
+        chunks[0],
+        scroll_offset,
+        &link_context,
+        selection_range,
+    );
 
     draw_separator(frame, chunks[1]);
 
@@ -513,7 +561,7 @@ fn draw_frame(
     );
     draw_chrome_row(frame, chunks[4], &title_text);
 
-    let hints_text = compose_hints_bar(None, terminal_width);
+    let hints_text = compose_hints_bar(ui_state.transient_message(), terminal_width);
     frame.render_widget(Paragraph::new(hints_text), chunks[5]);
 }
 
@@ -535,6 +583,7 @@ fn chrome_row_style() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_body(
     frame: &mut Frame,
     view: &ViewState,
@@ -542,6 +591,7 @@ fn draw_body(
     area: Rect,
     scroll_offset: u16,
     link_context: &LinkRenderContext<'_>,
+    selection_range: Option<(CellPosition, CellPosition)>,
 ) {
     let padded = Rect {
         x: area.x.saturating_add(CONTENT_PADDING),
@@ -550,12 +600,21 @@ fn draw_body(
         height: area.height,
     };
     match view {
-        ViewState::Page => draw_page(frame, page, area, padded, scroll_offset, link_context),
+        ViewState::Page => draw_page(
+            frame,
+            page,
+            area,
+            padded,
+            scroll_offset,
+            link_context,
+            selection_range,
+        ),
         ViewState::Blank => draw_message(frame, padded, BLANK_PLACEHOLDER),
         ViewState::Error(message) => draw_message(frame, padded, message),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_page(
     frame: &mut Frame,
     page: Option<&CellBuffer>,
@@ -563,6 +622,7 @@ fn draw_page(
     blit_area: Rect,
     scroll_offset: u16,
     link_context: &LinkRenderContext<'_>,
+    selection_range: Option<(CellPosition, CellPosition)>,
 ) {
     frame.render_widget(Clear, clear_area);
     let Some(cells) = page else {
@@ -570,10 +630,19 @@ fn draw_page(
     };
     let buffer = frame.buffer_mut();
     for row in 0..blit_area.height {
-        blit_row(buffer, blit_area, cells, scroll_offset, row, link_context);
+        blit_row(
+            buffer,
+            blit_area,
+            cells,
+            scroll_offset,
+            row,
+            link_context,
+            selection_range,
+        );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn blit_row(
     buffer: &mut Buffer,
     area: Rect,
@@ -581,10 +650,20 @@ fn blit_row(
     scroll_offset: u16,
     row: u16,
     link_context: &LinkRenderContext<'_>,
+    selection_range: Option<(CellPosition, CellPosition)>,
 ) {
     let source_row = scroll_offset.saturating_add(row);
     for column in 0..area.width {
-        copy_cell(buffer, area, cells, column, row, source_row, link_context);
+        copy_cell(
+            buffer,
+            area,
+            cells,
+            column,
+            row,
+            source_row,
+            link_context,
+            selection_range,
+        );
     }
 }
 
@@ -600,6 +679,7 @@ fn copy_cell(
     row: u16,
     source_row: u16,
     link_context: &LinkRenderContext<'_>,
+    selection_range: Option<(CellPosition, CellPosition)>,
 ) {
     let Some(cell) = cells.cell_at(column, source_row) else {
         return;
@@ -609,7 +689,37 @@ fn copy_cell(
         return;
     };
     target.set_symbol(cell.grapheme());
-    target.set_style(link_style(cell, column, source_row, cells, link_context));
+    let mut style = link_style(cell, column, source_row, cells, link_context);
+    if cell_is_selected(column, source_row, selection_range) {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    target.set_style(style);
+}
+
+/// Whether the cell at `column`, `row` falls inside the linear selection span. Interior
+/// rows are fully covered; the first row runs from its start column to the row end and the
+/// last row from column zero to its end column, matching how the text is extracted.
+fn cell_is_selected(
+    column: u16,
+    row: u16,
+    selection_range: Option<(CellPosition, CellPosition)>,
+) -> bool {
+    let Some((start, end)) = selection_range else {
+        return false;
+    };
+    if row < start.row || row > end.row {
+        return false;
+    }
+    if start.row == end.row {
+        return column >= start.column && column <= end.column;
+    }
+    if row == start.row {
+        return column >= start.column;
+    }
+    if row == end.row {
+        return column <= end.column;
+    }
+    true
 }
 
 /// The link colouring applied on top of the cascaded cell style during blit.
@@ -914,36 +1024,157 @@ fn navigate_back(
     ui_state.exit_link_navigation();
 }
 
-/// Resolves a left-click to a link URL to navigate, if the click landed on a link span.
-/// The screen row maps to a buffer row through the scroll offset, and the screen column
-/// is shifted back by the content padding so it aligns with buffer columns.
-fn handle_mouse_click(
+/// Dispatches a left-button mouse gesture over the page body into a text selection.
+///
+/// A press begins a selection; a drag extends it, clamped to the buffer so dragging into
+/// the chrome or past the content never leaves the grid; a release either keeps the
+/// highlight (the gesture moved, so it is a selection) or activates a link (the gesture did
+/// not move, so it is a click). Wheel and other events are ignored so scrolling is
+/// untouched.
+#[allow(clippy::too_many_arguments)]
+fn handle_mouse_event(
     mouse: MouseEvent,
     buffer: Option<&CellBuffer>,
     scroll_offset: u16,
     body_area_top_row: u16,
+    selection: &mut TextSelection,
     navigate_to_url: &mut Option<String>,
+    ui_state: &mut UiState,
+    now: Instant,
+    copy_on_select: bool,
+    force_osc52: bool,
 ) {
-    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-        return;
-    }
     let Some(buffer) = buffer else {
         return;
     };
-    let Some(document_row) = mouse
-        .row
-        .checked_sub(body_area_top_row)
-        .and_then(|row| row.checked_add(scroll_offset))
-    else {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(anchor) = document_coordinate(&mouse, scroll_offset, body_area_top_row) else {
+                return;
+            };
+            selection.begin(anchor);
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if !selection.is_dragging() {
+                return;
+            }
+            let cursor =
+                clamped_document_coordinate(&mouse, buffer, scroll_offset, body_area_top_row);
+            selection.update(cursor);
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if selection.has_moved() {
+                if copy_on_select {
+                    copy_selection(buffer, selection, ui_state, now, force_osc52);
+                }
+                return;
+            }
+            activate_link_under_pointer(
+                &mouse,
+                buffer,
+                scroll_offset,
+                body_area_top_row,
+                navigate_to_url,
+            );
+            selection.clear();
+        }
+        _ => {}
+    }
+}
+
+/// Copies the highlighted selection to the clipboard on button release. Extracts the
+/// selection text, skips a zero-length or whitespace-only selection, and on a successful
+/// clipboard write shows the `copied N chars to clipboard` confirmation for five seconds.
+/// The highlight is left in place so the user sees what was copied until the next press.
+fn copy_selection(
+    buffer: &CellBuffer,
+    selection: &TextSelection,
+    ui_state: &mut UiState,
+    now: Instant,
+    force_osc52: bool,
+) {
+    let Some((start, end)) = selection.range() else {
         return;
     };
-    let Some(clicked_column) = mouse.column.checked_sub(CONTENT_PADDING) else {
+    let text = buffer.text_in_range(start, end);
+    if text.trim().is_empty() {
+        return;
+    }
+    if !clipboard_write_succeeded(copy_to_clipboard(&text, force_osc52)) {
+        return;
+    }
+    ui_state.set_transient_message(copied_message(&text), now);
+}
+
+/// Whether a clipboard write reported success through either the native path or OSC 52.
+fn clipboard_write_succeeded(outcome: ClipboardOutcome) -> bool {
+    matches!(
+        outcome,
+        ClipboardOutcome::CopiedNative | ClipboardOutcome::CopiedOsc52
+    )
+}
+
+/// The copy confirmation for `text`: `copied N chars to clipboard`, where `N` counts
+/// grapheme clusters so a multi-byte character or a combined emoji counts as one. Carries
+/// only the count; the copied text itself never appears in the message.
+fn copied_message(text: &str) -> String {
+    let grapheme_count = text.graphemes(true).count();
+    format!("copied {grapheme_count} chars to clipboard")
+}
+
+/// Maps a mouse position to a document coordinate: the screen row maps to a buffer row
+/// through the scroll offset and the screen column is shifted back by the content padding.
+/// Returns `None` when the pointer is above the body or inside the left padding.
+fn document_coordinate(
+    mouse: &MouseEvent,
+    scroll_offset: u16,
+    body_area_top_row: u16,
+) -> Option<CellPosition> {
+    let row = mouse
+        .row
+        .checked_sub(body_area_top_row)
+        .and_then(|row| row.checked_add(scroll_offset))?;
+    let column = mouse.column.checked_sub(CONTENT_PADDING)?;
+    Some(CellPosition { column, row })
+}
+
+/// Maps a mouse position to a document coordinate clamped to the buffer's last cell, so a
+/// drag into the chrome or past the content still yields a valid in-buffer cursor.
+fn clamped_document_coordinate(
+    mouse: &MouseEvent,
+    buffer: &CellBuffer,
+    scroll_offset: u16,
+    body_area_top_row: u16,
+) -> CellPosition {
+    let row = mouse
+        .row
+        .saturating_sub(body_area_top_row)
+        .saturating_add(scroll_offset);
+    let column = mouse.column.saturating_sub(CONTENT_PADDING);
+    let last_row = buffer.height().saturating_sub(1);
+    let last_column = buffer.width().saturating_sub(1);
+    CellPosition {
+        column: column.min(last_column),
+        row: row.min(last_row),
+    }
+}
+
+/// Sets `navigate_to_url` when the pointer rests on a link span, leaving it untouched
+/// otherwise. Used for a clean click, where a release with no movement activates a link.
+fn activate_link_under_pointer(
+    mouse: &MouseEvent,
+    buffer: &CellBuffer,
+    scroll_offset: u16,
+    body_area_top_row: u16,
+    navigate_to_url: &mut Option<String>,
+) {
+    let Some(pointer) = document_coordinate(mouse, scroll_offset, body_area_top_row) else {
         return;
     };
     let clicked = buffer
         .links()
         .iter()
-        .find(|&span| span_contains(span, document_row, clicked_column));
+        .find(|&span| span_contains(span, pointer.row, pointer.column));
     if let Some(span) = clicked {
         *navigate_to_url = Some(span.url.clone());
     }
@@ -979,3 +1210,7 @@ fn leave_alternate_screen_and_raw_mode() {
     let _ = execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

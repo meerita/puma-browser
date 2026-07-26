@@ -1,5 +1,5 @@
 // @file crates/browser-cli/src/run_mode_tests.rs
-// @description Verifies argument resolution selects MCP, a URL or file load target, a blank page, or an error.
+// @description Verifies argument resolution and environment-driven terminal settings parsing.
 // @layer cli
 // @created meerita <meerita@icloud.com>
 
@@ -7,7 +7,7 @@ use std::path::Path;
 
 use tempfile::tempdir;
 
-use super::{resolve_mode, ResolvedMode};
+use super::{copy_on_select_enabled, force_osc52_enabled, resolve_mode, ResolvedMode};
 
 fn resolved_in(working_directory: &Path, arguments: &[&str]) -> ResolvedMode {
     resolve_mode(
@@ -116,4 +116,35 @@ fn mcp_keyword_wins_over_a_later_url_argument() {
         resolved_for(&["mcp", "https://example.com"]),
         ResolvedMode::Mcp
     ));
+}
+
+#[test]
+fn copy_on_select_is_enabled_when_the_variable_is_unset() {
+    assert!(copy_on_select_enabled(None));
+}
+
+#[test]
+fn copy_on_select_is_disabled_by_zero_or_false() {
+    assert!(!copy_on_select_enabled(Some("0")));
+    assert!(!copy_on_select_enabled(Some("false")));
+}
+
+#[test]
+fn copy_on_select_stays_enabled_for_any_other_value() {
+    assert!(copy_on_select_enabled(Some("1")));
+    assert!(copy_on_select_enabled(Some("true")));
+    assert!(copy_on_select_enabled(Some("")));
+}
+
+#[test]
+fn force_osc52_is_off_when_the_variable_is_unset() {
+    assert!(!force_osc52_enabled(None));
+}
+
+#[test]
+fn force_osc52_is_on_only_for_one_or_true() {
+    assert!(force_osc52_enabled(Some("1")));
+    assert!(force_osc52_enabled(Some("true")));
+    assert!(!force_osc52_enabled(Some("0")));
+    assert!(!force_osc52_enabled(Some("yes")));
 }

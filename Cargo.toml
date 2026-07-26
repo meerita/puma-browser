@@ -21,7 +21,7 @@ strip = true
 panic = "abort"
 
 [workspace.package]
-version = "0.18.0"
+version = "0.19.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/meerita/puma-browser"
@@ -33,6 +33,10 @@ tokio = { version = "1", features = ["full"] }
 # Terminal UI
 ratatui = "0.30"
 crossterm = "0.29"
+
+# Clipboard
+arboard = "3"
+base64 = "0.23"
 
 # HTTP / TLS
 reqwest = { version = "0.13", features = ["rustls", "stream", "gzip", "brotli"], default-features = false }
