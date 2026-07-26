@@ -7,7 +7,7 @@ use browser_css::{cascade, computed_run_style, Color, DisplayMode, TextStyle, Te
 use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::cell::{Cell, CellBuffer, LinkSpan};
+use crate::cell::{AnchorSpan, Cell, CellBuffer, LinkSpan};
 use crate::error::LayoutError;
 use crate::table::render_table;
 use crate::width::{emoji_replacement, grapheme_columns, WidthConfig};
@@ -205,6 +205,11 @@ pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
         if let Some(url) = &run.link {
             for cell in &mut cells[start..] {
                 cell.set_link_url(url.clone());
+            }
+        }
+        if !run.anchors.is_empty() {
+            if let Some(first) = cells.get_mut(start) {
+                first.set_anchor_names(run.anchors.clone());
             }
         }
     }
@@ -575,13 +580,38 @@ fn build_buffer(
     width_config: &WidthConfig,
 ) -> Result<CellBuffer, LayoutError> {
     let links = extract_link_spans(&rows, width_config);
+    let anchors = extract_anchor_spans(&rows);
     let height = row_height(rows.len())?;
     let mut buffer = CellBuffer::new(width, height);
     for (row_index, row) in rows.into_iter().enumerate() {
         write_row(&mut buffer, row_index, row, width_config);
     }
     buffer.set_links(links);
+    buffer.set_anchors(anchors);
     Ok(buffer)
+}
+
+/// Scan the laid-out rows and record one [`AnchorSpan`] per anchor name marked on a cell.
+///
+/// An anchor is marked only on the first grapheme of its run, so a wrapped run records the
+/// row of its first line. Rows are scanned in order, so the spans come out in ascending row
+/// order and the first anchor of a shared name wins when a fragment is later resolved.
+fn extract_anchor_spans(rows: &[Vec<Cell>]) -> Vec<AnchorSpan> {
+    let mut spans: Vec<AnchorSpan> = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let Ok(row_u16) = u16::try_from(row_index) else {
+            continue;
+        };
+        for cell in row {
+            for name in cell.anchor_names() {
+                spans.push(AnchorSpan {
+                    name: name.clone(),
+                    row: row_u16,
+                });
+            }
+        }
+    }
+    spans
 }
 
 /// Scan the laid-out rows and record one [`LinkSpan`] per contiguous run of cells that
