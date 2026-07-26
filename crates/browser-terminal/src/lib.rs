@@ -11,6 +11,7 @@ mod command_bar;
 mod error;
 mod hints_bar;
 mod input;
+mod palette_menu;
 mod selection;
 mod title_bar;
 mod ui_state;
@@ -40,6 +41,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color as TerminalColor, Modifier, Style};
+use ratatui::text::Line;
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::watch;
@@ -54,6 +56,7 @@ use command_bar::{
 };
 use hints_bar::compose_hints_bar;
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
+use palette_menu::{compose_palette_menu, MENU_MAX_ROWS};
 use selection::TextSelection;
 use title_bar::compose_title_bar;
 use ui_state::UiState;
@@ -669,6 +672,8 @@ fn draw_frame(
         selection_range,
     );
 
+    draw_palette_popup(frame, chunks[0], ui_state);
+
     draw_separator(frame, chunks[1]);
 
     if let Some((spinner_frame, loading_url, bytes_received)) = loading {
@@ -701,6 +706,57 @@ fn draw_frame(
 
     let hints_text = compose_hints_bar(ui_state.transient_message(), terminal_width);
     frame.render_widget(Paragraph::new(hints_text), chunks[5]);
+}
+
+/// Draws the slash-command palette popup over the bottom of the content area, its last
+/// row sitting just above the separator and command bar. Renders nothing when the palette
+/// is inactive or empty, so a stale list can never linger. The popup shows only local,
+/// static command names and descriptions through the normal widget path, never page bytes.
+fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState) {
+    if !ui_state.is_palette_active() {
+        return;
+    }
+    let matches = ui_state.palette_matches();
+    if matches.is_empty() || content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let max_rows = MENU_MAX_ROWS.min(content_area.height as usize);
+    let menu = compose_palette_menu(
+        matches,
+        ui_state.palette_selected(),
+        content_area.width,
+        max_rows,
+    );
+    if menu.rows.is_empty() {
+        return;
+    }
+    let popup_height = menu.rows.len() as u16;
+    let popup_area = Rect {
+        x: content_area.x,
+        y: content_area.y + content_area.height - popup_height,
+        width: content_area.width,
+        height: popup_height,
+    };
+    let lines: Vec<Line> = menu
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, row_text)| {
+            let style = palette_row_style(row_index == menu.selected_row);
+            Line::styled(row_text.clone(), style)
+        })
+        .collect();
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(Paragraph::new(lines), popup_area);
+}
+
+/// Style for a palette row: the selected row is reversed to match the chrome bars; other
+/// rows render as plain text over the cleared popup area.
+fn palette_row_style(is_selected: bool) -> Style {
+    if is_selected {
+        return Style::default().add_modifier(Modifier::REVERSED);
+    }
+    Style::default()
 }
 
 /// Renders a reversed-style chrome row (title bar or hints bar).
