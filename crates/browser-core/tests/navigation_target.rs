@@ -5,14 +5,23 @@
 
 use std::path::Path;
 
-use browser_core::{classify_navigation, BrowserUrl, CoreError, NavigationTarget};
+use browser_core::{classify_navigation, BrowserUrl, CoreError, NavigationTarget, TrackingUnwrap};
 
 fn url(input: &str) -> BrowserUrl {
     BrowserUrl::parse(input).expect("test URL must parse")
 }
 
 fn classify(current: Option<&BrowserUrl>, target: &str) -> NavigationTarget {
-    classify_navigation(current, target, Path::new("."))
+    classify_navigation(current, target, Path::new("."), TrackingUnwrap::Disabled)
+        .expect("classification must succeed for this case")
+}
+
+fn classify_with_unwrap(
+    current: Option<&BrowserUrl>,
+    target: &str,
+    tracking_unwrap: TrackingUnwrap,
+) -> NavigationTarget {
+    classify_navigation(current, target, Path::new("."), tracking_unwrap)
         .expect("classification must succeed for this case")
 }
 
@@ -95,7 +104,7 @@ fn an_absolute_url_with_no_current_page_is_a_fetch() {
 
 #[test]
 fn a_bare_fragment_with_no_current_page_fails_to_navigate() {
-    let error = classify_navigation(None, "#section", Path::new("."))
+    let error = classify_navigation(None, "#section", Path::new("."), TrackingUnwrap::Enabled)
         .expect_err("a bare fragment cannot resolve without a current page");
 
     assert!(matches!(error, CoreError::NavigationFailed));
@@ -104,8 +113,97 @@ fn a_bare_fragment_with_no_current_page_fails_to_navigate() {
 #[test]
 fn an_unsupported_scheme_returns_a_network_error() {
     let current = url("https://example.test/page");
-    let error = classify_navigation(Some(&current), "ftp://example.test/file", Path::new("."))
-        .expect_err("an unsupported scheme must be rejected");
+    let error = classify_navigation(
+        Some(&current),
+        "ftp://example.test/file",
+        Path::new("."),
+        TrackingUnwrap::Disabled,
+    )
+    .expect_err("an unsupported scheme must be rejected");
 
     assert!(matches!(error, CoreError::Network(_)));
+}
+
+#[test]
+fn an_enabled_unwrap_navigates_to_the_decoded_destination_not_the_wrapper() {
+    let current = url("https://duckduckgo.com/");
+    let target = classify_with_unwrap(
+        Some(&current),
+        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2F",
+        TrackingUnwrap::Enabled,
+    );
+
+    let (base, fragment) = fetch_parts(target);
+    assert_eq!(base, "https://example.test/");
+    assert_eq!(fragment, None);
+}
+
+#[test]
+fn a_disabled_unwrap_navigates_to_the_wrapper_url() {
+    let current = url("https://duckduckgo.com/");
+    let target = classify_with_unwrap(
+        Some(&current),
+        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2F",
+        TrackingUnwrap::Disabled,
+    );
+
+    let (base, _fragment) = fetch_parts(target);
+    assert_eq!(
+        base,
+        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2F"
+    );
+}
+
+#[test]
+fn an_unwrapped_file_destination_falls_back_to_the_wrapper() {
+    let current = url("https://duckduckgo.com/");
+    let target = classify_with_unwrap(
+        Some(&current),
+        "https://duckduckgo.com/l/?uddg=file%3A%2F%2F%2Fetc%2Fpasswd",
+        TrackingUnwrap::Enabled,
+    );
+
+    let (base, _fragment) = fetch_parts(target);
+    assert_eq!(
+        base,
+        "https://duckduckgo.com/l/?uddg=file%3A%2F%2F%2Fetc%2Fpasswd"
+    );
+}
+
+#[test]
+fn an_unwrapped_downgrade_to_http_from_https_falls_back_to_the_wrapper() {
+    let current = url("https://duckduckgo.com/");
+    let target = classify_with_unwrap(
+        Some(&current),
+        "https://duckduckgo.com/l/?uddg=http%3A%2F%2Fexample.test%2F",
+        TrackingUnwrap::Enabled,
+    );
+
+    let (base, _fragment) = fetch_parts(target);
+    assert_eq!(
+        base,
+        "https://duckduckgo.com/l/?uddg=http%3A%2F%2Fexample.test%2F"
+    );
+}
+
+#[test]
+fn an_enabled_unwrap_leaves_a_non_wrapper_url_unchanged() {
+    let current = url("https://example.test/page");
+    let target = classify_with_unwrap(
+        Some(&current),
+        "https://example.test/other",
+        TrackingUnwrap::Enabled,
+    );
+
+    let (base, fragment) = fetch_parts(target);
+    assert_eq!(base, "https://example.test/other");
+    assert_eq!(fragment, None);
+}
+
+#[test]
+fn an_enabled_unwrap_still_treats_a_bare_fragment_as_a_same_page_anchor() {
+    let current = url("https://example.test/page");
+    let target = classify_with_unwrap(Some(&current), "#section", TrackingUnwrap::Enabled);
+
+    assert_eq!(same_page_fragment(target), Some("section".to_string()));
 }

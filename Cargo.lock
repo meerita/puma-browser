@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "browser-cli"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "browser-core",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "browser-core"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "browser-css",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "browser-css"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "browser-html",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "browser-html"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "browser-layout"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "browser-css",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "browser-mcp"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "browser-core",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "browser-network"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -338,18 +338,19 @@ dependencies = [
 
 [[package]]
 name = "browser-privacy"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "browser-storage",
  "serde",
  "thiserror 2.0.19",
  "tracing",
+ "url",
 ]
 
 [[package]]
 name = "browser-storage"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -362,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "browser-terminal"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "arboard",

@@ -126,11 +126,14 @@ pub struct TerminalApp {
 /// the native clipboard, for terminals reached over SSH where the native path is absent.
 /// `search_enabled` gates the `/search` command: when it is false the command is hidden
 /// from the palette and rejected on dispatch.
+/// `unwrap_tracking` gates tracking-redirect unwrapping: when it is true a navigation to a
+/// known tracker wrapper goes straight to the decoded destination instead of the wrapper.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalSettings {
     pub copy_on_select: bool,
     pub force_osc52: bool,
     pub search_enabled: bool,
+    pub unwrap_tracking: bool,
 }
 
 /// A cell buffer cached alongside the content width it was laid out for, so the page
@@ -169,6 +172,16 @@ impl TerminalApp {
         &self.controller
     }
 
+    /// The tracking-unwrap mode both `classify_navigation` call sites pass, derived from the
+    /// resolved `unwrap_tracking` setting so the two paths never diverge.
+    fn tracking_unwrap_mode(&self) -> browser_core::TrackingUnwrap {
+        if self.settings.unwrap_tracking {
+            browser_core::TrackingUnwrap::Enabled
+        } else {
+            browser_core::TrackingUnwrap::Disabled
+        }
+    }
+
     /// Runs the terminal event loop until the user quits.
     ///
     /// Enters the alternate screen and raw mode on start and restores the terminal on
@@ -187,6 +200,7 @@ impl TerminalApp {
             copy_on_select,
             force_osc52,
             search_enabled,
+            unwrap_tracking: _,
         } = self.settings;
         let mut scroll = ScrollState::new();
         let mut selection = TextSelection::new();
@@ -477,7 +491,12 @@ impl TerminalApp {
         max_offset: u16,
         now: Instant,
     ) -> CommandOutcome {
-        match browser_core::classify_navigation(self.controller.current_url(), input, working_dir) {
+        match browser_core::classify_navigation(
+            self.controller.current_url(),
+            input,
+            working_dir,
+            self.tracking_unwrap_mode(),
+        ) {
             Err(_) => {
                 self.view_state = ViewState::Error(format!("Not a valid address: {input}"));
                 *cache = None;
@@ -725,6 +744,7 @@ impl TerminalApp {
             self.controller.current_url(),
             &link_url,
             working_dir,
+            self.tracking_unwrap_mode(),
         ) {
             Err(_) => {
                 self.view_state = ViewState::Error("Cannot open this link".to_string());
