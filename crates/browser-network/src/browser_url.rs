@@ -48,11 +48,7 @@ impl BrowserUrl {
     /// the parameter is appended through `query_pairs_mut`, which percent-encodes spaces and
     /// reserved characters so the value cannot alter the URL structure. Used to turn a
     /// user's search text into a results URL without hand-building a query string.
-    pub fn with_query_parameter(
-        base: &str,
-        name: &str,
-        value: &str,
-    ) -> Result<Self, NetworkError> {
+    pub fn with_query_parameter(base: &str, name: &str, value: &str) -> Result<Self, NetworkError> {
         let mut parsed = parse_with_default_scheme(base.trim())?;
         let scheme = parsed.scheme();
         if !ALLOWED_SCHEMES.contains(&scheme) {

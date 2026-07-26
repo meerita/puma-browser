@@ -13,7 +13,8 @@ fn default_engine_builds_a_duckduckgo_lite_result_url() {
         .expect("a simple query must build a result URL");
     assert_eq!(url.host_str(), Some("lite.duckduckgo.com"));
     assert!(
-        url.as_str().starts_with("https://lite.duckduckgo.com/lite/?q="),
+        url.as_str()
+            .starts_with("https://lite.duckduckgo.com/lite/?q="),
         "got {}",
         url.as_str()
     );
