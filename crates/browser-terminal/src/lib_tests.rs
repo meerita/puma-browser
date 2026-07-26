@@ -76,6 +76,8 @@ fn press_begins_a_selection_without_a_range() {
         &mut navigate_to_url,
         &mut UiState::new(),
         Instant::now(),
+        true,
+        false,
     );
     assert!(selection.is_dragging());
     assert!(!selection.has_moved());
@@ -104,6 +106,8 @@ fn press_drag_release_keeps_the_highlighted_range() {
             &mut navigate_to_url,
             &mut UiState::new(),
             Instant::now(),
+            true,
+            false,
         );
     }
     assert!(selection.has_moved());
@@ -115,6 +119,46 @@ fn press_drag_release_keeps_the_highlighted_range() {
         ))
     );
     assert_eq!(navigate_to_url, None);
+}
+
+#[test]
+fn release_with_copy_disabled_keeps_the_highlight_and_sets_no_message() {
+    let buffer = CellBuffer::new(10, 6);
+    let mut selection = TextSelection::new();
+    let mut navigate_to_url = None;
+    let mut ui_state = UiState::new();
+    let now = Instant::now();
+    let steps = [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ];
+    let columns = [3, 7, 7];
+    for (kind, column) in steps.into_iter().zip(columns) {
+        handle_mouse_event(
+            mouse(kind, column, 2),
+            Some(&buffer),
+            0,
+            BODY_AREA_TOP_ROW,
+            &mut selection,
+            &mut navigate_to_url,
+            &mut ui_state,
+            now,
+            false,
+            false,
+        );
+    }
+    // The drag still produced a highlighted range, but with copy disabled the release
+    // copies nothing and shows no confirmation.
+    assert!(selection.has_moved());
+    assert_eq!(
+        selection.range(),
+        Some((
+            position(3 - CONTENT_PADDING, 2),
+            position(7 - CONTENT_PADDING, 2)
+        ))
+    );
+    assert_eq!(ui_state.transient_message(), None);
 }
 
 #[test]
@@ -131,6 +175,8 @@ fn press_release_without_movement_clears_the_selection() {
         &mut navigate_to_url,
         &mut UiState::new(),
         Instant::now(),
+        true,
+        false,
     );
     handle_mouse_event(
         mouse(MouseEventKind::Up(MouseButton::Left), 5, 2),
@@ -141,6 +187,8 @@ fn press_release_without_movement_clears_the_selection() {
         &mut navigate_to_url,
         &mut UiState::new(),
         Instant::now(),
+        true,
+        false,
     );
     assert!(!selection.is_dragging());
     assert_eq!(selection.range(), None);
@@ -161,6 +209,8 @@ fn a_drag_without_a_prior_press_is_ignored() {
         &mut navigate_to_url,
         &mut UiState::new(),
         Instant::now(),
+        true,
+        false,
     );
     assert!(!selection.is_dragging());
     assert_eq!(selection.range(), None);
@@ -180,6 +230,8 @@ fn wheel_scroll_events_do_not_touch_the_selection() {
         &mut navigate_to_url,
         &mut UiState::new(),
         Instant::now(),
+        true,
+        false,
     );
     handle_mouse_event(
         mouse(MouseEventKind::ScrollDown, 5, 2),
@@ -190,6 +242,8 @@ fn wheel_scroll_events_do_not_touch_the_selection() {
         &mut navigate_to_url,
         &mut UiState::new(),
         Instant::now(),
+        true,
+        false,
     );
     assert!(selection.is_dragging());
     assert!(!selection.has_moved());

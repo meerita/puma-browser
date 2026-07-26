@@ -9,10 +9,17 @@ use anyhow::{anyhow, Result};
 use browser_core::NavigationController;
 use browser_mcp::McpServer;
 use browser_network::BrowserUrl;
-use browser_terminal::{TerminalApp, TerminalError, ViewState};
+use browser_terminal::{TerminalApp, TerminalError, TerminalSettings, ViewState};
 
 /// The mode keyword that selects the stdio MCP server instead of the terminal.
 const MCP_MODE_KEYWORD: &str = "mcp";
+
+/// Environment variable that disables copy-on-select when set to `0` or `false`.
+const COPY_ON_SELECT_ENV: &str = "PUMA_COPY_ON_SELECT";
+
+/// Environment variable that forces clipboard writes through OSC 52 when set to `1` or
+/// `true`, for terminals reached over SSH where the native clipboard path is absent.
+const CLIPBOARD_OSC52_ENV: &str = "PUMA_CLIPBOARD_OSC52";
 
 /// The mode keyword that selects the terminal adapter; kept for symmetry with `mcp`.
 const TERMINAL_MODE_KEYWORD: &str = "terminal";
@@ -127,11 +134,44 @@ async fn load_initial_view(controller: &mut NavigationController, url: BrowserUr
 }
 
 async fn run_terminal_app(controller: NavigationController, view_state: ViewState) -> Result<()> {
-    let mut app = TerminalApp::new(controller, view_state);
+    let settings = terminal_settings_from_env();
+    let mut app = TerminalApp::new(controller, view_state, settings);
     // Surface only the adapter's safe status message, never raw error detail.
     app.run()
         .await
         .map_err(|error| anyhow!(error.user_message()))
+}
+
+/// Reads the terminal settings from the environment once, at terminal startup.
+///
+/// Only the two documented variables are consulted; nothing here can enable a
+/// remote-triggered behavior, and a disabled `copy_on_select` fully suppresses the
+/// clipboard write in the adapter.
+fn terminal_settings_from_env() -> TerminalSettings {
+    let copy_on_select = copy_on_select_enabled(std::env::var(COPY_ON_SELECT_ENV).ok().as_deref());
+    let force_osc52 = force_osc52_enabled(std::env::var(CLIPBOARD_OSC52_ENV).ok().as_deref());
+    TerminalSettings {
+        copy_on_select,
+        force_osc52,
+    }
+}
+
+/// Whether copy-on-select is enabled given the raw value of `PUMA_COPY_ON_SELECT`.
+///
+/// Enabled by default and when the variable is unset; only an explicit `0` or `false`
+/// turns it off. Taking the value as an argument keeps this testable without touching
+/// the real process environment.
+fn copy_on_select_enabled(value: Option<&str>) -> bool {
+    !matches!(value, Some("0") | Some("false"))
+}
+
+/// Whether clipboard writes are forced through OSC 52 given the raw value of
+/// `PUMA_CLIPBOARD_OSC52`.
+///
+/// Off by default and when the variable is unset; only an explicit `1` or `true` enables
+/// it. Taking the value as an argument keeps this testable without the real environment.
+fn force_osc52_enabled(value: Option<&str>) -> bool {
+    matches!(value, Some("1") | Some("true"))
 }
 
 async fn run_mcp() -> Result<()> {

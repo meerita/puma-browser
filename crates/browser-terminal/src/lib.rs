@@ -98,6 +98,19 @@ enum LoadState {
 pub struct TerminalApp {
     controller: NavigationController,
     view_state: ViewState,
+    settings: TerminalSettings,
+}
+
+/// Runtime settings for the terminal adapter, resolved once at startup.
+///
+/// `copy_on_select` gates the copy-on-release behavior: when it is false a drag still
+/// highlights text but releasing the button copies nothing and shows no confirmation.
+/// `force_osc52` routes every clipboard write through the OSC 52 escape path instead of
+/// the native clipboard, for terminals reached over SSH where the native path is absent.
+#[derive(Debug, Clone, Copy)]
+pub struct TerminalSettings {
+    pub copy_on_select: bool,
+    pub force_osc52: bool,
 }
 
 /// A cell buffer cached alongside the content width it was laid out for, so the page
@@ -108,10 +121,15 @@ struct CachedPage {
 }
 
 impl TerminalApp {
-    pub fn new(controller: NavigationController, view_state: ViewState) -> Self {
+    pub fn new(
+        controller: NavigationController,
+        view_state: ViewState,
+        settings: TerminalSettings,
+    ) -> Self {
         Self {
             controller,
             view_state,
+            settings,
         }
     }
 
@@ -134,6 +152,10 @@ impl TerminalApp {
     }
 
     async fn drive(&mut self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
+        let TerminalSettings {
+            copy_on_select,
+            force_osc52,
+        } = self.settings;
         let mut scroll = ScrollState::new();
         let mut selection = TextSelection::new();
         let mut ui_state = UiState::new();
@@ -288,6 +310,8 @@ impl TerminalApp {
                                     &mut navigate_to_url,
                                     &mut ui_state,
                                     now,
+                                    copy_on_select,
+                                    force_osc52,
                                 );
                             }
                             _ => {}
@@ -1017,6 +1041,8 @@ fn handle_mouse_event(
     navigate_to_url: &mut Option<String>,
     ui_state: &mut UiState,
     now: Instant,
+    copy_on_select: bool,
+    force_osc52: bool,
 ) {
     let Some(buffer) = buffer else {
         return;
@@ -1038,7 +1064,9 @@ fn handle_mouse_event(
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if selection.has_moved() {
-                copy_selection(buffer, selection, ui_state, now);
+                if copy_on_select {
+                    copy_selection(buffer, selection, ui_state, now, force_osc52);
+                }
                 return;
             }
             activate_link_under_pointer(
@@ -1063,6 +1091,7 @@ fn copy_selection(
     selection: &TextSelection,
     ui_state: &mut UiState,
     now: Instant,
+    force_osc52: bool,
 ) {
     let Some((start, end)) = selection.range() else {
         return;
@@ -1071,7 +1100,7 @@ fn copy_selection(
     if text.trim().is_empty() {
         return;
     }
-    if !clipboard_write_succeeded(copy_to_clipboard(&text, false)) {
+    if !clipboard_write_succeeded(copy_to_clipboard(&text, force_osc52)) {
         return;
     }
     ui_state.set_transient_message(copied_message(&text), now);
