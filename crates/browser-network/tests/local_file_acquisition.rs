@@ -16,8 +16,9 @@ fn file_url(path: &Path) -> BrowserUrl {
 
 #[test]
 fn from_file_path_with_absolute_path_yields_file_scheme() {
-    let url = BrowserUrl::from_file_path(Path::new("/tmp/example.html"))
-        .expect("absolute path must construct a file URL");
+    let directory = tempdir().expect("temp directory must be created");
+    let path = directory.path().join("example.html");
+    let url = BrowserUrl::from_file_path(&path).expect("absolute path must construct a file URL");
     assert_eq!(url.scheme(), "file");
 }
 
@@ -29,10 +30,11 @@ fn from_file_path_with_relative_path_returns_invalid_url() {
 
 #[test]
 fn path_buf_round_trips_the_absolute_path() {
-    let original = Path::new("/tmp/puma/round-trip.html");
+    let directory = tempdir().expect("temp directory must be created");
+    let original = directory.path().join("round-trip.html");
     let url =
-        BrowserUrl::from_file_path(original).expect("absolute path must construct a file URL");
-    assert_eq!(url.path_buf().as_deref(), Some(original));
+        BrowserUrl::from_file_path(&original).expect("absolute path must construct a file URL");
+    assert_eq!(url.path_buf().as_deref(), Some(original.as_path()));
 }
 
 #[tokio::test]
