@@ -264,27 +264,18 @@ impl UiState {
 
     /// Completes the buffer to the highlighted command: `/` plus its canonical name, cursor
     /// at the end, and a trailing space when the command takes an argument so the user can
-    /// type it. A no-op when nothing matches. Refreshing keeps the palette showing that one
-    /// command so its argument hint stays visible.
+    /// type it. A no-op when nothing matches.
     pub(crate) fn palette_complete(&mut self) {
         let Some(selected) = self.palette_matches.get(self.palette_selected_index) else {
             return;
         };
         let mut completed = format!("/{}", selected.spec.name);
-        if !selected.spec.args.is_empty() {
+        if selected.spec.takes_argument {
             completed.push(' ');
         }
         self.command_buffer = completed;
         self.cursor_byte_offset = self.command_buffer.len();
         self.refresh_palette();
-    }
-
-    /// The argument-usage hint for the highlighted command (for example `/open <url>`), or
-    /// `None` when nothing is selected or the command takes no arguments. Built only from
-    /// static registry data, never from page content.
-    pub(crate) fn palette_arg_hint(&self) -> Option<String> {
-        let selected = self.palette_matches.get(self.palette_selected_index)?;
-        command::arg_hint(selected.spec)
     }
 
     /// Recomputes the filtered command list from the command token (the run after the

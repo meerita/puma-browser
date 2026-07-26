@@ -3,7 +3,7 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
-use super::{arg_hint, filter, parse_command_input, registry, resolve, CommandKind, MatchRank};
+use super::{filter, parse_command_input, registry, resolve, CommandKind, MatchRank};
 
 #[test]
 fn registry_holds_exactly_the_six_commands() {
@@ -23,17 +23,16 @@ fn settings_carries_the_config_alias_and_coming_soon_description() {
 }
 
 #[test]
-fn open_declares_a_single_url_argument() {
+fn open_takes_an_argument() {
     let open = resolve("open").expect("open command must exist");
-    assert_eq!(open.args.len(), 1);
-    assert_eq!(open.args[0].name, "url");
+    assert!(open.takes_argument);
 }
 
 #[test]
-fn commands_without_arguments_declare_no_arguments() {
+fn commands_without_arguments_take_no_argument() {
     for name in ["reload", "back", "help", "quit", "settings"] {
         let spec = resolve(name).expect("command must exist");
-        assert!(spec.args.is_empty(), "{name} should take no arguments");
+        assert!(!spec.takes_argument, "{name} should take no argument");
     }
 }
 
@@ -172,16 +171,4 @@ fn a_parsed_alias_resolves_to_the_settings_kind() {
 fn a_parsed_unknown_token_resolves_to_none() {
     let (token, _) = parse_command_input("/bogus");
     assert!(resolve(token).is_none());
-}
-
-#[test]
-fn arg_hint_formats_an_argument_command_in_angle_brackets() {
-    let spec = resolve("open").expect("open must resolve");
-    assert_eq!(arg_hint(spec).as_deref(), Some("/open <url>"));
-}
-
-#[test]
-fn arg_hint_is_none_for_a_command_without_arguments() {
-    let spec = resolve("reload").expect("reload must resolve");
-    assert_eq!(arg_hint(spec), None);
 }

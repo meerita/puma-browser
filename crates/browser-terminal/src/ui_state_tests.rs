@@ -386,7 +386,7 @@ fn palette_complete_appends_a_space_for_a_command_that_takes_an_argument() {
 }
 
 #[test]
-fn palette_complete_keeps_the_command_visible_for_its_hint() {
+fn palette_complete_keeps_the_selected_command_filtered() {
     let mut state = UiState::new();
     state.enter_command_mode('/');
     state.command_append_char('o');
@@ -403,17 +403,6 @@ fn palette_complete_on_an_empty_list_is_a_no_op() {
     state.command_append_char('z');
     state.palette_complete();
     assert_eq!(state.command_buffer(), "/zz");
-}
-
-#[test]
-fn palette_arg_hint_is_shown_only_for_a_command_with_arguments() {
-    let mut state = UiState::new();
-    state.enter_command_mode('/');
-    state.command_append_char('o');
-    assert_eq!(state.palette_arg_hint().as_deref(), Some("/open <url>"));
-    state.command_delete_before_cursor();
-    state.command_append_char('r');
-    assert_eq!(state.palette_arg_hint(), None);
 }
 
 #[test]

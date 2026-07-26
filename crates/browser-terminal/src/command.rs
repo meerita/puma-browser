@@ -15,22 +15,15 @@ pub(crate) enum CommandKind {
     Settings,
 }
 
-/// One declared argument of a command, used to render an argument hint once the command
-/// is chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CommandArg {
-    pub(crate) name: &'static str,
-    pub(crate) required: bool,
-}
-
 /// A single command definition. The `name` and every alias are stored without the leading
-/// `/`; the palette adds it when rendering.
+/// `/`; the palette adds it when rendering. `takes_argument` drives Tab completion: a
+/// command that takes an argument completes with a trailing space so the user can type it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CommandSpec {
     pub(crate) name: &'static str,
     pub(crate) aliases: &'static [&'static str],
     pub(crate) description: &'static str,
-    pub(crate) args: &'static [CommandArg],
+    pub(crate) takes_argument: bool,
     pub(crate) kind: CommandKind,
 }
 
@@ -49,54 +42,47 @@ pub(crate) struct CommandMatch {
     pub(crate) rank: MatchRank,
 }
 
-const OPEN_ARGS: &[CommandArg] = &[CommandArg {
-    name: "url",
-    required: false,
-}];
-
-const NO_ARGS: &[CommandArg] = &[];
-
 const REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "open",
         aliases: &[],
         description: "open a URL in the current tab",
-        args: OPEN_ARGS,
+        takes_argument: true,
         kind: CommandKind::Open,
     },
     CommandSpec {
         name: "reload",
         aliases: &[],
         description: "reload the current page",
-        args: NO_ARGS,
+        takes_argument: false,
         kind: CommandKind::Reload,
     },
     CommandSpec {
         name: "back",
         aliases: &[],
         description: "go back to the previous page",
-        args: NO_ARGS,
+        takes_argument: false,
         kind: CommandKind::Back,
     },
     CommandSpec {
         name: "help",
         aliases: &[],
         description: "list the available commands",
-        args: NO_ARGS,
+        takes_argument: false,
         kind: CommandKind::Help,
     },
     CommandSpec {
         name: "quit",
         aliases: &[],
         description: "exit the browser",
-        args: NO_ARGS,
+        takes_argument: false,
         kind: CommandKind::Quit,
     },
     CommandSpec {
         name: "settings",
         aliases: &["config"],
         description: "open browser settings (coming soon)",
-        args: NO_ARGS,
+        takes_argument: false,
         kind: CommandKind::Settings,
     },
 ];
@@ -126,22 +112,6 @@ pub(crate) fn resolve(token: &str) -> Option<&'static CommandSpec> {
     REGISTRY
         .iter()
         .find(|spec| spec.name == token || spec.aliases.contains(&token))
-}
-
-/// The argument-usage hint for a command, for example `/open <url>`, or `None` when the
-/// command declares no arguments. Every argument is shown in angle brackets. The string is
-/// built only from static registry data, so it is always safe to display.
-pub(crate) fn arg_hint(spec: &CommandSpec) -> Option<String> {
-    if spec.args.is_empty() {
-        return None;
-    }
-    let arguments = spec
-        .args
-        .iter()
-        .map(|argument| format!("<{}>", argument.name))
-        .collect::<Vec<_>>()
-        .join(" ");
-    Some(format!("/{} {arguments}", spec.name))
 }
 
 /// Filter the registry against a query (the text after `/`, possibly empty), returning

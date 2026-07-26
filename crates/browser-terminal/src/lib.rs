@@ -56,7 +56,7 @@ use command_bar::{
 };
 use hints_bar::compose_hints_bar;
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
-use palette_menu::{compose_arg_hint_row, compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
+use palette_menu::{compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
 use selection::TextSelection;
 use title_bar::compose_title_bar;
 use ui_state::UiState;
@@ -722,10 +722,7 @@ fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
     if matches.is_empty() || content_area.width == 0 || content_area.height == 0 {
         return;
     }
-    let hint = ui_state.palette_arg_hint();
-    let reserved_rows = usize::from(hint.is_some());
-    let available_rows = (content_area.height as usize).saturating_sub(reserved_rows);
-    let max_rows = MENU_MAX_ROWS.min(available_rows);
+    let max_rows = MENU_MAX_ROWS.min(content_area.height as usize);
     let menu = compose_palette_menu(
         matches,
         ui_state.palette_selected(),
@@ -735,7 +732,7 @@ fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
     if menu.rows.is_empty() {
         return;
     }
-    let lines = palette_popup_lines(&menu, hint.as_deref(), content_area.width);
+    let lines = palette_popup_lines(&menu);
     let popup_height = lines.len() as u16;
     let popup_area = Rect {
         x: content_area.x,
@@ -748,25 +745,17 @@ fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
 }
 
 /// Builds the popup's styled lines: one per visible menu row with the selection
-/// highlighted, then an optional dimmed argument-hint row beneath them. Every string is
-/// local registry text, so no page content reaches the terminal here.
-fn palette_popup_lines(menu: &PaletteMenu, hint: Option<&str>, width: u16) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = menu
-        .rows
+/// highlighted. Every string is local registry text, so no page content reaches the
+/// terminal here.
+fn palette_popup_lines(menu: &PaletteMenu) -> Vec<Line<'static>> {
+    menu.rows
         .iter()
         .enumerate()
         .map(|(row_index, row_text)| {
             let style = palette_row_style(row_index == menu.selected_row);
             Line::styled(row_text.clone(), style)
         })
-        .collect();
-    let Some(hint) = hint else {
-        return lines;
-    };
-    let row = compose_arg_hint_row(hint, width);
-    let hint_style = Style::default().fg(TerminalColor::DarkGray);
-    lines.push(Line::styled(row, hint_style));
-    lines
+        .collect()
 }
 
 /// Style for a palette row: the selected row is reversed to match the chrome bars; other
