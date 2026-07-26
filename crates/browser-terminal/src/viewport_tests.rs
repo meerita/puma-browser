@@ -44,6 +44,20 @@ fn max_scroll_offset_is_zero_when_content_fits_the_viewport() {
 }
 
 #[test]
+fn scroll_to_brings_the_target_row_to_the_top() {
+    let mut scroll = ScrollState::new();
+    scroll.scroll_to(12, 40);
+    assert_eq!(scroll.offset(), 12);
+}
+
+#[test]
+fn scroll_to_a_row_past_the_end_clamps_to_the_max_offset() {
+    let mut scroll = ScrollState::new();
+    scroll.scroll_to(200, 30);
+    assert_eq!(scroll.offset(), 30);
+}
+
+#[test]
 fn max_scroll_offset_is_the_overflow_when_content_exceeds_the_viewport() {
     assert_eq!(max_scroll_offset(100, 24), 76);
 }

@@ -46,6 +46,12 @@ impl ScrollState {
         self.offset = max_offset;
     }
 
+    /// Brings `row` to the top of the viewport, clamped so the last content row never
+    /// scrolls past the bottom. Used to land the viewport on a fragment's anchor.
+    pub(crate) fn scroll_to(&mut self, row: u16, max_offset: u16) {
+        self.offset = row.min(max_offset);
+    }
+
     /// Pulls the offset back within range after the content or viewport shrank.
     pub(crate) fn clamp(&mut self, max_offset: u16) {
         self.offset = self.offset.min(max_offset);

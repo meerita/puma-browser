@@ -17,6 +17,17 @@ pub struct LinkSpan {
     pub col_end: u16,
 }
 
+/// The row a fragment anchor target sits on in the laid-out buffer.
+///
+/// An anchor names a point, not a range, so it carries only its name and the row where the
+/// run it belongs to begins. A run carrying several names produces one `AnchorSpan` per
+/// name, all on that row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorSpan {
+    pub name: String,
+    pub row: u16,
+}
+
 /// A single terminal cell: one grapheme cluster and the display attributes used to
 /// render it.
 ///
@@ -32,6 +43,7 @@ pub struct Cell {
     emphasis: Emphasis,
     underline: bool,
     link_url: Option<String>,
+    anchor_names: Vec<String>,
 }
 
 impl Cell {
@@ -45,6 +57,7 @@ impl Cell {
             emphasis: style.emphasis,
             underline: style.underline,
             link_url: None,
+            anchor_names: Vec::new(),
         }
     }
 
@@ -57,6 +70,7 @@ impl Cell {
             emphasis: Emphasis::None,
             underline: false,
             link_url: None,
+            anchor_names: Vec::new(),
         }
     }
 
@@ -81,6 +95,18 @@ impl Cell {
     /// link. Crate-private so remote-sourced URLs never leak through the public cell API.
     pub(crate) fn link_url(&self) -> Option<&str> {
         self.link_url.as_deref()
+    }
+
+    /// Records the anchor names whose run begins at this cell, used only by layout to
+    /// extract anchor spans. Set on the run's first grapheme so an anchor marks one row.
+    pub(crate) fn set_anchor_names(&mut self, names: Vec<String>) {
+        self.anchor_names = names;
+    }
+
+    /// The anchor names whose run begins at this cell, empty when no anchor starts here.
+    /// Crate-private so remote-sourced names never leak through the public cell API.
+    pub(crate) fn anchor_names(&self) -> &[String] {
+        &self.anchor_names
     }
 
     pub fn grapheme(&self) -> &str {
@@ -127,6 +153,7 @@ pub struct CellBuffer {
     height: u16,
     cells: Vec<Cell>,
     links: Vec<LinkSpan>,
+    anchors: Vec<AnchorSpan>,
 }
 
 impl CellBuffer {
@@ -139,6 +166,7 @@ impl CellBuffer {
             height,
             cells,
             links: Vec::new(),
+            anchors: Vec::new(),
         }
     }
 
@@ -149,6 +177,15 @@ impl CellBuffer {
 
     pub(crate) fn set_links(&mut self, links: Vec<LinkSpan>) {
         self.links = links;
+    }
+
+    /// The anchor spans recorded for this buffer, in ascending row order.
+    pub fn anchors(&self) -> &[AnchorSpan] {
+        &self.anchors
+    }
+
+    pub(crate) fn set_anchors(&mut self, anchors: Vec<AnchorSpan>) {
+        self.anchors = anchors;
     }
 
     pub fn width(&self) -> u16 {

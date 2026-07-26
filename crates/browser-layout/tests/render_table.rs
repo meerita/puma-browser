@@ -30,6 +30,7 @@ fn linked_cell(text: &str, href: &str) -> SemanticNode {
                 text: text.to_string(),
                 emphasis: browser_html::InlineEmphasis::none(),
                 link: Some(href.to_string()),
+                anchors: Vec::new(),
             }],
             inline_style: None,
         }],

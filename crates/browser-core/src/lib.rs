@@ -7,6 +7,7 @@ mod address_resolver;
 mod current_page;
 mod error;
 mod ids;
+mod navigation_target;
 mod tab_id;
 mod tab_state;
 
@@ -16,6 +17,7 @@ pub use browser_layout::CellBuffer;
 pub use browser_network::BrowserUrl;
 pub use error::CoreError;
 pub use ids::{BookmarkId, HistoryEntryId};
+pub use navigation_target::{classify_navigation, NavigationTarget};
 pub use tab_id::TabId;
 pub use tab_state::TabState;
 

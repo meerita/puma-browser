@@ -72,6 +72,28 @@ fn malformed_input_returns_invalid_url() {
 }
 
 #[test]
+fn fragment_returns_the_part_after_the_hash() {
+    let url = BrowserUrl::parse("https://example.com/page#section")
+        .expect("URL with a fragment must parse");
+    assert_eq!(url.fragment(), Some("section"));
+}
+
+#[test]
+fn fragment_is_none_when_the_url_carries_no_hash() {
+    let url = BrowserUrl::parse("https://example.com/page").expect("URL must parse");
+    assert_eq!(url.fragment(), None);
+}
+
+#[test]
+fn without_fragment_drops_the_fragment_and_keeps_the_base() {
+    let url = BrowserUrl::parse("https://example.com/page#section")
+        .expect("URL with a fragment must parse");
+    let base = url.without_fragment();
+    assert_eq!(base.as_str(), "https://example.com/page");
+    assert_eq!(base.fragment(), None);
+}
+
+#[test]
 fn debug_output_omits_url_credentials() {
     let url = BrowserUrl::parse("https://user:secret@example.com/")
         .expect("URL with credentials must parse");

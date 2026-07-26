@@ -15,6 +15,7 @@ fn link_run(text: &str, url: &str) -> InlineRun {
         text: text.to_string(),
         emphasis: InlineEmphasis::none(),
         link: Some(url.to_string()),
+        anchors: Vec::new(),
     }
 }
 

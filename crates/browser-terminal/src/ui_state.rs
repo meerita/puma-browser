@@ -38,6 +38,7 @@ pub(crate) struct UiState {
     cursor_byte_offset: usize,
     palette_matches: Vec<CommandMatch>,
     palette_selected_index: usize,
+    pending_fragment: Option<String>,
 }
 
 impl UiState {
@@ -56,7 +57,25 @@ impl UiState {
             cursor_byte_offset: 0,
             palette_matches: Vec::new(),
             palette_selected_index: 0,
+            pending_fragment: None,
         }
+    }
+
+    /// Remembers the fragment to position the viewport on once the page being loaded
+    /// finishes rendering. Cleared by [`take_pending_fragment`](Self::take_pending_fragment)
+    /// when it is applied, or overwritten when a new load starts.
+    pub(crate) fn set_pending_fragment(&mut self, fragment: Option<String>) {
+        self.pending_fragment = fragment;
+    }
+
+    /// Whether a fragment is waiting to be applied after the current load completes.
+    pub(crate) fn has_pending_fragment(&self) -> bool {
+        self.pending_fragment.is_some()
+    }
+
+    /// Takes the fragment waiting to be applied, leaving none behind.
+    pub(crate) fn take_pending_fragment(&mut self) -> Option<String> {
+        self.pending_fragment.take()
     }
 
     pub(crate) fn is_in_command_mode(&self) -> bool {

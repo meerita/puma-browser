@@ -25,9 +25,9 @@ use std::io::Stdout;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use browser_core::{BrowserUrl, CoreError, NavigationController};
+use browser_core::{BrowserUrl, CoreError, NavigationController, NavigationTarget};
 use browser_css::{Color, Emphasis};
-use browser_layout::{Cell, CellBuffer, CellPosition, LinkSpan};
+use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkSpan};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -37,6 +37,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures_util::StreamExt;
+use percent_encoding::percent_decode_str;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -114,6 +115,7 @@ pub struct TerminalApp {
     controller: NavigationController,
     view_state: ViewState,
     settings: TerminalSettings,
+    initial_fragment: Option<String>,
 }
 
 /// Runtime settings for the terminal adapter, resolved once at startup.
@@ -145,7 +147,18 @@ impl TerminalApp {
             controller,
             view_state,
             settings,
+            initial_fragment: None,
         }
+    }
+
+    /// Sets the fragment to position the initial page on once it first renders.
+    ///
+    /// The startup page is loaded before the event loop begins, so its fragment cannot go
+    /// through the normal load path. Seeding it here lets the same deferred positioning that
+    /// serves cross-page links land the opening viewport on the anchor.
+    pub fn with_initial_fragment(mut self, fragment: Option<String>) -> Self {
+        self.initial_fragment = fragment;
+        self
     }
 
     /// Borrows the navigation core this adapter drives.
@@ -174,6 +187,9 @@ impl TerminalApp {
         let mut scroll = ScrollState::new();
         let mut selection = TextSelection::new();
         let mut ui_state = UiState::new();
+        // A fragment on the startup URL is honored through the same deferred path a
+        // cross-page link uses: seed it here so the first render positions the viewport.
+        ui_state.set_pending_fragment(self.initial_fragment.take());
         let mut cache: Option<CachedPage> = None;
         let mut load_state = LoadState::Idle;
         let mut tick = interval(Duration::from_millis(80));
@@ -196,6 +212,13 @@ impl TerminalApp {
             let content_rows = cache.as_ref().map_or(0, |cached| cached.buffer.height());
             let max_offset = max_scroll_offset(content_rows, viewport_height);
             scroll.clamp(max_offset);
+
+            // A fragment remembered from a completed load positions the viewport once the
+            // freshly rendered page is cached. Only when idle, so it never resolves against
+            // the stale buffer still showing during a load.
+            if matches!(load_state, LoadState::Idle) {
+                self.apply_pending_fragment(&mut ui_state, &cache, &mut scroll, max_offset);
+            }
 
             // Extract loading state as owned values to avoid borrow conflicts with the
             // mutable select! arm below.
@@ -355,6 +378,9 @@ impl TerminalApp {
                             ViewState::Error(TerminalError::from(error).user_message());
                         scroll = ScrollState::new();
                         cache = None;
+                        // A failed load renders no page, so any fragment waiting for it is
+                        // dropped rather than resolved against the error view.
+                        ui_state.set_pending_fragment(None);
                     }
                 }
             }
@@ -368,6 +394,7 @@ impl TerminalApp {
                     &mut ui_state,
                     &mut cache,
                     &mut scroll,
+                    max_offset,
                     now,
                 ) {
                     CommandOutcome::Quit => return Ok(()),
@@ -383,14 +410,22 @@ impl TerminalApp {
 
             // Apply link navigation — a Tab+Enter activation or a mouse click on a link.
             if let Some(link_url) = navigate_to_url {
-                load_state =
-                    self.start_link_load(link_url, &working_dir, &mut ui_state, &mut cache);
+                load_state = self.start_link_load(
+                    link_url,
+                    &working_dir,
+                    &mut ui_state,
+                    &mut cache,
+                    &mut scroll,
+                    max_offset,
+                    now,
+                );
             }
         }
     }
 
     /// Routes a submitted command-bar buffer. A buffer whose trimmed text starts with `/`
     /// is a slash command; anything else is a URL and takes the unchanged address path.
+    #[allow(clippy::too_many_arguments)]
     fn submit_command_input(
         &mut self,
         input: String,
@@ -398,35 +433,140 @@ impl TerminalApp {
         ui_state: &mut UiState,
         cache: &mut Option<CachedPage>,
         scroll: &mut ScrollState,
+        max_offset: u16,
         now: Instant,
     ) -> CommandOutcome {
         if !input.trim_start().starts_with('/') {
-            return self.submit_address(&input, working_dir, cache);
+            return self.submit_address(
+                &input,
+                working_dir,
+                ui_state,
+                cache,
+                scroll,
+                max_offset,
+                now,
+            );
         }
-        self.dispatch_command(&input, working_dir, ui_state, cache, scroll, now)
+        self.dispatch_command(
+            &input,
+            working_dir,
+            ui_state,
+            cache,
+            scroll,
+            max_offset,
+            now,
+        )
     }
 
-    /// Resolves a URL buffer through the same scheme validation as normal address entry
-    /// and starts the load, or shows a generic error without echoing the raw input.
+    /// Routes a typed address through the navigation classifier: a fragment on the current
+    /// page jumps within it, and anything else loads through the same scheme validation as
+    /// before. An unresolvable address shows an error echoing only the typed input, which
+    /// is local, never remote content.
+    #[allow(clippy::too_many_arguments)]
     fn submit_address(
         &mut self,
         input: &str,
         working_dir: &std::path::Path,
+        ui_state: &mut UiState,
         cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        max_offset: u16,
+        now: Instant,
     ) -> CommandOutcome {
-        match browser_core::resolve_address(input, working_dir) {
+        match browser_core::classify_navigation(self.controller.current_url(), input, working_dir) {
             Err(_) => {
                 self.view_state = ViewState::Error(format!("Not a valid address: {input}"));
                 *cache = None;
                 CommandOutcome::None
             }
-            Ok(url) => CommandOutcome::Load(self.start_load(url)),
+            Ok(target) => CommandOutcome::Load(
+                self.apply_navigation_target(target, ui_state, cache, scroll, max_offset, now),
+            ),
+        }
+    }
+
+    /// Carries out a classified navigation: a same-page fragment jumps within the current
+    /// buffer with no request, and a fetch starts the load while remembering the fragment
+    /// to honor once the new page renders.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_navigation_target(
+        &mut self,
+        target: NavigationTarget,
+        ui_state: &mut UiState,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        max_offset: u16,
+        now: Instant,
+    ) -> LoadState {
+        match target {
+            NavigationTarget::SamePageAnchor { fragment } => {
+                self.jump_to_anchor(
+                    fragment.as_deref(),
+                    cache,
+                    scroll,
+                    max_offset,
+                    ui_state,
+                    now,
+                );
+                LoadState::Idle
+            }
+            NavigationTarget::Fetch { url, fragment } => {
+                ui_state.set_pending_fragment(fragment);
+                self.start_load(url)
+            }
+        }
+    }
+
+    /// Moves the viewport to the fragment's anchor in the current buffer, or reports that
+    /// the anchor was not found without moving. The reported name is control-stripped so a
+    /// crafted fragment cannot place an escape sequence in the status line.
+    #[allow(clippy::too_many_arguments)]
+    fn jump_to_anchor(
+        &self,
+        fragment: Option<&str>,
+        cache: &Option<CachedPage>,
+        scroll: &mut ScrollState,
+        max_offset: u16,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) {
+        let Some(cached) = cache.as_ref() else {
+            return;
+        };
+        if let Some(row) = resolve_anchor_row(fragment, cached.buffer.anchors()) {
+            scroll.scroll_to(row, max_offset);
+            return;
+        }
+        let name = sanitize_fragment_for_display(&decode_fragment(fragment));
+        ui_state.set_transient_message(format!("anchor not found: {name}"), now);
+    }
+
+    /// Applies a fragment remembered from a completed load, positioning the viewport on its
+    /// anchor once the new page has rendered. A fragment that matches nothing leaves the
+    /// viewport at the top. Consumes the pending fragment so it applies exactly once.
+    fn apply_pending_fragment(
+        &self,
+        ui_state: &mut UiState,
+        cache: &Option<CachedPage>,
+        scroll: &mut ScrollState,
+        max_offset: u16,
+    ) {
+        if !ui_state.has_pending_fragment() {
+            return;
+        }
+        let Some(cached) = cache.as_ref() else {
+            return;
+        };
+        let fragment = ui_state.take_pending_fragment();
+        if let Some(row) = resolve_anchor_row(fragment.as_deref(), cached.buffer.anchors()) {
+            scroll.scroll_to(row, max_offset);
         }
     }
 
     /// Parses a slash-command buffer and runs the matching handler. An empty token (the
     /// buffer was just `/`) re-opens command mode without loading anything; an unknown
     /// token shows a transient message and never falls through to a URL load.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_command(
         &mut self,
         input: &str,
@@ -434,6 +574,7 @@ impl TerminalApp {
         ui_state: &mut UiState,
         cache: &mut Option<CachedPage>,
         scroll: &mut ScrollState,
+        max_offset: u16,
         now: Instant,
     ) -> CommandOutcome {
         let (token, remainder) = parse_command_input(input);
@@ -446,7 +587,15 @@ impl TerminalApp {
             return CommandOutcome::None;
         };
         match spec.kind {
-            CommandKind::Open => self.run_open(remainder, working_dir, cache, ui_state, now),
+            CommandKind::Open => self.run_open(
+                remainder,
+                working_dir,
+                cache,
+                ui_state,
+                scroll,
+                max_offset,
+                now,
+            ),
             CommandKind::Reload => self.run_reload(ui_state, now),
             CommandKind::Back => self.run_back(ui_state, cache, scroll, now),
             CommandKind::Quit => CommandOutcome::Quit,
@@ -463,19 +612,30 @@ impl TerminalApp {
 
     /// `/open <url>`: loads the argument through the address path, or shows a usage
     /// message when no URL was given.
+    #[allow(clippy::too_many_arguments)]
     fn run_open(
         &mut self,
         remainder: &str,
         working_dir: &std::path::Path,
         cache: &mut Option<CachedPage>,
         ui_state: &mut UiState,
+        scroll: &mut ScrollState,
+        max_offset: u16,
         now: Instant,
     ) -> CommandOutcome {
         if remainder.is_empty() {
             ui_state.set_transient_message("usage: /open <url>".to_string(), now);
             return CommandOutcome::None;
         }
-        self.submit_address(remainder, working_dir, cache)
+        self.submit_address(
+            remainder,
+            working_dir,
+            ui_state,
+            cache,
+            scroll,
+            max_offset,
+            now,
+        )
     }
 
     /// `/reload`: re-fetches the current URL through the shared load path, or reports that
@@ -515,22 +675,32 @@ impl TerminalApp {
     /// the shared load path after scheme validation. On an unresolvable URL it shows a
     /// generic error rather than echoing the remote URL, so a malicious href can never
     /// place raw bytes in terminal output.
+    #[allow(clippy::too_many_arguments)]
     fn start_link_load(
         &mut self,
         link_url: String,
         working_dir: &std::path::Path,
         ui_state: &mut UiState,
         cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        max_offset: u16,
+        now: Instant,
     ) -> LoadState {
         ui_state.mark_visited(&link_url);
         ui_state.exit_link_navigation();
-        match browser_core::resolve_address(&link_url, working_dir) {
+        match browser_core::classify_navigation(
+            self.controller.current_url(),
+            &link_url,
+            working_dir,
+        ) {
             Err(_) => {
                 self.view_state = ViewState::Error("Cannot open this link".to_string());
                 *cache = None;
                 LoadState::Idle
             }
-            Ok(url) => self.start_load(url),
+            Ok(target) => {
+                self.apply_navigation_target(target, ui_state, cache, scroll, max_offset, now)
+            }
         }
     }
 
@@ -630,6 +800,43 @@ fn render_page(controller: &NavigationController, width: u16) -> Result<CellBuff
     }
     let buffer = controller.render(width)?;
     Ok(buffer)
+}
+
+/// The buffer row a fragment names, or `None` when the fragment matches no anchor.
+///
+/// An empty fragment, or `top` compared case-insensitively, is the top of the page. Any
+/// other fragment is percent-decoded and matched against anchor names first by exact
+/// equality, then case-insensitively. Anchor spans are in ascending row order, so the
+/// first match is the earliest anchor of that name on the page.
+fn resolve_anchor_row(fragment: Option<&str>, anchors: &[AnchorSpan]) -> Option<u16> {
+    let decoded = decode_fragment(fragment);
+    if decoded.is_empty() || decoded.eq_ignore_ascii_case("top") {
+        return Some(0);
+    }
+    if let Some(anchor) = anchors.iter().find(|anchor| anchor.name == decoded) {
+        return Some(anchor.row);
+    }
+    anchors
+        .iter()
+        .find(|anchor| anchor.name.eq_ignore_ascii_case(&decoded))
+        .map(|anchor| anchor.row)
+}
+
+/// Percent-decode a fragment into the form anchor names are compared against, matching the
+/// decoding the HTML layer applied to those names. A missing fragment decodes to empty.
+fn decode_fragment(fragment: Option<&str>) -> String {
+    let Some(fragment) = fragment else {
+        return String::new();
+    };
+    percent_decode_str(fragment)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Strip control characters from a fragment before it appears in a status message, so a
+/// crafted `id` or `name` can never carry an escape sequence into terminal output.
+fn sanitize_fragment_for_display(fragment: &str) -> String {
+    fragment.chars().filter(|c| !c.is_control()).collect()
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -11,6 +11,7 @@ fn run_with(emphasis: InlineEmphasis, link: Option<String>) -> InlineRun {
         text: String::from("word"),
         emphasis,
         link,
+        anchors: Vec::new(),
     }
 }
 

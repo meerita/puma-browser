@@ -38,6 +38,7 @@ fn emphasis_boundaries_split_a_block_into_separate_runs() {
                 text: "bold".to_string(),
                 emphasis: strong(),
                 link: None,
+                anchors: Vec::new(),
             },
             InlineRun::plain(" tail".to_string()),
         ]
@@ -56,12 +57,14 @@ fn acceptance_paragraph_splits_into_plain_bold_space_and_link_runs() {
                 text: "bold".to_string(),
                 emphasis: strong(),
                 link: None,
+                anchors: Vec::new(),
             },
             InlineRun::plain(" ".to_string()),
             InlineRun {
                 text: "link".to_string(),
                 emphasis: InlineEmphasis::none(),
                 link: Some("/x".to_string()),
+                anchors: Vec::new(),
             },
         ]
     );
@@ -81,6 +84,7 @@ fn nested_strong_and_emphasis_union_their_flags_on_one_run() {
                 code: false,
             },
             link: None,
+            anchors: Vec::new(),
         }]
     );
 }
@@ -101,6 +105,7 @@ fn inline_code_marks_its_run_with_the_code_flag() {
                     code: true,
                 },
                 link: None,
+                anchors: Vec::new(),
             },
             InlineRun::plain(" here".to_string()),
         ]
@@ -117,6 +122,7 @@ fn inline_anchor_sets_the_link_on_its_run() {
             text: "home".to_string(),
             emphasis: InlineEmphasis::none(),
             link: Some("https://example.com/".to_string()),
+            anchors: Vec::new(),
         }]
     );
 }
@@ -139,6 +145,7 @@ fn base_href_resolves_a_relative_link_reference() {
             text: "next".to_string(),
             emphasis: InlineEmphasis::none(),
             link: Some("https://example.com/docs/page".to_string()),
+            anchors: Vec::new(),
         }]
     );
 }
@@ -169,6 +176,7 @@ fn a_reference_is_kept_as_authored_when_no_base_is_present() {
             text: "next".to_string(),
             emphasis: InlineEmphasis::none(),
             link: Some("page".to_string()),
+            anchors: Vec::new(),
         }]
     );
 }

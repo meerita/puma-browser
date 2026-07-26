@@ -32,20 +32,28 @@ impl InlineEmphasis {
 /// text was sanitized before. `link`, when present, is a reference resolved against the
 /// document's base URL; it is a plain `String` because URL validation belongs to the
 /// network layer, not here.
+///
+/// `anchors` names the fragment targets that land on this run: the `id` of an element and
+/// the `name` of an `<a>` are captured and attached to the next run so a link to
+/// `#name` can position the viewport on it. It is empty for a run that is not a target,
+/// and holds several names when more than one anchor precedes the same run. Names are
+/// stored decoded and control-stripped so they compare cleanly against a decoded fragment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineRun {
     pub text: String,
     pub emphasis: InlineEmphasis,
     pub link: Option<String>,
+    pub anchors: Vec<String>,
 }
 
 impl InlineRun {
-    /// Build a run of plain text with no emphasis and no link.
+    /// Build a run of plain text with no emphasis, link, or anchor.
     pub fn plain(text: String) -> InlineRun {
         InlineRun {
             text,
             emphasis: InlineEmphasis::none(),
             link: None,
+            anchors: Vec::new(),
         }
     }
 }

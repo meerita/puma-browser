@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "browser-cli"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "browser-core",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "browser-core"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "browser-css",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "browser-css"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "browser-html",
@@ -277,11 +277,12 @@ dependencies = [
 
 [[package]]
 name = "browser-html"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "encoding_rs",
  "html5ever",
+ "percent-encoding",
  "serde",
  "thiserror 2.0.19",
  "tracing",
@@ -290,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "browser-layout"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "browser-css",
@@ -303,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "browser-mcp"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "browser-core",
@@ -320,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "browser-network"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -337,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "browser-privacy"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "browser-storage",
@@ -348,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "browser-storage"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -361,16 +362,18 @@ dependencies = [
 
 [[package]]
 name = "browser-terminal"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "arboard",
  "base64 0.23.0",
  "browser-core",
  "browser-css",
+ "browser-html",
  "browser-layout",
  "crossterm",
  "futures-util",
+ "percent-encoding",
  "ratatui",
  "serde",
  "thiserror 2.0.19",

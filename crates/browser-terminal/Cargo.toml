@@ -16,7 +16,11 @@ futures-util = "0.3"
 tokio = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
+percent-encoding = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+browser-html = { path = "../browser-html" }
