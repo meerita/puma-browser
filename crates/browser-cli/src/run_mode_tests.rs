@@ -7,9 +7,11 @@ use std::path::Path;
 
 use tempfile::tempdir;
 
+use browser_core::HistoryMode;
+
 use super::{
-    copy_on_select_enabled, force_osc52_enabled, resolve_mode, search_enabled,
-    unwrap_tracking_enabled, ResolvedMode,
+    copy_on_select_enabled, force_osc52_enabled, resolve_history_mode, resolve_mode,
+    search_enabled, unwrap_tracking_enabled, ResolvedMode,
 };
 
 fn resolved_in(working_directory: &Path, arguments: &[&str]) -> ResolvedMode {
@@ -195,4 +197,32 @@ fn unwrap_tracking_stays_enabled_for_any_other_value() {
     assert!(unwrap_tracking_enabled(Some("1")));
     assert!(unwrap_tracking_enabled(Some("true")));
     assert!(unwrap_tracking_enabled(Some("")));
+}
+
+#[test]
+fn the_file_mode_applies_when_the_env_override_is_unset() {
+    assert_eq!(
+        resolve_history_mode("disabled", None),
+        HistoryMode::Disabled
+    );
+}
+
+#[test]
+fn the_env_override_wins_over_the_file_mode() {
+    assert_eq!(
+        resolve_history_mode("persistent", Some("disabled")),
+        HistoryMode::Disabled
+    );
+}
+
+#[test]
+fn an_unrecognized_mode_resolves_to_persistent() {
+    assert_eq!(
+        resolve_history_mode("nonsense", None),
+        HistoryMode::Persistent
+    );
+    assert_eq!(
+        resolve_history_mode("disabled", Some("nonsense")),
+        HistoryMode::Persistent
+    );
 }

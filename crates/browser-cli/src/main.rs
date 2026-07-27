@@ -6,9 +6,10 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use browser_core::NavigationController;
+use browser_core::{history_mode_from_str, HistoryMode, HistorySettings, NavigationController};
 use browser_mcp::McpServer;
 use browser_network::BrowserUrl;
+use browser_storage::{default_config_path, load_config, BrowserConfig};
 use browser_terminal::{TerminalApp, TerminalError, TerminalSettings, ViewState};
 
 /// The mode keyword that selects the stdio MCP server instead of the terminal.
@@ -27,6 +28,10 @@ const SEARCH_ENV: &str = "PUMA_SEARCH";
 /// Environment variable that disables tracking-redirect unwrapping when set to `0` or
 /// `false`.
 const UNWRAP_TRACKING_ENV: &str = "PUMA_UNWRAP_TRACKING";
+
+/// Environment variable that overrides the configured history mode, accepting
+/// `disabled`, `in-memory`, or `persistent`. When set, it wins over the config file.
+const HISTORY_MODE_ENV: &str = "PUMA_HISTORY_MODE";
 
 /// The mode keyword that selects the terminal adapter; kept for symmetry with `mcp`.
 const TERMINAL_MODE_KEYWORD: &str = "terminal";
@@ -108,6 +113,10 @@ fn resolve_arguments() -> ResolvedMode {
 }
 
 async fn run(resolved: ResolvedMode) -> Result<()> {
+    // Resolve history settings up front so a malformed config fails fast with a safe
+    // message before any adapter starts. Injection into the controller lands later; the
+    // value is held here so the loading and override path is exercised now.
+    let _history_settings = resolve_history_settings()?;
     match resolved {
         ResolvedMode::Mcp => run_mcp().await,
         ResolvedMode::TerminalBlank => {
@@ -212,6 +221,47 @@ fn search_enabled(value: Option<&str>) -> bool {
 /// real process environment.
 fn unwrap_tracking_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0") | Some("false"))
+}
+
+/// Resolves the history settings from the config file overlaid with env overrides.
+///
+/// A malformed config file is surfaced as a short, safe error carrying neither the path
+/// nor the file contents. A missing file, or a platform with no resolvable config
+/// directory, falls back to the built-in defaults rather than failing.
+fn resolve_history_settings() -> Result<HistorySettings> {
+    let config = load_browser_config()?;
+    let mode = resolve_history_mode(
+        config.history_mode(),
+        std::env::var(HISTORY_MODE_ENV).ok().as_deref(),
+    );
+    Ok(HistorySettings::new(
+        mode,
+        config.retention_days(),
+        config.store_titles(),
+    ))
+}
+
+/// Loads the browser config, falling back to defaults when the path cannot be resolved.
+///
+/// Only a malformed file is an error, and it is re-described with a safe message so no
+/// path or file content reaches the caller. A missing file already resolves to defaults
+/// inside `load_config`.
+fn load_browser_config() -> Result<BrowserConfig> {
+    let Ok(config_path) = default_config_path() else {
+        return Ok(BrowserConfig::default());
+    };
+    load_config(&config_path).map_err(|_| anyhow!("Configuration file is invalid"))
+}
+
+/// Resolves the effective history mode from the file value and the optional env override.
+///
+/// The environment variable wins when set; otherwise the file value applies. Either
+/// string is mapped through `history_mode_from_str`, so an unrecognized value resolves to
+/// the persistent default instead of being rejected. Taking both as arguments keeps this
+/// testable without the real process environment.
+fn resolve_history_mode(file_mode: &str, env_override: Option<&str>) -> HistoryMode {
+    let selected = env_override.unwrap_or(file_mode);
+    history_mode_from_str(selected)
 }
 
 async fn run_mcp() -> Result<()> {

@@ -6,6 +6,7 @@
 mod address_resolver;
 mod current_page;
 mod error;
+mod history_mode;
 mod ids;
 mod navigation_target;
 mod search_engine;
@@ -17,6 +18,7 @@ pub use browser_html::{Document, DocumentTitle};
 pub use browser_layout::CellBuffer;
 pub use browser_network::BrowserUrl;
 pub use error::CoreError;
+pub use history_mode::{history_mode_from_str, HistoryMode, HistorySettings};
 pub use ids::{BookmarkId, HistoryEntryId};
 pub use navigation_target::{classify_navigation, NavigationTarget, TrackingUnwrap};
 pub use search_engine::SearchEngine;

@@ -12,16 +12,18 @@ fn display_of(error: &StorageError) -> String {
         StorageError::OpenFailed
         | StorageError::MigrationFailed
         | StorageError::QueryFailed
-        | StorageError::NotFound => error.to_string(),
+        | StorageError::NotFound
+        | StorageError::ConfigInvalid => error.to_string(),
     }
 }
 
-fn all_variants() -> [StorageError; 4] {
+fn all_variants() -> [StorageError; 5] {
     [
         StorageError::OpenFailed,
         StorageError::MigrationFailed,
         StorageError::QueryFailed,
         StorageError::NotFound,
+        StorageError::ConfigInvalid,
     ]
 }
 
@@ -91,5 +93,13 @@ fn not_found_reports_a_missing_record() {
     assert_eq!(
         StorageError::NotFound.to_string(),
         "requested record was not found"
+    );
+}
+
+#[test]
+fn config_invalid_reports_an_invalid_configuration() {
+    assert_eq!(
+        StorageError::ConfigInvalid.to_string(),
+        "configuration file is invalid"
     );
 }

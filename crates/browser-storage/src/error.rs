@@ -23,4 +23,7 @@ pub enum StorageError {
 
     #[error("requested record was not found")]
     NotFound,
+
+    #[error("configuration file is invalid")]
+    ConfigInvalid,
 }
