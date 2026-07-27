@@ -1,57 +1,47 @@
 # Architecture
 
 Puma's design separates concerns into independent crates. The rendering pipeline and
-MCP interface share the same browser core — there is no separate "headless" mode.
+the MCP interface share the same browser core. There is no separate "headless" mode.
 
 ## Rendering pipeline
 
-```
-HTTP response
-    │
-    ▼
-browser-network    HTTP client, TLS, cookies, cache, redirects, proxy
-    │
-    ▼
-browser-html       HTML5 parsing → semantic document tree
-    │
-    ▼
-browser-css        Reduced CSS cascade → text style per node
-    │
-    ▼
-browser-layout     Text layout → terminal cell buffer
-    │
-    ▼
-browser-terminal   Ratatui renderer → terminal output
+```mermaid
+flowchart TD
+    network["browser-network<br/>HTTP client, TLS, cookies, cache, redirects, proxy"]
+    html["browser-html<br/>HTML5 parsing to semantic document tree"]
+    css["browser-css<br/>Reduced CSS cascade to text style per node"]
+    layout["browser-layout<br/>Text layout to terminal cell buffer"]
+    terminal["browser-terminal<br/>Ratatui renderer to terminal output"]
+
+    network --> html --> css --> layout --> terminal
 ```
 
 ## Shared browser core
 
-```
-┌──────────────────┐
-│  browser-terminal│  Ratatui TUI, command system, themes, input
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐
-│  browser-core    │  Navigation, tabs, history, bookmarks, forms, downloads
-└───┬──────────────┘
-    │
-    ├── browser-network    (HTTP stack)
-    ├── browser-html       (HTML5 parser)
-    ├── browser-css        (CSS cascade)
-    ├── browser-layout     (text layout)
-    ├── browser-storage    (SQLite persistence)
-    └── browser-privacy    (cookie policy, session isolation)
+```mermaid
+flowchart TD
+    terminal["browser-terminal<br/>Ratatui TUI, command system, themes, input"]
+    mcp["browser-mcp<br/>MCP stdio server: tools, resources, permissions"]
+    core["browser-core<br/>Navigation, tabs, history, bookmarks, forms, downloads"]
+    network["browser-network<br/>(HTTP stack)"]
+    html["browser-html<br/>(HTML5 parser)"]
+    css["browser-css<br/>(CSS cascade)"]
+    layout["browser-layout<br/>(text layout)"]
+    storage["browser-storage<br/>(SQLite persistence)"]
+    privacy["browser-privacy<br/>(cookie policy, session isolation)"]
 
-┌──────────────────┐
-│  browser-mcp     │  MCP stdio server — tools, resources, permissions
-└────────┬─────────┘
-         │
-         └── browser-core  (shared, same instance)
+    terminal --> core
+    mcp --> core
+    core --> network
+    core --> html
+    core --> css
+    core --> layout
+    core --> storage
+    core --> privacy
 ```
 
 MCP and the terminal UI operate on the same browser core. There is no simulation of
-keyboard input — MCP uses the browser API directly.
+keyboard input. MCP uses the browser API directly.
 
 ## Crate responsibilities
 
@@ -72,7 +62,7 @@ keyboard input — MCP uses the browser API directly.
 
 **No JavaScript.** The browser has no JS parser, runtime, or DOM scripting. `<script>`
 elements are detected and reported; they are never executed. This is a non-negotiable
-constraint from the functional spec.
+constraint.
 
 **Semantic document tree.** The HTML parser does not feed the terminal renderer directly.
 It builds an internal semantic tree (headings, paragraphs, links, forms, tables, etc.)

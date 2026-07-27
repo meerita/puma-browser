@@ -142,7 +142,8 @@ graph LR
     privacy --> network
 ```
 
-The full list of allowed and forbidden imports is in `.claude/rules/09-crate-boundaries.md`.
+An inner crate never depends on an outer crate. `browser-html` has no knowledge of
+`browser-terminal`; `browser-network` has no knowledge of `browser-core`.
 
 ---
 
@@ -221,5 +222,3 @@ document source never writes escape sequences directly.
 The same boundary applies to MCP: `browser-mcp` reads from `browser-core` state and
 serializes it to MCP wire format. Web page content is always tagged `trusted: false`.
 Web pages cannot invoke MCP tools.
-
-See `.claude/rules/07-security.md` for the full invariants.

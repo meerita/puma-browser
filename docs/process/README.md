@@ -3,8 +3,8 @@
 ## Branch model
 
 ```
-main          Stable releases — tagged with semver (v0.1.0, v0.2.0, …)
-dev           Integration branch — all PRs target this
+main          Stable releases, tagged with semver (v0.1.0, v0.2.0, …)
+dev           Integration branch (all PRs target this)
 feat/…        Feature branches
 fix/…         Bug fix branches
 doc/…         Documentation-only branches
@@ -23,9 +23,8 @@ Never commit directly to `main` or `dev`.
    git checkout -b feat/my-thing
    ```
 
-2. For non-trivial work, write a plan first:
-   - Document decisions, scope, and phases in `docs/plans/` before implementing
-   - See [docs/plans/README.md](../plans/README.md) for the plan format
+2. For non-trivial work, write down the decisions, scope, and phases before touching
+   code.
 
 3. Implement
 
@@ -35,7 +34,7 @@ All must pass before opening a PR. Run from the repo root:
 
 ```bash
 make fmt-check    # Formatting (auto-fix with: make fmt)
-make lint         # Clippy — -D warnings, all targets
+make lint         # Clippy (-D warnings, all targets)
 make check        # Compile check
 make test         # Unit tests
 make test-full    # All tests, all features
@@ -88,7 +87,7 @@ chore(deps): update ratatui to 0.29
 Types: `feat`, `fix`, `doc`, `chore`, `refactor`, `test`, `perf`
 
 Scopes match crate names: `core`, `network`, `html`, `css`, `layout`, `storage`,
-`privacy`, `terminal`, `mcp`, `cli` — or omit scope for cross-cutting changes.
+`privacy`, `terminal`, `mcp`, `cli`. Omit the scope for cross-cutting changes.
 
 No `Co-Authored-By` trailers, no `wip`, no placeholder messages.
 
@@ -96,9 +95,3 @@ No `Co-Authored-By` trailers, no `wip`, no placeholder messages.
 
 Any change touching TLS, cookies, request filtering, MCP permissions, terminal output
 sanitization, or URL handling requires a security review before opening the PR.
-
-## Plans
-
-Implementation plans live in `docs/plans/` and are **not committed** (gitignored).
-They are local working artifacts — write one before implementing anything non-trivial
-to document decisions, scope, and phases before touching code.
