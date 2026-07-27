@@ -25,7 +25,9 @@ use std::io::Stdout;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use browser_core::{BrowserUrl, CoreError, NavigationController, NavigationTarget, SearchEngine};
+use browser_core::{
+    BrowserUrl, CoreError, NavigationController, NavigationSource, NavigationTarget, SearchEngine,
+};
 use browser_css::{Color, Emphasis};
 use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkSpan};
 use crossterm::event::{
@@ -785,7 +787,9 @@ impl TerminalApp {
         let loading_url = url.to_string();
         let mut taken = std::mem::take(&mut self.controller);
         let handle = tokio::spawn(async move {
-            let result = taken.load_with_progress(url, progress_tx).await;
+            let result = taken
+                .load_with_progress(url, progress_tx, NavigationSource::AddressBar)
+                .await;
             (taken, result)
         });
         LoadState::Active {

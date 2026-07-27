@@ -9,8 +9,10 @@ mod error;
 mod frecency;
 mod history_mode;
 mod ids;
+mod navigation_source;
 mod navigation_target;
 mod search_engine;
+mod suggestion_index;
 mod tab_id;
 mod tab_state;
 
@@ -18,14 +20,23 @@ pub use address_resolver::resolve_address;
 pub use browser_html::{Document, DocumentTitle};
 pub use browser_layout::CellBuffer;
 pub use browser_network::BrowserUrl;
+pub use browser_storage::{HistoryStore, SuggestionEntry};
 pub use error::CoreError;
 pub use frecency::frecency;
 pub use history_mode::{history_mode_from_str, HistoryMode, HistorySettings};
 pub use ids::{BookmarkId, HistoryEntryId};
+pub use navigation_source::NavigationSource;
 pub use navigation_target::{classify_navigation, NavigationTarget, TrackingUnwrap};
 pub use search_engine::SearchEngine;
+pub use suggestion_index::SuggestionIndex;
 pub use tab_id::TabId;
 pub use tab_state::TabState;
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use browser_storage::NewVisit;
 
 use current_page::CurrentPage;
 
@@ -35,10 +46,28 @@ use current_page::CurrentPage;
 /// single page: [`load`](Self::load) fetches and parses it, and [`render`](Self::render)
 /// lays it out on demand for a given terminal width. Tabs, history, forms, and downloads
 /// are not implemented yet.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct NavigationController {
     current_page: Option<CurrentPage>,
     history_stack: Vec<CurrentPage>,
+    history: Option<Arc<dyn HistoryStore + Send + Sync>>,
+    history_settings: HistorySettings,
+    suggestion_index: SuggestionIndex,
+}
+
+impl fmt::Debug for NavigationController {
+    /// Hand-written because the injected [`HistoryStore`] is a trait object that carries
+    /// no `Debug` bound. The store is shown as a presence flag, never its contents, so a
+    /// controller stays printable in adapter diagnostics without leaking history.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NavigationController")
+            .field("current_page", &self.current_page)
+            .field("history_stack", &self.history_stack)
+            .field("has_history_store", &self.history.is_some())
+            .field("history_settings", &self.history_settings)
+            .finish()
+    }
 }
 
 /// The most pages the back history retains. Older pages are dropped when the stack
@@ -46,8 +75,32 @@ pub struct NavigationController {
 const MAX_HISTORY_DEPTH: usize = 50;
 
 impl NavigationController {
+    /// Builds a controller with no persisted history.
+    ///
+    /// The history mode defaults to [`HistoryMode::Disabled`], so this path records
+    /// nothing and offers no suggestions. It serves the MCP server and any caller that
+    /// does not inject a store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Builds a controller wired to a history store, resolved settings, and the initial
+    /// suggestion index loaded from that store.
+    ///
+    /// `history` is `None` when the resolved mode is [`HistoryMode::Disabled`]; recording
+    /// and suggestions are then suppressed even though the settings are held.
+    pub fn with_history(
+        history: Option<Arc<dyn HistoryStore + Send + Sync>>,
+        history_settings: HistorySettings,
+        initial_suggestions: Vec<SuggestionEntry>,
+    ) -> Self {
+        Self {
+            current_page: None,
+            history_stack: Vec::new(),
+            history,
+            history_settings,
+            suggestion_index: SuggestionIndex::from_entries(initial_suggestions),
+        }
     }
 
     /// Fetch and parse the document at `url`, then hold it as the current page.
@@ -56,9 +109,13 @@ impl NavigationController {
     /// resolved to, not necessarily `url`. Layout is deliberately not run here; it runs
     /// in [`render`](Self::render) because it depends on the terminal width. Network and
     /// parse failures are mapped into [`CoreError`] by `?`.
-    pub async fn load(&mut self, url: BrowserUrl) -> Result<(), CoreError> {
+    pub async fn load(
+        &mut self,
+        url: BrowserUrl,
+        source: NavigationSource,
+    ) -> Result<(), CoreError> {
         let (progress_tx, _) = tokio::sync::watch::channel(0usize);
-        self.load_with_progress(url, progress_tx).await
+        self.load_with_progress(url, progress_tx, source).await
     }
 
     /// Fetch and parse the document at `url`, streaming byte-count updates to `progress`.
@@ -70,6 +127,7 @@ impl NavigationController {
         &mut self,
         url: BrowserUrl,
         progress: tokio::sync::watch::Sender<usize>,
+        source: NavigationSource,
     ) -> Result<(), CoreError> {
         let fetched = browser_network::fetch_with_progress(&url, progress).await?;
         let body_byte_count = fetched.body_bytes().len();
@@ -99,7 +157,45 @@ impl NavigationController {
             title,
             byte_count,
         ));
+        self.record_current_visit(source).await;
         Ok(())
+    }
+
+    /// Returns up to `limit` ranked address-bar suggestions matching `input`.
+    ///
+    /// Empty when history is [`HistoryMode::Disabled`], so a controller with recording
+    /// turned off never surfaces suggestions. Ranking uses the current clock, so recency
+    /// reflects the moment of the query.
+    pub fn suggest(&self, input: &str, limit: usize) -> Vec<SuggestionEntry> {
+        if self.history_settings.mode() == HistoryMode::Disabled {
+            return Vec::new();
+        }
+        self.suggestion_index
+            .suggest(input, now_unix_seconds(), limit)
+    }
+
+    /// Records the current page as a visit, then updates the suggestion index in place.
+    ///
+    /// A visit is recorded only when [`should_record`] passes, so a disabled mode or a
+    /// non-web scheme writes nothing. The write runs on a blocking thread because the
+    /// store is synchronous SQLite; the connection lock is never held across the await. A
+    /// store failure is swallowed: a history write must never fail a navigation.
+    async fn record_current_visit(&mut self, source: NavigationSource) {
+        let Some(page) = self.current_page.as_ref() else {
+            return;
+        };
+        if !should_record(page.final_url(), self.history_settings.mode()) {
+            return;
+        }
+        let Some(store) = self.history.clone() else {
+            return;
+        };
+        let visit = build_visit(page, source, self.history_settings.store_titles());
+        let recorded = tokio::task::spawn_blocking(move || store.record_visit(visit)).await;
+        let Ok(Ok(entry)) = recorded else {
+            return;
+        };
+        self.suggestion_index.upsert(entry);
     }
 
     /// Returns `true` when there is at least one page in the history stack.
@@ -180,4 +276,54 @@ impl NavigationController {
     pub fn close_tab(&mut self, _tab: TabId) -> Result<(), CoreError> {
         Err(CoreError::TabNotFound)
     }
+}
+
+/// Whether a page reached over `url` should be recorded under `mode`.
+///
+/// A single predicate so the recording gate has one home: a disabled mode records
+/// nothing, and only `http`/`https` pages are recorded, never `file://`. A future
+/// per-session opt-out slots in here without reshaping the call site.
+fn should_record(url: &BrowserUrl, mode: HistoryMode) -> bool {
+    if mode == HistoryMode::Disabled {
+        return false;
+    }
+    scheme_is_recordable(url)
+}
+
+/// Whether `url` uses a scheme whose visits are recorded.
+fn scheme_is_recordable(url: &BrowserUrl) -> bool {
+    matches!(url.scheme(), "http" | "https")
+}
+
+/// Assembles a [`NewVisit`] from the current page.
+///
+/// The stored URL comes from `Display`, which strips any `user:pass@` userinfo, so
+/// credentials in a URL never reach history. The host is taken from the parsed URL. The
+/// title is stored only when title storage is enabled. `visited_at` is stamped now.
+fn build_visit(page: &CurrentPage, source: NavigationSource, store_titles: bool) -> NewVisit {
+    let url = page.final_url().to_string();
+    let host = page.final_url().host_str().unwrap_or_default().to_string();
+    let title = title_to_store(page, store_titles);
+    NewVisit::new(url, host, title, source.was_typed(), now_unix_seconds())
+}
+
+/// The title to record for `page`, or `None` when title storage is disabled or the page
+/// declared no title.
+fn title_to_store(page: &CurrentPage, store_titles: bool) -> Option<String> {
+    if !store_titles {
+        return None;
+    }
+    page.title().map(|title| title.as_str().to_string())
+}
+
+/// The current time as Unix epoch seconds.
+///
+/// A clock before the Unix epoch is impossible on a healthy system; the `unwrap_or(0)`
+/// keeps this total rather than panicking on a misconfigured clock, and a zero timestamp
+/// only makes an entry rank as maximally stale.
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }

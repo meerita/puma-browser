@@ -3,7 +3,7 @@
 // @layer core
 // @created meerita <meerita@icloud.com>
 
-use browser_core::{BrowserUrl, CoreError, NavigationController};
+use browser_core::{BrowserUrl, CoreError, NavigationController, NavigationSource};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -29,7 +29,7 @@ async fn load_stores_the_fetched_page_and_renders_it() {
     let mut controller = NavigationController::new();
 
     controller
-        .load(url_for(&server, "/"))
+        .load(url_for(&server, "/"), NavigationSource::AddressBar)
         .await
         .expect("loading a valid HTML page must succeed");
 
@@ -63,7 +63,7 @@ async fn load_decodes_the_body_using_the_content_type_charset() {
     let mut controller = NavigationController::new();
 
     controller
-        .load(url_for(&server, "/"))
+        .load(url_for(&server, "/"), NavigationSource::AddressBar)
         .await
         .expect("loading a windows-1252 page must succeed");
 
@@ -87,7 +87,9 @@ async fn load_of_an_oversized_body_surfaces_a_network_error() {
         .await;
     let mut controller = NavigationController::new();
 
-    let outcome = controller.load(url_for(&server, "/big")).await;
+    let outcome = controller
+        .load(url_for(&server, "/big"), NavigationSource::AddressBar)
+        .await;
 
     assert!(matches!(outcome, Err(CoreError::Network(_))));
     assert!(!controller.has_page());
@@ -128,7 +130,7 @@ async fn page_byte_count_reflects_the_response_body_size() {
     let mut controller = NavigationController::new();
 
     controller
-        .load(url_for(&server, "/size"))
+        .load(url_for(&server, "/size"), NavigationSource::AddressBar)
         .await
         .expect("loading a valid HTML page must succeed");
 
@@ -148,7 +150,7 @@ async fn render_at_zero_width_on_a_loaded_page_surfaces_a_layout_error() {
         .await;
     let mut controller = NavigationController::new();
     controller
-        .load(url_for(&server, "/"))
+        .load(url_for(&server, "/"), NavigationSource::AddressBar)
         .await
         .expect("loading a valid HTML page must succeed");
 

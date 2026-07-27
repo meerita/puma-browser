@@ -8,9 +8,11 @@
 /// This is a domain enum and is deliberately not `serde`-derived: the storage adapter
 /// owns the on-disk string representation and maps to and from this enum, so a
 /// configuration-format change never forces a change here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HistoryMode {
-    /// Records nothing and offers no suggestions.
+    /// Records nothing and offers no suggestions. The default so a controller built
+    /// without an injected store never records.
+    #[default]
     Disabled,
     /// Keeps suggestions for the running session but never writes to disk.
     InMemory,
@@ -34,7 +36,7 @@ pub fn history_mode_from_str(value: &str) -> HistoryMode {
 ///
 /// It carries the mode plus the retention window and the title-storage toggle, resolved
 /// from defaults, the configuration file, and environment overrides before construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HistorySettings {
     mode: HistoryMode,
     retention_days: u32,

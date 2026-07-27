@@ -4,13 +4,23 @@
 //! @created meerita <meerita@icloud.com>
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
-use browser_core::{history_mode_from_str, HistoryMode, HistorySettings, NavigationController};
+use browser_core::{
+    history_mode_from_str, HistoryMode, HistorySettings, NavigationController, NavigationSource,
+};
 use browser_mcp::McpServer;
 use browser_network::BrowserUrl;
-use browser_storage::{default_config_path, load_config, BrowserConfig};
+use browser_storage::{
+    default_config_path, history_database_path, load_config, BrowserConfig, HistoryStore,
+    SqliteStorage, StorageError, SuggestionEntry,
+};
 use browser_terminal::{TerminalApp, TerminalError, TerminalSettings, ViewState};
+
+/// Seconds in one day, used to turn the retention window in days into a prune cutoff.
+const SECONDS_PER_DAY: i64 = 86_400;
 
 /// The mode keyword that selects the stdio MCP server instead of the terminal.
 const MCP_MODE_KEYWORD: &str = "mcp";
@@ -113,31 +123,133 @@ fn resolve_arguments() -> ResolvedMode {
 }
 
 async fn run(resolved: ResolvedMode) -> Result<()> {
-    // Resolve history settings up front so a malformed config fails fast with a safe
-    // message before any adapter starts. Injection into the controller lands later; the
-    // value is held here so the loading and override path is exercised now.
-    let _history_settings = resolve_history_settings()?;
+    // Resolve config up front so a malformed file fails fast with a safe message before
+    // any adapter starts.
+    let config = load_browser_config()?;
+    let history_settings = resolve_history_settings(&config);
     match resolved {
         ResolvedMode::Mcp => run_mcp().await,
         ResolvedMode::TerminalBlank => {
-            run_terminal_app(NavigationController::new(), ViewState::Blank, None).await
+            let controller = build_terminal_controller(&config, history_settings).await;
+            run_terminal_app(controller, ViewState::Blank, None).await
         }
-        ResolvedMode::TerminalUrl(url) => run_terminal_with_url(url).await,
+        ResolvedMode::TerminalUrl(url) => {
+            let controller = build_terminal_controller(&config, history_settings).await;
+            run_terminal_with_url(controller, url).await
+        }
         ResolvedMode::UsageError(message) => Err(anyhow!(message)),
     }
 }
 
-/// Loads the page at `url`, then opens the terminal on the result.
+/// Builds the terminal controller, opening and wiring the history store the mode selects.
+///
+/// A `Persistent` mode opens the on-disk database, prunes to the retention window, and
+/// loads the initial suggestion index; `InMemory` opens an ephemeral database that never
+/// reaches disk; `Disabled` wires no store. A failure to open degrades to no history
+/// rather than blocking startup, so browsing always works.
+async fn build_terminal_controller(
+    config: &BrowserConfig,
+    history_settings: HistorySettings,
+) -> NavigationController {
+    let (history, initial_suggestions) = open_history(history_settings, config.data_dir()).await;
+    NavigationController::with_history(history, history_settings, initial_suggestions)
+}
+
+/// Opens the history store and initial suggestions for the resolved mode.
+async fn open_history(
+    history_settings: HistorySettings,
+    data_dir: Option<&Path>,
+) -> (
+    Option<Arc<dyn HistoryStore + Send + Sync>>,
+    Vec<SuggestionEntry>,
+) {
+    match history_settings.mode() {
+        HistoryMode::Disabled => (None, Vec::new()),
+        HistoryMode::InMemory => open_in_memory_history(),
+        HistoryMode::Persistent => open_persistent_history(history_settings, data_dir).await,
+    }
+}
+
+/// Opens an ephemeral in-memory database, starting with an empty index.
+///
+/// The database is discarded on exit, so recorded history never reaches disk. A failure
+/// to open degrades to no store.
+fn open_in_memory_history() -> (
+    Option<Arc<dyn HistoryStore + Send + Sync>>,
+    Vec<SuggestionEntry>,
+) {
+    match SqliteStorage::open_in_memory() {
+        Ok(storage) => (Some(into_history_store(storage)), Vec::new()),
+        Err(_) => (None, Vec::new()),
+    }
+}
+
+/// Opens the on-disk database, prunes to the retention window, and loads the index.
+///
+/// The blocking SQLite work runs on a blocking thread. A failure at any step degrades to
+/// no store and an empty index rather than blocking startup.
+async fn open_persistent_history(
+    history_settings: HistorySettings,
+    data_dir: Option<&Path>,
+) -> (
+    Option<Arc<dyn HistoryStore + Send + Sync>>,
+    Vec<SuggestionEntry>,
+) {
+    let Ok(path) = history_database_path(data_dir) else {
+        return (None, Vec::new());
+    };
+    let cutoff = retention_cutoff(history_settings.retention_days());
+    let prepared = tokio::task::spawn_blocking(move || open_and_prune(&path, cutoff)).await;
+    match prepared {
+        Ok(Ok((storage, suggestions))) => (Some(into_history_store(storage)), suggestions),
+        _ => (None, Vec::new()),
+    }
+}
+
+/// Wraps a concrete storage backend as a shared trait object for the controller.
+fn into_history_store(storage: SqliteStorage) -> Arc<dyn HistoryStore + Send + Sync> {
+    Arc::new(storage)
+}
+
+/// Opens the database at `path`, prunes visits older than `cutoff`, and reads the index.
+///
+/// Runs on a blocking thread because every call is synchronous SQLite.
+fn open_and_prune(
+    path: &Path,
+    cutoff: i64,
+) -> Result<(SqliteStorage, Vec<SuggestionEntry>), StorageError> {
+    let storage = SqliteStorage::open(path)?;
+    storage.prune_older_than(cutoff)?;
+    let suggestions = storage.load_suggestions()?;
+    Ok((storage, suggestions))
+}
+
+/// The Unix-epoch cutoff before which visits are pruned, given a retention window in days.
+fn retention_cutoff(retention_days: u32) -> i64 {
+    now_unix_seconds() - i64::from(retention_days) * SECONDS_PER_DAY
+}
+
+/// The current time as Unix epoch seconds, or zero if the clock predates the epoch.
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Loads the page at `url` on `controller`, then opens the terminal on the result.
 ///
 /// A fragment on the startup URL is split off before the load and carried into the
 /// terminal, which positions the opening viewport on the matching anchor once the page
 /// renders. The load runs once here, before the synchronous event loop starts. A failed
 /// load still opens the terminal on an error page so the user sees a safe message and
 /// quits with `Esc Esc`; it is never a hard exit.
-async fn run_terminal_with_url(url: BrowserUrl) -> Result<()> {
+async fn run_terminal_with_url(
+    mut controller: NavigationController,
+    url: BrowserUrl,
+) -> Result<()> {
     let fragment = url.fragment().map(str::to_string);
     let base = url.without_fragment();
-    let mut controller = NavigationController::new();
     let view_state = load_initial_view(&mut controller, base).await;
     run_terminal_app(controller, view_state, fragment).await
 }
@@ -147,7 +259,7 @@ async fn run_terminal_with_url(url: BrowserUrl) -> Result<()> {
 /// Success becomes [`ViewState::Page`]. Failure becomes [`ViewState::Error`] carrying
 /// only the safe terminal `user_message` for the error, never raw error detail.
 async fn load_initial_view(controller: &mut NavigationController, url: BrowserUrl) -> ViewState {
-    match controller.load(url).await {
+    match controller.load(url, NavigationSource::AddressBar).await {
         Ok(()) => ViewState::Page,
         Err(core_error) => ViewState::Error(TerminalError::from(core_error).user_message()),
     }
@@ -223,22 +335,16 @@ fn unwrap_tracking_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0") | Some("false"))
 }
 
-/// Resolves the history settings from the config file overlaid with env overrides.
+/// Resolves the history settings from `config` overlaid with the env override.
 ///
-/// A malformed config file is surfaced as a short, safe error carrying neither the path
-/// nor the file contents. A missing file, or a platform with no resolvable config
-/// directory, falls back to the built-in defaults rather than failing.
-fn resolve_history_settings() -> Result<HistorySettings> {
-    let config = load_browser_config()?;
+/// The mode env override wins over the file value when set; the retention window and
+/// title toggle come from the resolved config.
+fn resolve_history_settings(config: &BrowserConfig) -> HistorySettings {
     let mode = resolve_history_mode(
         config.history_mode(),
         std::env::var(HISTORY_MODE_ENV).ok().as_deref(),
     );
-    Ok(HistorySettings::new(
-        mode,
-        config.retention_days(),
-        config.store_titles(),
-    ))
+    HistorySettings::new(mode, config.retention_days(), config.store_titles())
 }
 
 /// Loads the browser config, falling back to defaults when the path cannot be resolved.
