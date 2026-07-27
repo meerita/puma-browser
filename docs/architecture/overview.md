@@ -17,16 +17,16 @@ stage knows what comes before or after it beyond its declared input and output t
 
 ```mermaid
 flowchart LR
-    A["HTTP response\n(bytes)"]
+    A["HTTP response<br/>(bytes)"]
     B["browser-network"]
-    C["validated response\n(decoded, bounded)"]
+    C["validated response<br/>(decoded, bounded)"]
     D["browser-html"]
     E["SemanticNode tree"]
     F["browser-css"]
     G["TextStyle per node"]
     H["browser-layout"]
     I["cell buffer"]
-    J["browser-terminal\nor browser-mcp"]
+    J["browser-terminal<br/>or browser-mcp"]
 
     A --> B --> C --> D --> E --> F --> G --> H --> I --> J
 ```
@@ -62,25 +62,25 @@ adapters to the core, and starts the event loop. It contains no business logic.
 
 ```mermaid
 graph TD
-    cli["browser-cli\n(composition root)"]
+    cli["browser-cli<br/>(composition root)"]
 
     subgraph adapters["Output adapters"]
-        terminal["browser-terminal\n(Ratatui TUI)"]
-        mcp["browser-mcp\n(MCP stdio server)"]
+        terminal["browser-terminal<br/>(Ratatui TUI)"]
+        mcp["browser-mcp<br/>(MCP stdio server)"]
     end
 
-    core["browser-core\n(navigation, tabs, history,\nbookmarks, forms, downloads)"]
+    core["browser-core<br/>(navigation, tabs, history,<br/>bookmarks, forms, downloads)"]
 
     subgraph pipeline["Document pipeline"]
-        html["browser-html\n(SemanticNode tree)"]
-        css["browser-css\n(TextStyle cascade)"]
-        layout["browser-layout\n(cell buffer)"]
+        html["browser-html<br/>(SemanticNode tree)"]
+        css["browser-css<br/>(TextStyle cascade)"]
+        layout["browser-layout<br/>(cell buffer)"]
     end
 
     subgraph infra["Infrastructure"]
-        network["browser-network\n(HTTP, TLS, cookies, cache)"]
-        storage["browser-storage\n(SQLite persistence)"]
-        privacy["browser-privacy\n(cookie policy, request filtering)"]
+        network["browser-network<br/>(HTTP, TLS, cookies, cache)"]
+        storage["browser-storage<br/>(SQLite persistence)"]
+        privacy["browser-privacy<br/>(cookie policy, request filtering)"]
     end
 
     cli --> terminal
