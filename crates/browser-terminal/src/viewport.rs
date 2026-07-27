@@ -70,6 +70,14 @@ impl ScrollState {
     }
 }
 
+/// The vertical extent the scroll math needs together: the visible height of the
+/// viewport and the largest valid offset for the current content.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViewportBounds {
+    pub(crate) height: u16,
+    pub(crate) max_offset: u16,
+}
+
 /// The largest valid scroll offset: how far the top of the viewport can move down
 /// before the last content row sits at the bottom. Zero when the content fits.
 pub(crate) fn max_scroll_offset(content_rows: u16, viewport_height: u16) -> u16 {

@@ -62,7 +62,7 @@ use selection::TextSelection;
 use title_bar::compose_title_bar;
 use ui_state::UiState;
 use unicode_segmentation::UnicodeSegmentation;
-use viewport::{max_scroll_offset, scroll_percentage, ScrollState};
+use viewport::{max_scroll_offset, scroll_percentage, ScrollState, ViewportBounds};
 
 /// Rows consumed by the five fixed chrome zones (title + sep + cmd + sep + hints).
 const CHROME_ROWS: u16 = 5;
@@ -345,8 +345,10 @@ impl TerminalApp {
                                     &mut cache,
                                     &mut scroll,
                                     &mut self.view_state,
-                                    viewport_height,
-                                    max_offset,
+                                    ViewportBounds {
+                                        height: viewport_height,
+                                        max_offset,
+                                    },
                                 ) {
                                     navigate_to_url = Some(link_url);
                                 }
@@ -1375,7 +1377,10 @@ fn span_contains(span: &LinkSpan, row: u16, column: u16) -> bool {
 /// is absent.
 fn focused_link_row(buffer: &CellBuffer, focused_index: usize) -> Option<u16> {
     let url = *unique_links(buffer).get(focused_index)?;
-    let first_span = buffer.links().iter().find(|span| span.url.as_str() == url)?;
+    let first_span = buffer
+        .links()
+        .iter()
+        .find(|span| span.url.as_str() == url)?;
     Some(first_span.row)
 }
 
@@ -1385,8 +1390,7 @@ fn reveal_focused_link(
     ui_state: &UiState,
     buffer: &CellBuffer,
     scroll: &mut ScrollState,
-    viewport_height: u16,
-    max_offset: u16,
+    bounds: ViewportBounds,
 ) {
     let Some(focused_index) = ui_state.focused_link_index else {
         return;
@@ -1394,7 +1398,7 @@ fn reveal_focused_link(
     let Some(row) = focused_link_row(buffer, focused_index) else {
         return;
     };
-    scroll.reveal_row(row, viewport_height, max_offset);
+    scroll.reveal_row(row, bounds.height, bounds.max_offset);
 }
 
 /// Applies a link-navigation or history action, returning the raw link URL to load when
@@ -1407,8 +1411,7 @@ fn handle_navigation_action(
     cache: &mut Option<CachedPage>,
     scroll: &mut ScrollState,
     view_state: &mut ViewState,
-    viewport_height: u16,
-    max_offset: u16,
+    bounds: ViewportBounds,
 ) -> Option<String> {
     match action {
         InputAction::FocusNextLink => {
@@ -1416,8 +1419,7 @@ fn handle_navigation_action(
                 ui_state,
                 cache.as_ref().map(|cached| &cached.buffer),
                 scroll,
-                viewport_height,
-                max_offset,
+                bounds,
             );
             None
         }
@@ -1426,8 +1428,7 @@ fn handle_navigation_action(
                 ui_state,
                 cache.as_ref().map(|cached| &cached.buffer),
                 scroll,
-                viewport_height,
-                max_offset,
+                bounds,
             );
             None
         }
@@ -1473,8 +1474,7 @@ fn advance_link_focus(
     ui_state: &mut UiState,
     buffer: Option<&CellBuffer>,
     scroll: &mut ScrollState,
-    viewport_height: u16,
-    max_offset: u16,
+    bounds: ViewportBounds,
 ) {
     let Some(buffer) = buffer else {
         return;
@@ -1488,7 +1488,7 @@ fn advance_link_focus(
     } else {
         ui_state.focus_next_link(count);
     }
-    reveal_focused_link(ui_state, buffer, scroll, viewport_height, max_offset);
+    reveal_focused_link(ui_state, buffer, scroll, bounds);
 }
 
 /// Moves focus to the previous link, entering link navigation at the first visible link
@@ -1497,8 +1497,7 @@ fn retreat_link_focus(
     ui_state: &mut UiState,
     buffer: Option<&CellBuffer>,
     scroll: &mut ScrollState,
-    viewport_height: u16,
-    max_offset: u16,
+    bounds: ViewportBounds,
 ) {
     let Some(buffer) = buffer else {
         return;
@@ -1512,7 +1511,7 @@ fn retreat_link_focus(
     } else {
         ui_state.focus_previous_link(count);
     }
-    reveal_focused_link(ui_state, buffer, scroll, viewport_height, max_offset);
+    reveal_focused_link(ui_state, buffer, scroll, bounds);
 }
 
 /// The URL of the currently focused link, if link navigation is active and the focused
