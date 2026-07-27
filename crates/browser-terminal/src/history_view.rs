@@ -117,7 +117,7 @@ pub(crate) fn now_unix_seconds() -> i64 {
 }
 
 /// Removes control characters from `text` so no escape sequence reaches the popup.
-fn strip_control(text: &str) -> String {
+pub(crate) fn strip_control(text: &str) -> String {
     text.chars()
         .filter(|character| !character.is_control())
         .collect()

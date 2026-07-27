@@ -61,8 +61,8 @@ use command_bar::{
 };
 use hints_bar::compose_hints_bar;
 use history_view::{
-    compose_list_menu, format_history_label, now_unix_seconds, ListMenu, HISTORY_QUERY_LIMIT,
-    LIST_MENU_MAX_ROWS,
+    compose_list_menu, format_history_label, now_unix_seconds, strip_control, ListMenu,
+    HISTORY_QUERY_LIMIT, LIST_MENU_MAX_ROWS,
 };
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use palette_menu::{compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
@@ -1274,9 +1274,13 @@ fn draw_address_suggestions_popup(frame: &mut Frame, content_area: Rect, ui_stat
     if suggestions.is_empty() || content_area.width == 0 || content_area.height == 0 {
         return;
     }
+    // URLs from the index are already control-free (they come from a validated `BrowserUrl`
+    // whose parser percent-encodes control bytes), but the strip makes that guarantee
+    // explicit at the render boundary rather than relying on an upstream invariant.
+    let labels: Vec<String> = suggestions.iter().map(|url| strip_control(url)).collect();
     let max_rows = LIST_MENU_MAX_ROWS.min(content_area.height as usize);
     let menu = compose_list_menu(
-        suggestions,
+        &labels,
         ui_state.selected_suggestion(),
         content_area.width,
         max_rows,
