@@ -51,6 +51,7 @@ encoding_rs = "0.8"
 
 # Storage
 rusqlite = { version = "0.40", features = ["bundled"] }
+directories = "5"
 
 # Config
 toml = "1"
