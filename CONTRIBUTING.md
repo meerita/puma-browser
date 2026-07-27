@@ -124,7 +124,7 @@ security impact in the pull request description.
 
 Open an issue on GitHub. For bugs, include the URL or input that triggered the problem,
 what you expected, what happened, and your platform. For security vulnerabilities, do
-not open a public issue: contact the maintainer directly at meerita@icloud.com.
+not open a public issue: follow the [Security Policy](SECURITY.md).
 
 ## License
 
