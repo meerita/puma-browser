@@ -3,7 +3,7 @@
 // @layer core
 // @created meerita <meerita@icloud.com>
 
-use browser_core::{BrowserUrl, NavigationController};
+use browser_core::{BrowserUrl, NavigationController, NavigationSource};
 
 #[test]
 fn current_document_returns_none_before_loading() {
@@ -25,7 +25,10 @@ async fn current_document_returns_some_after_successful_load() {
 
     let url = BrowserUrl::parse(&mock_server.uri()).expect("wiremock URI must be valid");
     let mut controller = NavigationController::new();
-    controller.load(url).await.expect("load must succeed");
+    controller
+        .load(url, NavigationSource::AddressBar)
+        .await
+        .expect("load must succeed");
 
     let document = controller.current_document();
     assert!(document.is_some());

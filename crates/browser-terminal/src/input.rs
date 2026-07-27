@@ -29,6 +29,14 @@ pub(crate) enum InputAction {
     PaletteSelectPrev,
     PaletteSelectNext,
     PaletteComplete,
+    SuggestionSelectPrev,
+    SuggestionSelectNext,
+    SuggestionDismiss,
+    HistorySelectPrev,
+    HistorySelectNext,
+    HistoryActivateSelected,
+    HistoryDeleteSelected,
+    HistoryClose,
     FocusNextLink,
     FocusPreviousLink,
     ActivateFocusedLink,
@@ -43,6 +51,7 @@ pub(crate) enum InputAction {
 /// `Enter` submits, arrow keys move the cursor, `Backspace` deletes, and printable
 /// characters append to the buffer. When the slash-command palette is active, the arrow
 /// keys move the highlighted row and `Tab` completes the buffer to it instead.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn map_key_event(
     event: KeyEvent,
     quit_armed: bool,
@@ -50,12 +59,17 @@ pub(crate) fn map_key_event(
     in_command_mode: bool,
     in_link_navigation: bool,
     palette_active: bool,
+    address_suggestions_active: bool,
+    in_history: bool,
 ) -> InputAction {
     if is_quit_combination(event) {
         return InputAction::Quit;
     }
+    if in_history {
+        return map_history_key(event);
+    }
     if in_command_mode {
-        return map_command_mode_key(event, palette_active);
+        return map_command_mode_key(event, palette_active, address_suggestions_active);
     }
     if in_link_navigation {
         return map_link_navigation_key(event);
@@ -116,9 +130,17 @@ fn map_link_navigation_key(event: KeyEvent) -> InputAction {
     }
 }
 
-fn map_command_mode_key(event: KeyEvent, palette_active: bool) -> InputAction {
+fn map_command_mode_key(
+    event: KeyEvent,
+    palette_active: bool,
+    address_suggestions_active: bool,
+) -> InputAction {
     if palette_active {
         if let Some(action) = map_palette_key(event) {
+            return action;
+        }
+    } else if address_suggestions_active {
+        if let Some(action) = map_suggestion_key(event) {
             return action;
         }
     }
@@ -129,6 +151,33 @@ fn map_command_mode_key(event: KeyEvent, palette_active: bool) -> InputAction {
         KeyCode::Right => InputAction::CommandMoveCursorRight,
         KeyCode::Backspace => InputAction::CommandDeleteBack,
         KeyCode::Char(ch) => InputAction::CommandAppend(ch),
+        _ => InputAction::Disarm,
+    }
+}
+
+/// Suggestion-only keys layered over an address (non-slash) command buffer: the arrows and
+/// Tab move the highlighted suggestion, and `Esc` dismisses the list without leaving command
+/// mode. Returns `None` for every other key so the base command-mode map still handles
+/// `Enter` (which submits the selection or the typed text), cursor moves, and typing.
+fn map_suggestion_key(event: KeyEvent) -> Option<InputAction> {
+    match event.code {
+        KeyCode::Up | KeyCode::BackTab => Some(InputAction::SuggestionSelectPrev),
+        KeyCode::Down | KeyCode::Tab => Some(InputAction::SuggestionSelectNext),
+        KeyCode::Esc => Some(InputAction::SuggestionDismiss),
+        _ => None,
+    }
+}
+
+/// Maps a key while the history list is open. The arrows move the selection, `Enter` opens
+/// the selected entry, `Delete` (or `d`) removes it, and `Esc` closes the list. Any other key
+/// is ignored so a stray keystroke never dismisses the list or scrolls the page behind it.
+fn map_history_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Up | KeyCode::Char('k') => InputAction::HistorySelectPrev,
+        KeyCode::Down | KeyCode::Char('j') => InputAction::HistorySelectNext,
+        KeyCode::Enter => InputAction::HistoryActivateSelected,
+        KeyCode::Delete | KeyCode::Char('d') => InputAction::HistoryDeleteSelected,
+        KeyCode::Esc => InputAction::HistoryClose,
         _ => InputAction::Disarm,
     }
 }

@@ -3,7 +3,7 @@
 // @layer core
 // @created meerita <meerita@icloud.com>
 
-use browser_core::{BrowserUrl, NavigationController};
+use browser_core::{BrowserUrl, NavigationController, NavigationSource};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -30,11 +30,11 @@ async fn go_back_after_single_load_restores_previous_page() {
     mount_any_page(&server).await;
     let mut controller = NavigationController::new();
     controller
-        .load(url_for(&server, "/a"))
+        .load(url_for(&server, "/a"), NavigationSource::AddressBar)
         .await
         .expect("loading page A must succeed");
     controller
-        .load(url_for(&server, "/b"))
+        .load(url_for(&server, "/b"), NavigationSource::AddressBar)
         .await
         .expect("loading page B must succeed");
 
@@ -71,7 +71,7 @@ async fn can_go_back_reflects_stack_depth() {
     );
 
     controller
-        .load(url_for(&server, "/first"))
+        .load(url_for(&server, "/first"), NavigationSource::AddressBar)
         .await
         .expect("loading the first page must succeed");
     assert!(
@@ -80,7 +80,7 @@ async fn can_go_back_reflects_stack_depth() {
     );
 
     controller
-        .load(url_for(&server, "/second"))
+        .load(url_for(&server, "/second"), NavigationSource::AddressBar)
         .await
         .expect("loading the second page must succeed");
     assert!(
@@ -96,7 +96,10 @@ async fn history_stack_is_capped_at_50() {
     let mut controller = NavigationController::new();
     for page_number in 1..=51 {
         controller
-            .load(url_for(&server, &format!("/page/{page_number}")))
+            .load(
+                url_for(&server, &format!("/page/{page_number}")),
+                NavigationSource::AddressBar,
+            )
             .await
             .expect("each page must load");
     }

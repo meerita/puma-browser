@@ -10,6 +10,7 @@ mod command;
 mod command_bar;
 mod error;
 mod hints_bar;
+mod history_view;
 mod input;
 mod palette_menu;
 mod selection;
@@ -25,7 +26,10 @@ use std::io::Stdout;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use browser_core::{BrowserUrl, CoreError, NavigationController, NavigationTarget, SearchEngine};
+use browser_core::{
+    BrowserUrl, CoreError, HistoryEntryId, NavigationController, NavigationSource,
+    NavigationTarget, SearchEngine,
+};
 use browser_css::{Color, Emphasis};
 use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkSpan};
 use crossterm::event::{
@@ -56,6 +60,10 @@ use command_bar::{
     compose_command_bar_reading,
 };
 use hints_bar::compose_hints_bar;
+use history_view::{
+    compose_list_menu, format_history_label, now_unix_seconds, strip_control, ListMenu,
+    HISTORY_QUERY_LIMIT, LIST_MENU_MAX_ROWS,
+};
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use palette_menu::{compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
 use selection::TextSelection;
@@ -96,12 +104,28 @@ enum LoadState {
 }
 
 /// The result of submitting a command-bar buffer: nothing further to do, a new load to
-/// track, or a request to leave the event loop.
+/// track, a request to leave the event loop, or a history query to run.
 enum CommandOutcome {
     None,
     Load(LoadState),
     Quit,
+    History(HistoryRequest),
 }
+
+/// A `/history` request parsed from the command buffer, run asynchronously by the event
+/// loop because it reads or writes the store off the async task.
+enum HistoryRequest {
+    List,
+    Search(String),
+    ClearAll,
+    ClearSite(String),
+}
+
+/// The number of address-bar suggestions requested from the index on each edit.
+const ADDRESS_SUGGESTION_LIMIT: usize = 8;
+
+/// The hint shown while the history list is open, describing its controls.
+const HISTORY_CONTROLS_HINT: &str = "↑↓ select · Enter open · Del delete · Esc close";
 
 /// Drives the terminal user interface over the navigation core.
 ///
@@ -282,6 +306,7 @@ impl TerminalApp {
             let mut command_to_submit: Option<String> = None;
             let mut reload_url: Option<BrowserUrl> = None;
             let mut navigate_to_url: Option<String> = None;
+            let mut history_key_action: Option<InputAction> = None;
 
             if let LoadState::Active {
                 ref mut handle,
@@ -317,6 +342,8 @@ impl TerminalApp {
                                 let in_command_mode = ui_state.is_in_command_mode();
                                 let in_link_navigation = ui_state.is_in_link_navigation();
                                 let palette_active = ui_state.is_palette_active();
+                                let address_suggestions_active = ui_state.has_address_suggestions();
+                                let in_history = ui_state.is_in_history_mode();
                                 let action = map_key_event(
                                     key,
                                     ui_state.quit_armed,
@@ -324,6 +351,8 @@ impl TerminalApp {
                                     in_command_mode,
                                     in_link_navigation,
                                     palette_active,
+                                    address_suggestions_active,
+                                    in_history,
                                 );
                                 if matches!(action, InputAction::Quit) {
                                     return Ok(());
@@ -331,12 +360,25 @@ impl TerminalApp {
                                 ui_state.clear_transient();
                                 apply_scroll(action, &mut scroll, viewport_height, max_offset);
                                 if matches!(action, InputAction::CommandSubmit) {
-                                    command_to_submit = Some(ui_state.take_submit_buffer());
+                                    command_to_submit = Some(match ui_state.take_selected_suggestion() {
+                                        Some(url) => url,
+                                        None => ui_state.take_submit_buffer(),
+                                    });
                                 } else {
                                     apply_command_action(action, &mut ui_state);
                                 }
+                                if action_refreshes_suggestions(action) {
+                                    self.refresh_address_suggestions(&mut ui_state);
+                                }
                                 if matches!(action, InputAction::RefreshArmed) {
                                     reload_url = self.controller.current_url().cloned();
+                                }
+                                if matches!(
+                                    action,
+                                    InputAction::HistoryDeleteSelected
+                                        | InputAction::HistoryActivateSelected
+                                ) {
+                                    history_key_action = Some(action);
                                 }
                                 if let Some(link_url) = handle_navigation_action(
                                     action,
@@ -419,7 +461,30 @@ impl TerminalApp {
                 ) {
                     CommandOutcome::Quit => return Ok(()),
                     CommandOutcome::Load(state) => load_state = state,
+                    CommandOutcome::History(request) => {
+                        self.handle_history_request(request, &mut ui_state, now)
+                            .await;
+                    }
                     CommandOutcome::None => {}
+                }
+            }
+
+            // Apply a history-list key action: delete removes the selected entry through the
+            // store, activate opens it through the shared address path.
+            if let Some(history_action) = history_key_action {
+                if let Some(state) = self
+                    .apply_history_key_action(
+                        history_action,
+                        &mut ui_state,
+                        &working_dir,
+                        &mut cache,
+                        &mut scroll,
+                        max_offset,
+                        now,
+                    )
+                    .await
+                {
+                    load_state = state;
                 }
             }
 
@@ -440,6 +505,36 @@ impl TerminalApp {
                     now,
                 );
             }
+        }
+    }
+
+    /// Carries out a history-list key action outside the borrow on `load_state`: delete
+    /// removes the selected entry, activate opens it and returns the load to track.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_history_key_action(
+        &mut self,
+        action: InputAction,
+        ui_state: &mut UiState,
+        working_dir: &std::path::Path,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        max_offset: u16,
+        now: Instant,
+    ) -> Option<LoadState> {
+        match action {
+            InputAction::HistoryDeleteSelected => {
+                self.delete_selected_history(ui_state, now).await;
+                None
+            }
+            InputAction::HistoryActivateSelected => self.activate_selected_history(
+                ui_state,
+                working_dir,
+                cache,
+                scroll,
+                max_offset,
+                now,
+            ),
+            _ => None,
         }
     }
 
@@ -624,6 +719,7 @@ impl TerminalApp {
             CommandKind::Search => self.run_search(remainder, ui_state, now),
             CommandKind::Reload => self.run_reload(ui_state, now),
             CommandKind::Back => self.run_back(ui_state, cache, scroll, now),
+            CommandKind::History => CommandOutcome::History(parse_history_request(remainder)),
             CommandKind::Quit => CommandOutcome::Quit,
             CommandKind::Help => {
                 ui_state.enter_command_mode('/');
@@ -725,6 +821,137 @@ impl TerminalApp {
         CommandOutcome::None
     }
 
+    /// Recomputes the address-bar suggestions for the current command buffer.
+    ///
+    /// Suggestions appear only while an address (non-slash) is being typed: a slash buffer
+    /// drives the palette instead, and an empty or non-command buffer clears the list. The
+    /// index read is synchronous, so this runs inline after each buffer edit.
+    fn refresh_address_suggestions(&self, ui_state: &mut UiState) {
+        if !ui_state.is_in_command_mode() || ui_state.is_palette_active() {
+            ui_state.clear_address_suggestions();
+            return;
+        }
+        let buffer = ui_state.command_buffer().trim();
+        if buffer.is_empty() {
+            ui_state.clear_address_suggestions();
+            return;
+        }
+        let urls = self
+            .controller
+            .suggest(buffer, ADDRESS_SUGGESTION_LIMIT)
+            .into_iter()
+            .map(|entry| entry.url().to_string())
+            .collect();
+        ui_state.set_address_suggestions(urls);
+    }
+
+    /// Runs a parsed `/history` request: opening the list, searching, or clearing. Every
+    /// outcome is a short, safe status message; a store failure never surfaces raw detail.
+    async fn handle_history_request(
+        &mut self,
+        request: HistoryRequest,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) {
+        match request {
+            HistoryRequest::List => self.open_history_list(ui_state, now).await,
+            HistoryRequest::Search(query) => self.open_history_search(&query, ui_state, now).await,
+            HistoryRequest::ClearAll => self.clear_all_history(ui_state, now).await,
+            HistoryRequest::ClearSite(host) => {
+                self.clear_history_for_site(&host, ui_state, now).await
+            }
+        }
+    }
+
+    /// Loads recent history into the list view, or reports an empty history.
+    async fn open_history_list(&mut self, ui_state: &mut UiState, now: Instant) {
+        match self.controller.recent_history(HISTORY_QUERY_LIMIT).await {
+            Ok(entries) => self.show_history_entries(entries, ui_state, now),
+            Err(_) => ui_state.set_transient_message("could not read history".to_string(), now),
+        }
+    }
+
+    /// Searches history for `query` and shows the matches in the list view.
+    async fn open_history_search(&mut self, query: &str, ui_state: &mut UiState, now: Instant) {
+        match self
+            .controller
+            .search_history(query, HISTORY_QUERY_LIMIT)
+            .await
+        {
+            Ok(entries) => self.show_history_entries(entries, ui_state, now),
+            Err(_) => ui_state.set_transient_message("could not search history".to_string(), now),
+        }
+    }
+
+    /// Opens the history list on `entries`, or shows a short notice when there are none.
+    fn show_history_entries(
+        &self,
+        entries: Vec<browser_core::HistoryEntry>,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) {
+        if entries.is_empty() {
+            ui_state.set_transient_message("no matching history".to_string(), now);
+            return;
+        }
+        ui_state.enter_history_mode(entries);
+        ui_state.set_transient_message(HISTORY_CONTROLS_HINT.to_string(), now);
+    }
+
+    /// Clears all history, reporting the outcome as a short status message.
+    async fn clear_all_history(&mut self, ui_state: &mut UiState, now: Instant) {
+        match self.controller.clear_history().await {
+            Ok(()) => ui_state.set_transient_message("history cleared".to_string(), now),
+            Err(_) => ui_state.set_transient_message("could not clear history".to_string(), now),
+        }
+    }
+
+    /// Clears history for a single host, reporting the outcome as a short status message.
+    async fn clear_history_for_site(&mut self, host: &str, ui_state: &mut UiState, now: Instant) {
+        match self.controller.clear_history_site(host).await {
+            Ok(()) => ui_state.set_transient_message("site history cleared".to_string(), now),
+            Err(_) => ui_state.set_transient_message("could not clear history".to_string(), now),
+        }
+    }
+
+    /// Removes the highlighted history entry through the store, then drops it from the list.
+    ///
+    /// A store failure leaves the list unchanged and shows a short message; the raw error is
+    /// never surfaced.
+    async fn delete_selected_history(&mut self, ui_state: &mut UiState, now: Instant) {
+        let Some(id) = ui_state
+            .selected_history_entry()
+            .map(|entry| HistoryEntryId::new(entry.id()))
+        else {
+            return;
+        };
+        match self.controller.remove_history_entry(id).await {
+            Ok(()) => ui_state.remove_selected_history_entry(),
+            Err(_) => ui_state.set_transient_message("could not delete entry".to_string(), now),
+        }
+    }
+
+    /// Opens the highlighted history entry by routing its URL through the address path, so
+    /// classification and recording match a typed navigation. Returns the load to track, or
+    /// `None` when nothing is selected or the URL does not resolve.
+    #[allow(clippy::too_many_arguments)]
+    fn activate_selected_history(
+        &mut self,
+        ui_state: &mut UiState,
+        working_dir: &std::path::Path,
+        cache: &mut Option<CachedPage>,
+        scroll: &mut ScrollState,
+        max_offset: u16,
+        now: Instant,
+    ) -> Option<LoadState> {
+        let url = ui_state.selected_history_entry()?.url().to_string();
+        ui_state.exit_history_mode();
+        match self.submit_address(&url, working_dir, ui_state, cache, scroll, max_offset, now) {
+            CommandOutcome::Load(state) => Some(state),
+            _ => None,
+        }
+    }
+
     /// Marks a link URL visited, leaves link navigation, and starts loading it through
     /// the shared load path after scheme validation. On an unresolvable URL it shows a
     /// generic error rather than echoing the remote URL, so a malicious href can never
@@ -785,7 +1012,9 @@ impl TerminalApp {
         let loading_url = url.to_string();
         let mut taken = std::mem::take(&mut self.controller);
         let handle = tokio::spawn(async move {
-            let result = taken.load_with_progress(url, progress_tx).await;
+            let result = taken
+                .load_with_progress(url, progress_tx, NavigationSource::AddressBar)
+                .await;
             (taken, result)
         });
         LoadState::Active {
@@ -847,6 +1076,39 @@ impl TerminalApp {
             .map_err(|_| TerminalError::RenderFailed)?;
         Ok(())
     }
+}
+
+/// Parses a `/history` argument into a request. An empty argument lists recent history; a
+/// leading `clear` token clears all history, or a single host when one follows; anything
+/// else is a search query. The whole remainder is the query so a multi-word search works.
+fn parse_history_request(remainder: &str) -> HistoryRequest {
+    let trimmed = remainder.trim();
+    if trimmed.is_empty() {
+        return HistoryRequest::List;
+    }
+    let (first, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((first, rest)) => (first, rest.trim()),
+        None => (trimmed, ""),
+    };
+    if first != "clear" {
+        return HistoryRequest::Search(trimmed.to_string());
+    }
+    if rest.is_empty() {
+        return HistoryRequest::ClearAll;
+    }
+    HistoryRequest::ClearSite(rest.to_string())
+}
+
+/// Whether `action` changed the command buffer text and so should trigger a fresh
+/// address-suggestion query. Selection moves and dismissals are excluded so they keep the
+/// current list and highlight rather than resetting it.
+fn action_refreshes_suggestions(action: InputAction) -> bool {
+    matches!(
+        action,
+        InputAction::EnterCommand(_)
+            | InputAction::CommandAppend(_)
+            | InputAction::CommandDeleteBack
+    )
 }
 
 fn render_page(controller: &NavigationController, width: u16) -> Result<CellBuffer, TerminalError> {
@@ -937,6 +1199,8 @@ fn draw_frame(
     );
 
     draw_palette_popup(frame, chunks[0], ui_state);
+    draw_address_suggestions_popup(frame, chunks[0], ui_state);
+    draw_history_popup(frame, chunks[0], ui_state);
 
     draw_separator(frame, chunks[1]);
 
@@ -995,6 +1259,71 @@ fn draw_palette_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
         return;
     }
     let lines = palette_popup_lines(&menu);
+    render_bottom_popup(frame, content_area, lines);
+}
+
+/// Draws the address-bar suggestion list over the bottom of the content area while an
+/// address is being typed. Renders nothing when not in command mode or when there are no
+/// suggestions, so a stale list never lingers. Each row is a stored URL, control-stripped
+/// and fitted through the same popup path the palette uses; no page bytes reach it.
+fn draw_address_suggestions_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState) {
+    if !ui_state.is_in_command_mode() {
+        return;
+    }
+    let suggestions = ui_state.address_suggestions();
+    if suggestions.is_empty() || content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    // URLs from the index are already control-free (they come from a validated `BrowserUrl`
+    // whose parser percent-encodes control bytes), but the strip makes that guarantee
+    // explicit at the render boundary rather than relying on an upstream invariant.
+    let labels: Vec<String> = suggestions.iter().map(|url| strip_control(url)).collect();
+    let max_rows = LIST_MENU_MAX_ROWS.min(content_area.height as usize);
+    let menu = compose_list_menu(
+        &labels,
+        ui_state.selected_suggestion(),
+        content_area.width,
+        max_rows,
+    );
+    if menu.rows.is_empty() {
+        return;
+    }
+    render_bottom_popup(frame, content_area, list_popup_lines(&menu));
+}
+
+/// Draws the history list over the bottom of the content area while the list is open.
+/// Renders nothing when the list is closed or empty. Each row is a stored URL and title,
+/// control-stripped and fitted, so no raw remote bytes reach the terminal.
+fn draw_history_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState) {
+    if !ui_state.is_in_history_mode() {
+        return;
+    }
+    let entries = ui_state.history_entries();
+    if entries.is_empty() || content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let now = now_unix_seconds();
+    let labels: Vec<String> = entries
+        .iter()
+        .map(|entry| format_history_label(entry, now))
+        .collect();
+    let max_rows = LIST_MENU_MAX_ROWS.min(content_area.height as usize);
+    let menu = compose_list_menu(
+        &labels,
+        Some(ui_state.history_selected()),
+        content_area.width,
+        max_rows,
+    );
+    if menu.rows.is_empty() {
+        return;
+    }
+    render_bottom_popup(frame, content_area, list_popup_lines(&menu));
+}
+
+/// Renders `lines` as a popup anchored to the bottom of `content_area`, clearing the region
+/// first so the page behind it never shows through. Shared by the palette, suggestion, and
+/// history popups so all three sit in the same place with the same clearing behavior.
+fn render_bottom_popup(frame: &mut Frame, content_area: Rect, lines: Vec<Line<'static>>) {
     let popup_height = lines.len() as u16;
     let popup_area = Rect {
         x: content_area.x,
@@ -1015,6 +1344,20 @@ fn palette_popup_lines(menu: &PaletteMenu) -> Vec<Line<'static>> {
         .enumerate()
         .map(|(row_index, row_text)| {
             let style = palette_row_style(row_index == menu.selected_row);
+            Line::styled(row_text.clone(), style)
+        })
+        .collect()
+}
+
+/// Builds styled lines for a suggestion or history popup, highlighting the selected row when
+/// there is one. The row strings are already width-fitted and control-stripped by the
+/// composer, so this only applies the selection style.
+fn list_popup_lines(menu: &ListMenu) -> Vec<Line<'static>> {
+    menu.rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, row_text)| {
+            let style = palette_row_style(menu.selected_row == Some(row_index));
             Line::styled(row_text.clone(), style)
         })
         .collect()
@@ -1302,6 +1645,14 @@ fn apply_scroll(
         | InputAction::PaletteSelectPrev
         | InputAction::PaletteSelectNext
         | InputAction::PaletteComplete
+        | InputAction::SuggestionSelectPrev
+        | InputAction::SuggestionSelectNext
+        | InputAction::SuggestionDismiss
+        | InputAction::HistorySelectPrev
+        | InputAction::HistorySelectNext
+        | InputAction::HistoryActivateSelected
+        | InputAction::HistoryDeleteSelected
+        | InputAction::HistoryClose
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
         | InputAction::ActivateFocusedLink
@@ -1320,6 +1671,12 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         InputAction::PaletteSelectPrev => ui_state.palette_select_prev(),
         InputAction::PaletteSelectNext => ui_state.palette_select_next(),
         InputAction::PaletteComplete => ui_state.palette_complete(),
+        InputAction::SuggestionSelectPrev => ui_state.suggestion_select_prev(),
+        InputAction::SuggestionSelectNext => ui_state.suggestion_select_next(),
+        InputAction::SuggestionDismiss => ui_state.clear_address_suggestions(),
+        InputAction::HistorySelectPrev => ui_state.history_select_prev(),
+        InputAction::HistorySelectNext => ui_state.history_select_next(),
+        InputAction::HistoryClose => ui_state.exit_history_mode(),
         InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
         | InputAction::ScrollPageDown
@@ -1332,6 +1689,8 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         | InputAction::RefreshArmed
         | InputAction::Disarm
         | InputAction::CommandSubmit
+        | InputAction::HistoryActivateSelected
+        | InputAction::HistoryDeleteSelected
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
         | InputAction::ActivateFocusedLink
@@ -1464,7 +1823,15 @@ fn handle_navigation_action(
         | InputAction::CommandSubmit
         | InputAction::PaletteSelectPrev
         | InputAction::PaletteSelectNext
-        | InputAction::PaletteComplete => None,
+        | InputAction::PaletteComplete
+        | InputAction::SuggestionSelectPrev
+        | InputAction::SuggestionSelectNext
+        | InputAction::SuggestionDismiss
+        | InputAction::HistorySelectPrev
+        | InputAction::HistorySelectNext
+        | InputAction::HistoryActivateSelected
+        | InputAction::HistoryDeleteSelected
+        | InputAction::HistoryClose => None,
     }
 }
 

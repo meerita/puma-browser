@@ -13,7 +13,7 @@ pub use error::McpError;
 
 use std::sync::Arc;
 
-use browser_core::{BrowserUrl, NavigationController};
+use browser_core::{BrowserUrl, NavigationController, NavigationSource};
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
@@ -81,9 +81,11 @@ impl McpServer {
         ssrf_guard(&browser_url).map_err(|_| ErrorData::invalid_request("SSRF_BLOCKED", None))?;
 
         let mut ctrl = self.controller.lock().await;
-        ctrl.load(browser_url).await.map_err(|error| {
-            ErrorData::internal_error(McpError::from(error).reason_code().to_string(), None)
-        })?;
+        ctrl.load(browser_url, NavigationSource::Mcp)
+            .await
+            .map_err(|error| {
+                ErrorData::internal_error(McpError::from(error).reason_code().to_string(), None)
+            })?;
 
         let url_str = ctrl
             .current_url()

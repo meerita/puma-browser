@@ -21,7 +21,7 @@ strip = true
 panic = "abort"
 
 [workspace.package]
-version = "0.25.0"
+version = "0.26.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/meerita/puma-browser"
@@ -51,6 +51,7 @@ encoding_rs = "0.8"
 
 # Storage
 rusqlite = { version = "0.40", features = ["bundled"] }
+directories = "5"
 
 # Config
 toml = "1"

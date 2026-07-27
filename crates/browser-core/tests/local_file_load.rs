@@ -3,7 +3,7 @@
 // @layer core
 // @created meerita <meerita@icloud.com>
 
-use browser_core::{resolve_address, NavigationController};
+use browser_core::{resolve_address, NavigationController, NavigationSource};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn a_local_html_file_resolves_loads_and_renders_a_non_empty_buffer() {
 
     let mut controller = NavigationController::new();
     controller
-        .load(url)
+        .load(url, NavigationSource::AddressBar)
         .await
         .expect("loading a local HTML file must succeed");
 

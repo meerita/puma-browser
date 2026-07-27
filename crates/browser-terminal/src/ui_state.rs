@@ -6,6 +6,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use browser_core::HistoryEntry;
+
 use crate::command::{self, CommandKind, CommandMatch};
 
 pub(crate) const READING_HINTS: &[&str] = &[
@@ -22,6 +24,7 @@ pub(crate) enum InteractionMode {
     Reading,
     Command,
     LinkNavigation,
+    History,
 }
 
 pub(crate) struct UiState {
@@ -38,6 +41,10 @@ pub(crate) struct UiState {
     cursor_byte_offset: usize,
     palette_matches: Vec<CommandMatch>,
     palette_selected_index: usize,
+    address_suggestions: Vec<String>,
+    suggestion_selected: Option<usize>,
+    history_entries: Vec<HistoryEntry>,
+    history_selected_index: usize,
     pending_fragment: Option<String>,
     search_enabled: bool,
 }
@@ -58,6 +65,10 @@ impl UiState {
             cursor_byte_offset: 0,
             palette_matches: Vec::new(),
             palette_selected_index: 0,
+            address_suggestions: Vec::new(),
+            suggestion_selected: None,
+            history_entries: Vec::new(),
+            history_selected_index: 0,
             pending_fragment: None,
             search_enabled,
         }
@@ -86,6 +97,141 @@ impl UiState {
 
     pub(crate) fn is_in_link_navigation(&self) -> bool {
         matches!(self.interaction_mode, InteractionMode::LinkNavigation)
+    }
+
+    pub(crate) fn is_in_history_mode(&self) -> bool {
+        matches!(self.interaction_mode, InteractionMode::History)
+    }
+
+    /// Replaces the address-bar suggestions with `suggestions`, resetting the selection so
+    /// nothing is highlighted until the user moves into the list. An empty list clears the
+    /// popup.
+    pub(crate) fn set_address_suggestions(&mut self, suggestions: Vec<String>) {
+        self.address_suggestions = suggestions;
+        self.suggestion_selected = None;
+    }
+
+    /// Clears the address-bar suggestions and their selection.
+    pub(crate) fn clear_address_suggestions(&mut self) {
+        self.address_suggestions.clear();
+        self.suggestion_selected = None;
+    }
+
+    /// The current address-bar suggestions, most relevant first.
+    pub(crate) fn address_suggestions(&self) -> &[String] {
+        &self.address_suggestions
+    }
+
+    /// Whether any address-bar suggestion is currently offered.
+    pub(crate) fn has_address_suggestions(&self) -> bool {
+        !self.address_suggestions.is_empty()
+    }
+
+    /// The index of the highlighted suggestion, or `None` when none is highlighted and
+    /// Enter would submit the typed text instead.
+    pub(crate) fn selected_suggestion(&self) -> Option<usize> {
+        self.suggestion_selected
+    }
+
+    /// Moves the suggestion highlight to the next row, entering the list at the first row
+    /// when none is highlighted and wrapping from the last back to the first.
+    pub(crate) fn suggestion_select_next(&mut self) {
+        if self.address_suggestions.is_empty() {
+            return;
+        }
+        self.suggestion_selected = Some(match self.suggestion_selected {
+            Some(current) => (current + 1) % self.address_suggestions.len(),
+            None => 0,
+        });
+    }
+
+    /// Moves the suggestion highlight to the previous row, entering the list at the last row
+    /// when none is highlighted and wrapping from the first back to the last.
+    pub(crate) fn suggestion_select_prev(&mut self) {
+        if self.address_suggestions.is_empty() {
+            return;
+        }
+        let last = self.address_suggestions.len() - 1;
+        self.suggestion_selected = Some(match self.suggestion_selected {
+            Some(current) => current.checked_sub(1).unwrap_or(last),
+            None => last,
+        });
+    }
+
+    /// Takes the highlighted suggestion URL, leaving command mode and clearing the buffer,
+    /// palette, and suggestions. Returns `None` when no suggestion is highlighted, so the
+    /// caller falls back to submitting the typed buffer.
+    pub(crate) fn take_selected_suggestion(&mut self) -> Option<String> {
+        let index = self.suggestion_selected?;
+        let url = self.address_suggestions.get(index)?.clone();
+        self.command_buffer.clear();
+        self.cursor_byte_offset = 0;
+        self.interaction_mode = InteractionMode::Reading;
+        self.clear_palette();
+        self.clear_address_suggestions();
+        Some(url)
+    }
+
+    /// Opens the history list on `entries`, selecting the first row.
+    pub(crate) fn enter_history_mode(&mut self, entries: Vec<HistoryEntry>) {
+        self.interaction_mode = InteractionMode::History;
+        self.history_entries = entries;
+        self.history_selected_index = 0;
+    }
+
+    /// Closes the history list and returns to reading mode.
+    pub(crate) fn exit_history_mode(&mut self) {
+        self.interaction_mode = InteractionMode::Reading;
+        self.history_entries.clear();
+        self.history_selected_index = 0;
+    }
+
+    /// The entries shown in the open history list.
+    pub(crate) fn history_entries(&self) -> &[HistoryEntry] {
+        &self.history_entries
+    }
+
+    /// The index of the highlighted history row.
+    pub(crate) fn history_selected(&self) -> usize {
+        self.history_selected_index
+    }
+
+    /// The highlighted history entry, or `None` when the list is empty.
+    pub(crate) fn selected_history_entry(&self) -> Option<&HistoryEntry> {
+        self.history_entries.get(self.history_selected_index)
+    }
+
+    /// Moves the history highlight to the next row, wrapping at the end.
+    pub(crate) fn history_select_next(&mut self) {
+        if self.history_entries.is_empty() {
+            return;
+        }
+        self.history_selected_index =
+            (self.history_selected_index + 1) % self.history_entries.len();
+    }
+
+    /// Moves the history highlight to the previous row, wrapping at the start.
+    pub(crate) fn history_select_prev(&mut self) {
+        if self.history_entries.is_empty() {
+            return;
+        }
+        let last = self.history_entries.len() - 1;
+        self.history_selected_index = self.history_selected_index.checked_sub(1).unwrap_or(last);
+    }
+
+    /// Removes the highlighted history entry from the list and clamps the selection to a
+    /// remaining row, closing the list once it empties.
+    pub(crate) fn remove_selected_history_entry(&mut self) {
+        if self.history_selected_index >= self.history_entries.len() {
+            return;
+        }
+        self.history_entries.remove(self.history_selected_index);
+        if self.history_entries.is_empty() {
+            self.exit_history_mode();
+            return;
+        }
+        let last = self.history_entries.len() - 1;
+        self.history_selected_index = self.history_selected_index.min(last);
     }
 
     /// Enters link navigation mode and focuses the link at `index`.
@@ -191,6 +337,7 @@ impl UiState {
         self.command_buffer.clear();
         self.cursor_byte_offset = 0;
         self.clear_palette();
+        self.clear_address_suggestions();
     }
 
     /// Handles a backspace in command mode. Deleting the leading `/` exits command mode
@@ -223,6 +370,7 @@ impl UiState {
         self.cursor_byte_offset = 0;
         self.interaction_mode = InteractionMode::Reading;
         self.clear_palette();
+        self.clear_address_suggestions();
         resolved
     }
 
