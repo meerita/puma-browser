@@ -15,8 +15,19 @@ use crate::width::{emoji_replacement, grapheme_columns, WidthConfig};
 /// Columns a block quote's text is indented from the left margin.
 const QUOTE_INDENT_COLUMNS: usize = 2;
 
-/// The character repeated across a full row to draw a horizontal separator.
-const SEPARATOR_GRAPHEME: &str = "─";
+/// The character repeated across the centered rule drawn for a horizontal separator.
+const SEPARATOR_GRAPHEME: &str = "━";
+
+/// The fraction of the content width a horizontal separator's rule spans, as a percentage.
+const RULE_WIDTH_PERCENT: usize = 30;
+
+/// The narrowest a separator's rule is drawn, in columns, so it stays visible on a narrow
+/// terminal. Capped at the content width when the terminal is narrower than this.
+const MIN_RULE_WIDTH: usize = 8;
+
+/// The widest a separator's rule is drawn, in columns, so it does not stretch across an
+/// ultrawide terminal.
+const MAX_RULE_WIDTH: usize = 40;
 
 /// The blank field drawn for an editable input placeholder.
 const INPUT_BLANK: &str = "____";
@@ -457,10 +468,29 @@ fn clip_line(line: &str, style: &TextStyle, width: usize, width_config: &WidthCo
     cells
 }
 
+/// Draw a horizontal separator as a rule centered on the content column.
+///
+/// The rule spans a clamped fraction of the content width (see `rule_width`) and is padded
+/// on the left so it sits centered. Only the leading pad and the rule are emitted; rows in
+/// this engine are ragged, so no trailing pad is needed.
 fn separator_row(style: &TextStyle, width: usize) -> Vec<Cell> {
-    (0..width)
-        .map(|_| Cell::new(String::from(SEPARATOR_GRAPHEME), style))
-        .collect()
+    let rule_width = rule_width(width);
+    let left_pad = (width - rule_width) / 2;
+    let mut cells = space_cells(left_pad, style);
+    cells.extend((0..rule_width).map(|_| Cell::new(String::from(SEPARATOR_GRAPHEME), style)));
+    cells
+}
+
+/// The width in columns of a separator's rule for a given content width.
+///
+/// Thirty percent of the content width, clamped to a floor and ceiling so the rule stays
+/// proportional in the common range and bounded at the extremes, then capped at the content
+/// width itself so a terminal narrower than the floor cannot produce a rule wider than the
+/// row.
+fn rule_width(width: usize) -> usize {
+    (width * RULE_WIDTH_PERCENT / 100)
+        .clamp(MIN_RULE_WIDTH, MAX_RULE_WIDTH)
+        .min(width)
 }
 
 /// Render a figure: its content rows followed by the caption on its own wrapped lines.

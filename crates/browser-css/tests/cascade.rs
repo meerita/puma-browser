@@ -210,3 +210,17 @@ fn a_heading_with_no_inline_style_keeps_its_user_agent_bold() {
     assert_eq!(style.emphasis, Emphasis::Bold);
     assert_eq!(style.spacing_before, 0);
 }
+
+#[test]
+fn a_separator_gains_one_blank_row_after_its_rule() {
+    let style = cascade_from_default(&SemanticNode::Separator);
+
+    assert_eq!(style.spacing_after, 1);
+}
+
+#[test]
+fn a_separator_gains_no_blank_row_before_its_rule() {
+    let style = cascade_from_default(&SemanticNode::Separator);
+
+    assert_eq!(style.spacing_before, 0);
+}

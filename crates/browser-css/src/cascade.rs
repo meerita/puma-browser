@@ -105,6 +105,7 @@ fn user_agent_declarations(node: &SemanticNode) -> Declarations {
             preformatted_declarations()
         }
         SemanticNode::Quote { .. } => quote_declarations(),
+        SemanticNode::Separator => separator_declarations(),
         SemanticNode::Paragraph { .. }
         | SemanticNode::List { .. }
         | SemanticNode::Table { .. }
@@ -156,6 +157,13 @@ fn quote_declarations() -> Declarations {
 }
 
 fn block_declarations() -> Declarations {
+    Declarations {
+        spacing_after: Some(1),
+        ..Declarations::default()
+    }
+}
+
+fn separator_declarations() -> Declarations {
     Declarations {
         spacing_after: Some(1),
         ..Declarations::default()
