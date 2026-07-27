@@ -255,12 +255,76 @@ fn representative_document_renders_to_the_expected_rows() {
             String::new(),             // paragraph spacing_after
             String::from("• one"),     // list items run tight
             String::from("• two"),
-            String::new(),                        // list spacing_after
-            String::from("  Quoted"),             // quote indented two columns
-            String::new(),                        // quote spacing_after
-            String::from("────────────────────"), // separator fills the width
+            String::new(),                  // list spacing_after
+            String::from("  Quoted"),       // quote indented two columns
+            String::new(),                  // quote spacing_after
+            String::from("      ━━━━━━━━"), // separator: 6-column left pad, 8-column centered rule
+            String::new(),                  // separator spacing_after
         ]
     );
+}
+
+#[test]
+fn a_separator_draws_a_centered_thirty_percent_rule_at_a_wide_width() {
+    let document = document_of(vec![SemanticNode::Separator]);
+
+    let buffer =
+        render_document(&document, 100, &WidthConfig::default()).expect("document must lay out");
+
+    // clamp(100 * 30 / 100 = 30, 8, 40) = 30 glyphs, centered with a (100 - 30) / 2 = 35 pad.
+    assert_eq!(
+        row_text(&buffer, 0).trim_end(),
+        format!("{}{}", " ".repeat(35), "━".repeat(30))
+    );
+}
+
+#[test]
+fn a_separator_rule_is_clamped_to_the_ceiling_on_an_ultrawide_terminal() {
+    let document = document_of(vec![SemanticNode::Separator]);
+
+    let buffer =
+        render_document(&document, 200, &WidthConfig::default()).expect("document must lay out");
+
+    // clamp(200 * 30 / 100 = 60, 8, 40) = 40 glyphs, not 60.
+    let rule = row_text(&buffer, 0);
+    assert_eq!(rule.trim_end().chars().filter(|c| *c == '━').count(), 40);
+}
+
+#[test]
+fn a_separator_rule_is_clamped_to_the_floor_on_a_narrow_terminal() {
+    let document = document_of(vec![SemanticNode::Separator]);
+
+    let buffer =
+        render_document(&document, 10, &WidthConfig::default()).expect("document must lay out");
+
+    // clamp(10 * 30 / 100 = 3, 8, 40) = 8 glyphs, centered with a (10 - 8) / 2 = 1 pad.
+    assert_eq!(
+        row_text(&buffer, 0).trim_end(),
+        format!(" {}", "━".repeat(8))
+    );
+}
+
+#[test]
+fn a_separator_rule_is_capped_at_the_content_width_and_does_not_panic() {
+    let document = document_of(vec![SemanticNode::Separator]);
+
+    let buffer =
+        render_document(&document, 4, &WidthConfig::default()).expect("document must lay out");
+
+    // The floor 8 exceeds the width 4, so the rule is capped at 4 glyphs with no left pad.
+    assert_eq!(row_text(&buffer, 0).trim_end(), "━".repeat(4));
+}
+
+#[test]
+fn a_separator_uses_the_heavy_glyph_never_the_light_one() {
+    let document = document_of(vec![SemanticNode::Separator]);
+
+    let buffer =
+        render_document(&document, 40, &WidthConfig::default()).expect("document must lay out");
+
+    let rule = row_text(&buffer, 0);
+    assert!(rule.contains('━'));
+    assert!(!rule.contains('─'));
 }
 
 fn strong_run(text: &str) -> InlineRun {
