@@ -72,3 +72,41 @@ fn scroll_percentage_is_zero_at_the_top_and_full_at_the_bottom() {
 fn scroll_percentage_is_full_when_nothing_can_scroll() {
     assert_eq!(scroll_percentage(0, 0), 100);
 }
+
+#[test]
+fn revealing_a_row_above_the_window_brings_it_to_the_top() {
+    let mut scroll = ScrollState::new();
+    scroll.scroll_to(30, 100);
+    scroll.reveal_row(10, 20, 100);
+    assert_eq!(scroll.offset(), 10);
+}
+
+#[test]
+fn revealing_a_row_below_the_window_brings_it_to_the_bottom_edge() {
+    let mut scroll = ScrollState::new();
+    let viewport_height = 20;
+    scroll.reveal_row(50, viewport_height, 100);
+    assert_eq!(scroll.offset(), 50 - (viewport_height - 1));
+}
+
+#[test]
+fn revealing_a_row_already_visible_leaves_the_offset_unchanged() {
+    let mut scroll = ScrollState::new();
+    scroll.scroll_to(10, 100);
+    scroll.reveal_row(15, 20, 100);
+    assert_eq!(scroll.offset(), 10);
+}
+
+#[test]
+fn revealing_a_row_near_the_end_clamps_to_the_max_offset() {
+    let mut scroll = ScrollState::new();
+    scroll.reveal_row(95, 20, 30);
+    assert_eq!(scroll.offset(), 30);
+}
+
+#[test]
+fn revealing_a_row_never_scrolls_when_the_page_fits() {
+    let mut scroll = ScrollState::new();
+    scroll.reveal_row(40, 20, 0);
+    assert_eq!(scroll.offset(), 0);
+}

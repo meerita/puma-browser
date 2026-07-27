@@ -62,7 +62,7 @@ use selection::TextSelection;
 use title_bar::compose_title_bar;
 use ui_state::UiState;
 use unicode_segmentation::UnicodeSegmentation;
-use viewport::{max_scroll_offset, scroll_percentage, ScrollState};
+use viewport::{max_scroll_offset, scroll_percentage, ScrollState, ViewportBounds};
 
 /// Rows consumed by the five fixed chrome zones (title + sep + cmd + sep + hints).
 const CHROME_ROWS: u16 = 5;
@@ -338,7 +338,6 @@ impl TerminalApp {
                                 if matches!(action, InputAction::RefreshArmed) {
                                     reload_url = self.controller.current_url().cloned();
                                 }
-                                let scroll_offset = scroll.offset();
                                 if let Some(link_url) = handle_navigation_action(
                                     action,
                                     &mut self.controller,
@@ -346,7 +345,10 @@ impl TerminalApp {
                                     &mut cache,
                                     &mut scroll,
                                     &mut self.view_state,
-                                    scroll_offset,
+                                    ViewportBounds {
+                                        height: viewport_height,
+                                        max_offset,
+                                    },
                                 ) {
                                     navigate_to_url = Some(link_url);
                                 }
@@ -1370,6 +1372,35 @@ fn span_contains(span: &LinkSpan, row: u16, column: u16) -> bool {
     span.row == row && span.col_start <= column && column <= span.col_end
 }
 
+/// The row of the focused link's first span: the first `LinkSpan` whose URL matches the
+/// entry at `focused_index` in [`unique_links`]. `None` when the index or a matching span
+/// is absent.
+fn focused_link_row(buffer: &CellBuffer, focused_index: usize) -> Option<u16> {
+    let url = *unique_links(buffer).get(focused_index)?;
+    let first_span = buffer
+        .links()
+        .iter()
+        .find(|span| span.url.as_str() == url)?;
+    Some(first_span.row)
+}
+
+/// Scrolls the viewport the minimum needed to reveal the focused link's first row. Does
+/// nothing when no link is focused or its row cannot be resolved.
+fn reveal_focused_link(
+    ui_state: &UiState,
+    buffer: &CellBuffer,
+    scroll: &mut ScrollState,
+    bounds: ViewportBounds,
+) {
+    let Some(focused_index) = ui_state.focused_link_index else {
+        return;
+    };
+    let Some(row) = focused_link_row(buffer, focused_index) else {
+        return;
+    };
+    scroll.reveal_row(row, bounds.height, bounds.max_offset);
+}
+
 /// Applies a link-navigation or history action, returning the raw link URL to load when
 /// the action activates the focused link. Focus and back actions mutate UI and controller
 /// state directly and return `None`.
@@ -1380,14 +1411,15 @@ fn handle_navigation_action(
     cache: &mut Option<CachedPage>,
     scroll: &mut ScrollState,
     view_state: &mut ViewState,
-    scroll_offset: u16,
+    bounds: ViewportBounds,
 ) -> Option<String> {
     match action {
         InputAction::FocusNextLink => {
             advance_link_focus(
                 ui_state,
                 cache.as_ref().map(|cached| &cached.buffer),
-                scroll_offset,
+                scroll,
+                bounds,
             );
             None
         }
@@ -1395,7 +1427,8 @@ fn handle_navigation_action(
             retreat_link_focus(
                 ui_state,
                 cache.as_ref().map(|cached| &cached.buffer),
-                scroll_offset,
+                scroll,
+                bounds,
             );
             None
         }
@@ -1436,8 +1469,13 @@ fn handle_navigation_action(
 }
 
 /// Moves focus to the next link, entering link navigation at the first visible link when
-/// nothing is focused yet.
-fn advance_link_focus(ui_state: &mut UiState, buffer: Option<&CellBuffer>, scroll_offset: u16) {
+/// nothing is focused yet, then scrolls the viewport to keep the focused link visible.
+fn advance_link_focus(
+    ui_state: &mut UiState,
+    buffer: Option<&CellBuffer>,
+    scroll: &mut ScrollState,
+    bounds: ViewportBounds,
+) {
     let Some(buffer) = buffer else {
         return;
     };
@@ -1446,15 +1484,21 @@ fn advance_link_focus(ui_state: &mut UiState, buffer: Option<&CellBuffer>, scrol
         return;
     }
     if ui_state.focused_link_index.is_none() {
-        ui_state.enter_link_navigation(first_visible_link_index(buffer, scroll_offset));
-        return;
+        ui_state.enter_link_navigation(first_visible_link_index(buffer, scroll.offset()));
+    } else {
+        ui_state.focus_next_link(count);
     }
-    ui_state.focus_next_link(count);
+    reveal_focused_link(ui_state, buffer, scroll, bounds);
 }
 
 /// Moves focus to the previous link, entering link navigation at the first visible link
-/// when nothing is focused yet.
-fn retreat_link_focus(ui_state: &mut UiState, buffer: Option<&CellBuffer>, scroll_offset: u16) {
+/// when nothing is focused yet, then scrolls the viewport to keep the focused link visible.
+fn retreat_link_focus(
+    ui_state: &mut UiState,
+    buffer: Option<&CellBuffer>,
+    scroll: &mut ScrollState,
+    bounds: ViewportBounds,
+) {
     let Some(buffer) = buffer else {
         return;
     };
@@ -1463,10 +1507,11 @@ fn retreat_link_focus(ui_state: &mut UiState, buffer: Option<&CellBuffer>, scrol
         return;
     }
     if ui_state.focused_link_index.is_none() {
-        ui_state.enter_link_navigation(first_visible_link_index(buffer, scroll_offset));
-        return;
+        ui_state.enter_link_navigation(first_visible_link_index(buffer, scroll.offset()));
+    } else {
+        ui_state.focus_previous_link(count);
     }
-    ui_state.focus_previous_link(count);
+    reveal_focused_link(ui_state, buffer, scroll, bounds);
 }
 
 /// The URL of the currently focused link, if link navigation is active and the focused

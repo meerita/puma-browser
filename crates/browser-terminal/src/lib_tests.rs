@@ -6,10 +6,11 @@
 use std::time::Instant;
 
 use super::{
-    cell_is_selected, clamped_document_coordinate, copied_message, decode_fragment,
-    document_coordinate, handle_mouse_event, resolve_anchor_row, sanitize_fragment_for_display,
-    CachedPage, CommandOutcome, LoadState, ScrollState, TerminalApp, TerminalSettings,
-    TextSelection, UiState, ViewState, BODY_AREA_TOP_ROW, CONTENT_PADDING,
+    advance_link_focus, cell_is_selected, clamped_document_coordinate, copied_message,
+    decode_fragment, document_coordinate, handle_mouse_event, max_scroll_offset,
+    resolve_anchor_row, retreat_link_focus, sanitize_fragment_for_display, CachedPage,
+    CommandOutcome, LoadState, ScrollState, TerminalApp, TerminalSettings, TextSelection, UiState,
+    ViewState, ViewportBounds, BODY_AREA_TOP_ROW, CONTENT_PADDING,
 };
 use browser_core::NavigationController;
 use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
@@ -496,6 +497,157 @@ fn cell_is_selected_is_false_without_a_range() {
 #[test]
 fn copied_message_reports_the_ascii_grapheme_count() {
     assert_eq!(copied_message("hello"), "copied 5 chars to clipboard");
+}
+
+/// A cached page of `link_count` single-link paragraphs. Blank lines between paragraphs
+/// place the links on evenly spaced rows (0, 2, 4, ...), taller than a small viewport, so
+/// some links fall outside a chosen window.
+fn cache_with_links(link_count: usize) -> CachedPage {
+    let nodes = (0..link_count)
+        .map(|number| SemanticNode::Paragraph {
+            runs: vec![InlineRun {
+                text: format!("Link {number}"),
+                emphasis: InlineEmphasis::none(),
+                link: Some(format!("https://example.com/{number}")),
+                anchors: Vec::new(),
+            }],
+            inline_style: None,
+        })
+        .collect();
+    let document = Document::new(nodes, None, 0);
+    let buffer = render_document(&document, 40, &WidthConfig::default())
+        .expect("linked paragraphs must lay out for the focus test");
+    CachedPage { width: 40, buffer }
+}
+
+#[test]
+fn tabbing_down_onto_a_link_below_the_fold_scrolls_to_reveal_it() {
+    let cache = cache_with_links(6);
+    let viewport_height = 4;
+    let max_offset = max_scroll_offset(cache.buffer.height(), viewport_height);
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+
+    // The entry Tab focuses the first visible link (row 0) and does not scroll.
+    advance_link_focus(
+        &mut ui_state,
+        Some(&cache.buffer),
+        &mut scroll,
+        ViewportBounds {
+            height: viewport_height,
+            max_offset,
+        },
+    );
+    assert_eq!(scroll.offset(), 0);
+
+    // Tabbing down to the fourth link (row 6) scrolls it onto the bottom edge.
+    for _ in 0..3 {
+        advance_link_focus(
+            &mut ui_state,
+            Some(&cache.buffer),
+            &mut scroll,
+            ViewportBounds {
+                height: viewport_height,
+                max_offset,
+            },
+        );
+    }
+    assert_eq!(ui_state.focused_link_index, Some(3));
+    assert_eq!(scroll.offset(), 6 - (viewport_height - 1));
+}
+
+#[test]
+fn shift_tabbing_up_to_a_link_above_the_window_scrolls_to_reveal_it() {
+    let cache = cache_with_links(6);
+    let viewport_height = 4;
+    let max_offset = max_scroll_offset(cache.buffer.height(), viewport_height);
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    // Focus the fifth link (row 8) with the window scrolled to the bottom.
+    ui_state.enter_link_navigation(4);
+    scroll.scroll_to(8, max_offset);
+
+    // Shift+Tab up to the fourth link (row 6) sits above the window and scrolls up to it.
+    retreat_link_focus(
+        &mut ui_state,
+        Some(&cache.buffer),
+        &mut scroll,
+        ViewportBounds {
+            height: viewport_height,
+            max_offset,
+        },
+    );
+    assert_eq!(ui_state.focused_link_index, Some(3));
+    assert_eq!(scroll.offset(), 6);
+}
+
+#[test]
+fn tabbing_forward_off_the_last_link_wraps_and_scrolls_to_the_top() {
+    let cache = cache_with_links(6);
+    let viewport_height = 4;
+    let max_offset = max_scroll_offset(cache.buffer.height(), viewport_height);
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    ui_state.enter_link_navigation(5);
+    scroll.scroll_to(8, max_offset);
+
+    advance_link_focus(
+        &mut ui_state,
+        Some(&cache.buffer),
+        &mut scroll,
+        ViewportBounds {
+            height: viewport_height,
+            max_offset,
+        },
+    );
+    assert_eq!(ui_state.focused_link_index, Some(0));
+    assert_eq!(scroll.offset(), 0);
+}
+
+#[test]
+fn shift_tabbing_backward_off_the_first_link_wraps_and_reveals_the_last() {
+    let cache = cache_with_links(6);
+    let viewport_height = 4;
+    let max_offset = max_scroll_offset(cache.buffer.height(), viewport_height);
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    ui_state.enter_link_navigation(0);
+
+    // The last link sits on row 10; the bottom edge lands it at offset 10 - (4 - 1) = 7.
+    retreat_link_focus(
+        &mut ui_state,
+        Some(&cache.buffer),
+        &mut scroll,
+        ViewportBounds {
+            height: viewport_height,
+            max_offset,
+        },
+    );
+    assert_eq!(ui_state.focused_link_index, Some(5));
+    assert_eq!(scroll.offset(), 10 - (viewport_height - 1));
+}
+
+#[test]
+fn tabbing_onto_an_already_visible_link_leaves_the_offset_unchanged() {
+    let cache = cache_with_links(6);
+    let viewport_height = 6;
+    let max_offset = max_scroll_offset(cache.buffer.height(), viewport_height);
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    ui_state.enter_link_navigation(0);
+
+    // The second link (row 2) is already inside the window that starts at the top.
+    advance_link_focus(
+        &mut ui_state,
+        Some(&cache.buffer),
+        &mut scroll,
+        ViewportBounds {
+            height: viewport_height,
+            max_offset,
+        },
+    );
+    assert_eq!(ui_state.focused_link_index, Some(1));
+    assert_eq!(scroll.offset(), 0);
 }
 
 #[test]

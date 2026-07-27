@@ -52,10 +52,30 @@ impl ScrollState {
         self.offset = row.min(max_offset);
     }
 
+    /// Scrolls the minimum needed so `row` is visible, then clamps to range. A row already
+    /// inside the window leaves the offset unchanged; a row above moves to it, a row below
+    /// moves just far enough to bring it to the bottom edge.
+    pub(crate) fn reveal_row(&mut self, row: u16, viewport_height: u16, max_offset: u16) {
+        if row < self.offset {
+            self.offset = row;
+        } else if row >= self.offset.saturating_add(viewport_height) {
+            self.offset = row.saturating_sub(viewport_height.saturating_sub(1));
+        }
+        self.offset = self.offset.min(max_offset);
+    }
+
     /// Pulls the offset back within range after the content or viewport shrank.
     pub(crate) fn clamp(&mut self, max_offset: u16) {
         self.offset = self.offset.min(max_offset);
     }
+}
+
+/// The vertical extent the scroll math needs together: the visible height of the
+/// viewport and the largest valid offset for the current content.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViewportBounds {
+    pub(crate) height: u16,
+    pub(crate) max_offset: u16,
 }
 
 /// The largest valid scroll offset: how far the top of the viewport can move down
