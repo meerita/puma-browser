@@ -18,7 +18,7 @@ use crate::migrations::run_migrations;
 /// connection is wrapped in an `Arc` so the async layer above can share it across tasks.
 #[derive(Clone)]
 pub struct SqliteStorage {
-    connection: Arc<Mutex<Connection>>,
+    pub(crate) connection: Arc<Mutex<Connection>>,
 }
 
 impl SqliteStorage {

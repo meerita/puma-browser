@@ -6,6 +6,8 @@
 mod config;
 mod database;
 mod error;
+mod history_records;
+mod history_store;
 mod migrations;
 mod paths;
 mod stores;
@@ -13,5 +15,6 @@ mod stores;
 pub use config::{default_config_path, load_config, BrowserConfig};
 pub use database::SqliteStorage;
 pub use error::StorageError;
+pub use history_records::{HistoryEntry, NewVisit, SuggestionEntry};
 pub use paths::default_database_path;
 pub use stores::{BookmarkStore, ConfigStore, HistoryStore};

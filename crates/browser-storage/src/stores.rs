@@ -4,6 +4,7 @@
 // @created meerita <meerita@icloud.com>
 
 use crate::error::StorageError;
+use crate::history_records::{HistoryEntry, NewVisit, SuggestionEntry};
 
 /// Reads and writes persisted configuration values keyed by name.
 ///
@@ -18,16 +19,39 @@ pub trait ConfigStore {
     fn set_config_value(&self, key: &str, value: &str) -> Result<(), StorageError>;
 }
 
-/// Records browsing history and reads it back in recency order.
+/// Records browsing history and reads it back for the history list and the suggestion
+/// index.
 ///
-/// Implementations land in a later milestone. The visited location is passed as text
-/// because URL validation belongs to the network layer, not to storage.
+/// URL validation and host extraction belong to the caller, so a [`NewVisit`] carries
+/// already-resolved fields. The store never reads the clock: `visited_at` and the prune
+/// `cutoff` are Unix epoch seconds supplied by the caller. It computes no ranking; it
+/// returns the raw aggregates the core crate ranks.
 pub trait HistoryStore {
-    /// Records a visit to `url` with the page `title`.
-    fn record_visit(&self, url: &str, title: &str) -> Result<(), StorageError>;
+    /// Records `visit`, upserting its page aggregate and appending a visit event, and
+    /// returns the page's updated aggregate so the caller can refresh its index in place.
+    fn record_visit(&self, visit: NewVisit) -> Result<SuggestionEntry, StorageError>;
 
-    /// Returns up to `limit` visited URLs, most recent first.
-    fn recent_visits(&self, limit: usize) -> Result<Vec<String>, StorageError>;
+    /// Returns up to `limit` visits, most recent first.
+    fn recent_entries(&self, limit: usize) -> Result<Vec<HistoryEntry>, StorageError>;
+
+    /// Returns up to `limit` visits whose URL or title contains `query`, most recent
+    /// first. Wildcard characters in `query` match literally.
+    fn search_entries(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>, StorageError>;
+
+    /// Returns the aggregate for every recorded page, for loading the suggestion index.
+    fn load_suggestions(&self) -> Result<Vec<SuggestionEntry>, StorageError>;
+
+    /// Removes the visit with the given raw id, and its page when no visit remains.
+    fn remove_entry(&self, id: u64) -> Result<(), StorageError>;
+
+    /// Removes every recorded page and visit.
+    fn clear_all(&self) -> Result<(), StorageError>;
+
+    /// Removes every page whose host equals `host`, cascading to their visits.
+    fn clear_site(&self, host: &str) -> Result<(), StorageError>;
+
+    /// Removes visits older than `cutoff`, and any page left with no remaining visit.
+    fn prune_older_than(&self, cutoff: i64) -> Result<(), StorageError>;
 }
 
 /// Stores and reads back user bookmarks.
