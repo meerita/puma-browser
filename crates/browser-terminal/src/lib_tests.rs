@@ -3,18 +3,24 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::{
-    advance_link_focus, cell_is_selected, clamped_document_coordinate, copied_message,
-    decode_fragment, document_coordinate, handle_mouse_event, max_scroll_offset,
-    resolve_anchor_row, retreat_link_focus, sanitize_fragment_for_display, CachedPage,
-    CommandOutcome, LoadState, ScrollState, TerminalApp, TerminalSettings, TextSelection, UiState,
+    action_refreshes_suggestions, advance_link_focus, cell_is_selected,
+    clamped_document_coordinate, copied_message, decode_fragment, document_coordinate,
+    handle_mouse_event, max_scroll_offset, parse_history_request, resolve_anchor_row,
+    retreat_link_focus, sanitize_fragment_for_display, CachedPage, CommandOutcome, HistoryRequest,
+    InputAction, LoadState, ScrollState, TerminalApp, TerminalSettings, TextSelection, UiState,
     ViewState, ViewportBounds, BODY_AREA_TOP_ROW, CONTENT_PADDING,
 };
-use browser_core::NavigationController;
+use browser_core::{
+    HistoryMode, HistorySettings, HistoryStore, NavigationController, SuggestionEntry,
+};
 use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
 use browser_layout::{render_document, AnchorSpan, CellBuffer, CellPosition, WidthConfig};
+use browser_storage::{HistoryEntry, NewVisit, StorageError};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 fn anchor(name: &str, row: u16) -> AnchorSpan {
@@ -693,4 +699,403 @@ async fn run_search_with_a_query_starts_a_load() {
         _ => panic!("a query with search enabled must start a load"),
     }
     assert_eq!(ui_state.transient_message(), None);
+}
+
+/// Runtime settings with every gate on, for the address-bar and history tests.
+fn test_settings() -> TerminalSettings {
+    TerminalSettings {
+        copy_on_select: false,
+        force_osc52: false,
+        search_enabled: true,
+        unwrap_tracking: true,
+    }
+}
+
+/// The history settings the terminal tests run under: persistent, with titles.
+fn persistent_history_settings() -> HistorySettings {
+    HistorySettings::new(HistoryMode::Persistent, 90, true)
+}
+
+/// A history store that returns fixed entries and records the clear and remove calls made
+/// against it, standing in for SQLite.
+#[derive(Default)]
+struct FakeHistoryStore {
+    entries: Vec<HistoryEntry>,
+    cleared_all: Mutex<bool>,
+    cleared_sites: Mutex<Vec<String>>,
+    removed_ids: Mutex<Vec<u64>>,
+}
+
+impl FakeHistoryStore {
+    fn with_entries(entries: Vec<HistoryEntry>) -> Self {
+        Self {
+            entries,
+            ..Self::default()
+        }
+    }
+
+    fn cleared_all(&self) -> bool {
+        *self
+            .cleared_all
+            .lock()
+            .expect("the mutex must not be poisoned")
+    }
+
+    fn removed_ids(&self) -> Vec<u64> {
+        self.removed_ids
+            .lock()
+            .expect("the mutex must not be poisoned")
+            .clone()
+    }
+
+    fn cleared_sites(&self) -> Vec<String> {
+        self.cleared_sites
+            .lock()
+            .expect("the mutex must not be poisoned")
+            .clone()
+    }
+}
+
+impl HistoryStore for FakeHistoryStore {
+    fn record_visit(&self, visit: NewVisit) -> Result<SuggestionEntry, StorageError> {
+        Ok(SuggestionEntry::new(
+            visit.url().to_string(),
+            visit.host().to_string(),
+            1,
+            0,
+            visit.visited_at(),
+        ))
+    }
+
+    fn recent_entries(&self, limit: usize) -> Result<Vec<HistoryEntry>, StorageError> {
+        Ok(self.entries.iter().take(limit).cloned().collect())
+    }
+
+    fn search_entries(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>, StorageError> {
+        Ok(self
+            .entries
+            .iter()
+            .filter(|entry| entry.url().contains(query))
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    fn load_suggestions(&self) -> Result<Vec<SuggestionEntry>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    fn remove_entry(&self, id: u64) -> Result<(), StorageError> {
+        self.removed_ids
+            .lock()
+            .expect("the mutex must not be poisoned")
+            .push(id);
+        Ok(())
+    }
+
+    fn clear_all(&self) -> Result<(), StorageError> {
+        *self
+            .cleared_all
+            .lock()
+            .expect("the mutex must not be poisoned") = true;
+        Ok(())
+    }
+
+    fn clear_site(&self, host: &str) -> Result<(), StorageError> {
+        self.cleared_sites
+            .lock()
+            .expect("the mutex must not be poisoned")
+            .push(host.to_string());
+        Ok(())
+    }
+
+    fn prune_older_than(&self, _cutoff: i64) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
+fn app_with_store(store: Arc<FakeHistoryStore>) -> TerminalApp {
+    let history: Option<Arc<dyn HistoryStore + Send + Sync>> = Some(store);
+    let controller =
+        NavigationController::with_history(history, persistent_history_settings(), Vec::new());
+    TerminalApp::new(controller, ViewState::Page, test_settings())
+}
+
+/// Mirrors the event loop's Enter decision: a highlighted suggestion is taken over the
+/// typed buffer.
+fn resolve_submit(ui_state: &mut UiState) -> String {
+    match ui_state.take_selected_suggestion() {
+        Some(url) => url,
+        None => ui_state.take_submit_buffer(),
+    }
+}
+
+#[test]
+fn typing_an_address_populates_suggestions_from_the_controller() {
+    let entry = SuggestionEntry::new(
+        "https://github.com/".to_string(),
+        "github.com".to_string(),
+        3,
+        2,
+        1_000,
+    );
+    let controller =
+        NavigationController::with_history(None, persistent_history_settings(), vec![entry]);
+    let application = TerminalApp::new(controller, ViewState::Page, test_settings());
+    let mut ui_state = UiState::new(true);
+    ui_state.enter_command_mode('g');
+    ui_state.command_append_char('i');
+    ui_state.command_append_char('t');
+
+    application.refresh_address_suggestions(&mut ui_state);
+
+    assert!(ui_state.has_address_suggestions());
+    assert_eq!(ui_state.address_suggestions()[0], "https://github.com/");
+}
+
+#[test]
+fn a_slash_buffer_shows_no_address_suggestions() {
+    let entry = SuggestionEntry::new(
+        "https://github.com/".to_string(),
+        "github.com".to_string(),
+        3,
+        2,
+        1_000,
+    );
+    let controller =
+        NavigationController::with_history(None, persistent_history_settings(), vec![entry]);
+    let application = TerminalApp::new(controller, ViewState::Page, test_settings());
+    let mut ui_state = UiState::new(true);
+    ui_state.enter_command_mode('/');
+
+    application.refresh_address_suggestions(&mut ui_state);
+
+    assert!(!ui_state.has_address_suggestions());
+}
+
+#[test]
+fn an_empty_command_buffer_offers_no_suggestions() {
+    let controller = NavigationController::with_history(
+        None,
+        persistent_history_settings(),
+        vec![SuggestionEntry::new(
+            "https://github.com/".to_string(),
+            "github.com".to_string(),
+            1,
+            0,
+            10,
+        )],
+    );
+    let application = TerminalApp::new(controller, ViewState::Page, test_settings());
+    let mut ui_state = UiState::new(true);
+
+    application.refresh_address_suggestions(&mut ui_state);
+
+    assert!(!ui_state.has_address_suggestions());
+}
+
+#[test]
+fn only_buffer_editing_actions_refresh_the_suggestions() {
+    assert!(action_refreshes_suggestions(InputAction::CommandAppend(
+        'a'
+    )));
+    assert!(action_refreshes_suggestions(InputAction::EnterCommand('a')));
+    assert!(action_refreshes_suggestions(InputAction::CommandDeleteBack));
+    assert!(!action_refreshes_suggestions(
+        InputAction::SuggestionSelectNext
+    ));
+    assert!(!action_refreshes_suggestions(
+        InputAction::SuggestionDismiss
+    ));
+}
+
+#[test]
+fn enter_with_a_selected_suggestion_resolves_to_that_url_not_the_typed_text() {
+    let mut ui_state = UiState::new(true);
+    ui_state.enter_command_mode('g');
+    ui_state.command_append_char('i');
+    ui_state.command_append_char('t');
+    ui_state.set_address_suggestions(vec!["https://github.com/".to_string()]);
+    ui_state.suggestion_select_next();
+
+    let submitted = resolve_submit(&mut ui_state);
+
+    assert_eq!(submitted, "https://github.com/");
+}
+
+#[test]
+fn enter_without_a_selection_resolves_to_the_typed_text() {
+    let mut ui_state = UiState::new(true);
+    ui_state.enter_command_mode('e');
+    ui_state.command_append_char('x');
+    ui_state.set_address_suggestions(vec!["https://github.com/".to_string()]);
+
+    let submitted = resolve_submit(&mut ui_state);
+
+    assert_eq!(submitted, "ex");
+}
+
+#[test]
+fn parse_history_request_lists_on_an_empty_argument() {
+    assert!(matches!(parse_history_request(""), HistoryRequest::List));
+    assert!(matches!(parse_history_request("   "), HistoryRequest::List));
+}
+
+#[test]
+fn parse_history_request_clears_all_on_a_bare_clear() {
+    assert!(matches!(
+        parse_history_request("clear"),
+        HistoryRequest::ClearAll
+    ));
+}
+
+#[test]
+fn parse_history_request_clears_a_single_site() {
+    match parse_history_request("clear example.com") {
+        HistoryRequest::ClearSite(host) => assert_eq!(host, "example.com"),
+        _ => panic!("clear with a host must clear that site"),
+    }
+}
+
+#[test]
+fn parse_history_request_treats_other_text_as_a_search_query() {
+    match parse_history_request("rust lang") {
+        HistoryRequest::Search(query) => assert_eq!(query, "rust lang"),
+        _ => panic!("a non-clear argument must search"),
+    }
+    // A word that merely starts with "clear" is a search, not a clear.
+    assert!(matches!(
+        parse_history_request("clearance"),
+        HistoryRequest::Search(_)
+    ));
+}
+
+#[test]
+fn submitting_the_history_command_routes_to_a_list_request() {
+    let mut application = terminal_app();
+    let mut ui_state = UiState::new(true);
+    let mut cache = None;
+    let mut scroll = ScrollState::new();
+    let outcome = application.submit_command_input(
+        "/history".to_string(),
+        Path::new("."),
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        0,
+        Instant::now(),
+    );
+    assert!(matches!(
+        outcome,
+        CommandOutcome::History(HistoryRequest::List)
+    ));
+}
+
+#[test]
+fn submitting_history_clear_routes_to_a_clear_all_request() {
+    let mut application = terminal_app();
+    let mut ui_state = UiState::new(true);
+    let mut cache = None;
+    let mut scroll = ScrollState::new();
+    let outcome = application.submit_command_input(
+        "/history clear".to_string(),
+        Path::new("."),
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        0,
+        Instant::now(),
+    );
+    assert!(matches!(
+        outcome,
+        CommandOutcome::History(HistoryRequest::ClearAll)
+    ));
+}
+
+#[tokio::test]
+async fn a_history_list_request_opens_the_list_with_the_stored_entries() {
+    let store = Arc::new(FakeHistoryStore::with_entries(vec![HistoryEntry::new(
+        1,
+        "https://a.test/".to_string(),
+        Some("A".to_string()),
+        100,
+    )]));
+    let mut application = app_with_store(store);
+    let mut ui_state = UiState::new(true);
+
+    application
+        .handle_history_request(HistoryRequest::List, &mut ui_state, Instant::now())
+        .await;
+
+    assert!(ui_state.is_in_history_mode());
+    assert_eq!(ui_state.history_entries().len(), 1);
+}
+
+#[tokio::test]
+async fn an_empty_history_list_request_shows_a_notice_and_opens_no_list() {
+    let store = Arc::new(FakeHistoryStore::default());
+    let mut application = app_with_store(store);
+    let mut ui_state = UiState::new(true);
+
+    application
+        .handle_history_request(HistoryRequest::List, &mut ui_state, Instant::now())
+        .await;
+
+    assert!(!ui_state.is_in_history_mode());
+    assert_eq!(ui_state.transient_message(), Some("no matching history"));
+}
+
+#[tokio::test]
+async fn a_history_clear_request_invokes_the_store_clear_path() {
+    let store = Arc::new(FakeHistoryStore::default());
+    let mut application = app_with_store(store.clone());
+    let mut ui_state = UiState::new(true);
+
+    application
+        .handle_history_request(HistoryRequest::ClearAll, &mut ui_state, Instant::now())
+        .await;
+
+    assert!(store.cleared_all());
+    assert_eq!(ui_state.transient_message(), Some("history cleared"));
+}
+
+#[tokio::test]
+async fn a_history_clear_site_request_clears_only_that_host() {
+    let store = Arc::new(FakeHistoryStore::default());
+    let mut application = app_with_store(store.clone());
+    let mut ui_state = UiState::new(true);
+
+    application
+        .handle_history_request(
+            HistoryRequest::ClearSite("example.com".to_string()),
+            &mut ui_state,
+            Instant::now(),
+        )
+        .await;
+
+    assert_eq!(store.cleared_sites(), vec!["example.com".to_string()]);
+}
+
+#[tokio::test]
+async fn the_delete_key_removes_the_selected_history_entry_through_the_store() {
+    let store = Arc::new(FakeHistoryStore::with_entries(vec![HistoryEntry::new(
+        7,
+        "https://a.test/".to_string(),
+        None,
+        100,
+    )]));
+    let mut application = app_with_store(store.clone());
+    let mut ui_state = UiState::new(true);
+    application
+        .handle_history_request(HistoryRequest::List, &mut ui_state, Instant::now())
+        .await;
+    assert!(ui_state.is_in_history_mode());
+
+    application
+        .delete_selected_history(&mut ui_state, Instant::now())
+        .await;
+
+    assert_eq!(store.removed_ids(), vec![7]);
+    // The only entry is gone, so the list closes.
+    assert!(!ui_state.is_in_history_mode());
 }

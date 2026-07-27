@@ -24,3 +24,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 browser-html = { path = "../browser-html" }
+browser-storage = { path = "../browser-storage" }

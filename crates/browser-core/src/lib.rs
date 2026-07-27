@@ -20,7 +20,7 @@ pub use address_resolver::resolve_address;
 pub use browser_html::{Document, DocumentTitle};
 pub use browser_layout::CellBuffer;
 pub use browser_network::BrowserUrl;
-pub use browser_storage::{HistoryStore, SuggestionEntry};
+pub use browser_storage::{HistoryEntry, HistoryStore, SuggestionEntry};
 pub use error::CoreError;
 pub use frecency::frecency;
 pub use history_mode::{history_mode_from_str, HistoryMode, HistorySettings};
@@ -36,7 +36,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use browser_storage::NewVisit;
+use browser_storage::{NewVisit, StorageError};
 
 use current_page::CurrentPage;
 
@@ -174,6 +174,91 @@ impl NavigationController {
             .suggest(input, now_unix_seconds(), limit)
     }
 
+    /// Returns up to `limit` recent history entries, most recent first.
+    ///
+    /// Empty when history is [`HistoryMode::Disabled`] or no store is wired. The
+    /// synchronous store read runs on a blocking thread so the async caller is never
+    /// blocked on SQLite, and any store failure maps to [`CoreError::Storage`].
+    pub async fn recent_history(&self, limit: usize) -> Result<Vec<HistoryEntry>, CoreError> {
+        let Some(store) = self.enabled_store() else {
+            return Ok(Vec::new());
+        };
+        let read = tokio::task::spawn_blocking(move || store.recent_entries(limit)).await;
+        flatten_storage_result(read)
+    }
+
+    /// Returns up to `limit` history entries whose URL or title contains `query`.
+    ///
+    /// Empty when history is [`HistoryMode::Disabled`] or no store is wired. Behaves like
+    /// [`recent_history`](Self::recent_history) for blocking and error mapping.
+    pub async fn search_history(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, CoreError> {
+        let Some(store) = self.enabled_store() else {
+            return Ok(Vec::new());
+        };
+        let owned_query = query.to_string();
+        let read =
+            tokio::task::spawn_blocking(move || store.search_entries(&owned_query, limit)).await;
+        flatten_storage_result(read)
+    }
+
+    /// Clears all recorded history and empties the in-memory suggestion index.
+    ///
+    /// A no-op when history is [`HistoryMode::Disabled`] or no store is wired. The index
+    /// is emptied on success so cleared URLs stop surfacing as suggestions at once.
+    pub async fn clear_history(&mut self) -> Result<(), CoreError> {
+        let Some(store) = self.enabled_store() else {
+            return Ok(());
+        };
+        let cleared = tokio::task::spawn_blocking(move || store.clear_all()).await;
+        flatten_storage_result(cleared)?;
+        self.suggestion_index = SuggestionIndex::default();
+        Ok(())
+    }
+
+    /// Clears every recorded page for `host` and drops its entries from the index.
+    ///
+    /// A no-op when history is [`HistoryMode::Disabled`] or no store is wired.
+    pub async fn clear_history_site(&mut self, host: &str) -> Result<(), CoreError> {
+        let Some(store) = self.enabled_store() else {
+            return Ok(());
+        };
+        let owned_host = host.to_string();
+        let store_host = owned_host.clone();
+        let cleared = tokio::task::spawn_blocking(move || store.clear_site(&store_host)).await;
+        flatten_storage_result(cleared)?;
+        self.suggestion_index.remove_host(&owned_host);
+        Ok(())
+    }
+
+    /// Removes the history entry with the given identifier.
+    ///
+    /// A no-op when history is [`HistoryMode::Disabled`] or no store is wired. The raw id
+    /// the store expects is taken from the [`HistoryEntryId`] newtype at this boundary.
+    pub async fn remove_history_entry(&self, id: HistoryEntryId) -> Result<(), CoreError> {
+        let Some(store) = self.enabled_store() else {
+            return Ok(());
+        };
+        let raw_id = id.value();
+        let removed = tokio::task::spawn_blocking(move || store.remove_entry(raw_id)).await;
+        flatten_storage_result(removed)
+    }
+
+    /// The wired history store when recording is enabled, or `None` when history is
+    /// disabled or no store was injected.
+    ///
+    /// A single gate so every history query suppresses under [`HistoryMode::Disabled`]
+    /// without repeating the check at each call site.
+    fn enabled_store(&self) -> Option<Arc<dyn HistoryStore + Send + Sync>> {
+        if self.history_settings.mode() == HistoryMode::Disabled {
+            return None;
+        }
+        self.history.clone()
+    }
+
     /// Records the current page as a visit, then updates the suggestion index in place.
     ///
     /// A visit is recorded only when [`should_record`] passes, so a disabled mode or a
@@ -275,6 +360,21 @@ impl NavigationController {
     /// Not implemented in this milestone; returns [`CoreError::TabNotFound`].
     pub fn close_tab(&mut self, _tab: TabId) -> Result<(), CoreError> {
         Err(CoreError::TabNotFound)
+    }
+}
+
+/// Flattens the nested result of a `spawn_blocking` storage call into a [`CoreError`].
+///
+/// A store error crosses as [`CoreError::Storage`]. A join failure means the blocking
+/// task did not complete, which is treated as a failed query rather than a panic so a
+/// history read or clear never brings the browser down.
+fn flatten_storage_result<T>(
+    result: Result<Result<T, StorageError>, tokio::task::JoinError>,
+) -> Result<T, CoreError> {
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(CoreError::Storage(error)),
+        Err(_) => Err(CoreError::Storage(StorageError::QueryFailed)),
     }
 }
 

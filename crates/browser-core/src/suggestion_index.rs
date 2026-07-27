@@ -57,6 +57,15 @@ impl SuggestionIndex {
         }
     }
 
+    /// Removes every indexed entry whose host equals `host`, compared case-insensitively.
+    ///
+    /// Called when a site is cleared from history so its URLs stop surfacing as
+    /// suggestions immediately, without reloading the index from the store.
+    pub fn remove_host(&mut self, host: &str) {
+        let needle = host.to_ascii_lowercase();
+        self.entries.retain(|indexed| indexed.host_key != needle);
+    }
+
     /// Inserts `entry`, replacing any existing entry for the same URL rather than
     /// duplicating it, so a repeat visit updates the counters in place.
     pub fn upsert(&mut self, entry: SuggestionEntry) {

@@ -11,6 +11,7 @@ pub(crate) enum CommandKind {
     Search,
     Reload,
     Back,
+    History,
     Help,
     Quit,
     Settings,
@@ -71,6 +72,13 @@ const REGISTRY: &[CommandSpec] = &[
         description: "go back to the previous page",
         takes_argument: false,
         kind: CommandKind::Back,
+    },
+    CommandSpec {
+        name: "history",
+        aliases: &[],
+        description: "list, search, or clear browsing history",
+        takes_argument: true,
+        kind: CommandKind::History,
     },
     CommandSpec {
         name: "help",

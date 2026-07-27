@@ -6,12 +6,19 @@
 use super::{filter, parse_command_input, registry, resolve, CommandKind, MatchRank};
 
 #[test]
-fn registry_holds_exactly_the_seven_commands() {
+fn registry_holds_exactly_the_eight_commands() {
     let names: Vec<&str> = registry().iter().map(|spec| spec.name).collect();
     assert_eq!(
         names,
-        vec!["open", "search", "reload", "back", "help", "quit", "settings"]
+        vec!["open", "search", "reload", "back", "history", "help", "quit", "settings"]
     );
+}
+
+#[test]
+fn history_resolves_and_takes_an_argument() {
+    let history = resolve("history").expect("history command must exist");
+    assert!(history.takes_argument);
+    assert_eq!(history.kind, CommandKind::History);
 }
 
 #[test]
@@ -67,7 +74,7 @@ fn empty_query_returns_all_commands_in_registry_order() {
     let names: Vec<&str> = matches.iter().map(|found| found.spec.name).collect();
     assert_eq!(
         names,
-        vec!["open", "search", "reload", "back", "help", "quit", "settings"]
+        vec!["open", "search", "reload", "back", "history", "help", "quit", "settings"]
     );
     assert!(matches.iter().all(|found| found.rank == MatchRank::Prefix));
 }

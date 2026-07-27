@@ -5,7 +5,13 @@
 
 use std::time::{Duration, Instant};
 
+use browser_core::HistoryEntry;
+
 use super::{UiState, READING_HINTS};
+
+fn history_entry(id: u64, url: &str) -> HistoryEntry {
+    HistoryEntry::new(id, url.to_string(), None, 0)
+}
 
 #[test]
 fn new_state_shows_first_reading_hint() {
@@ -268,7 +274,7 @@ fn entering_slash_fills_the_palette_with_all_commands() {
     let mut state = UiState::new(true);
     state.enter_command_mode('/');
     assert!(state.is_palette_active());
-    assert_eq!(state.palette_matches().len(), 7);
+    assert_eq!(state.palette_matches().len(), 8);
     assert_eq!(state.palette_selected(), 0);
 }
 
@@ -289,7 +295,7 @@ fn deleting_a_character_rewidens_the_palette() {
     state.command_append_char('q');
     assert_eq!(state.palette_matches().len(), 1);
     state.command_delete_before_cursor();
-    assert_eq!(state.palette_matches().len(), 7);
+    assert_eq!(state.palette_matches().len(), 8);
 }
 
 #[test]
@@ -339,7 +345,7 @@ fn palette_select_next_wraps_around_the_match_list() {
     assert_eq!(state.palette_selected(), 0);
     state.palette_select_next();
     assert_eq!(state.palette_selected(), 1);
-    for _ in 0..6 {
+    for _ in 0..7 {
         state.palette_select_next();
     }
     assert_eq!(state.palette_selected(), 0);
@@ -465,7 +471,7 @@ fn backspace_before_the_leading_slash_only_deletes_a_character() {
     state.command_delete_or_exit();
     assert!(state.is_in_command_mode());
     assert_eq!(state.command_buffer(), "/");
-    assert_eq!(state.palette_matches().len(), 7);
+    assert_eq!(state.palette_matches().len(), 8);
 }
 
 #[test]
@@ -510,6 +516,146 @@ fn disabling_search_hides_only_the_search_command_from_the_full_palette() {
     enabled.enter_command_mode('/');
     let mut disabled = UiState::new(false);
     disabled.enter_command_mode('/');
-    assert_eq!(enabled.palette_matches().len(), 7);
-    assert_eq!(disabled.palette_matches().len(), 6);
+    assert_eq!(enabled.palette_matches().len(), 8);
+    assert_eq!(disabled.palette_matches().len(), 7);
+}
+
+#[test]
+fn new_state_has_no_address_suggestions() {
+    let state = UiState::new(true);
+    assert!(!state.has_address_suggestions());
+    assert_eq!(state.selected_suggestion(), None);
+}
+
+#[test]
+fn setting_address_suggestions_offers_them_with_no_selection() {
+    let mut state = UiState::new(true);
+    state.set_address_suggestions(vec!["https://a.test/".to_string()]);
+    assert!(state.has_address_suggestions());
+    assert_eq!(state.selected_suggestion(), None);
+}
+
+#[test]
+fn suggestion_select_next_enters_the_list_and_wraps() {
+    let mut state = UiState::new(true);
+    state.set_address_suggestions(vec!["a".to_string(), "b".to_string()]);
+    state.suggestion_select_next();
+    assert_eq!(state.selected_suggestion(), Some(0));
+    state.suggestion_select_next();
+    assert_eq!(state.selected_suggestion(), Some(1));
+    state.suggestion_select_next();
+    assert_eq!(state.selected_suggestion(), Some(0));
+}
+
+#[test]
+fn suggestion_select_prev_enters_at_the_last_row() {
+    let mut state = UiState::new(true);
+    state.set_address_suggestions(vec!["a".to_string(), "b".to_string()]);
+    state.suggestion_select_prev();
+    assert_eq!(state.selected_suggestion(), Some(1));
+}
+
+#[test]
+fn setting_new_suggestions_resets_the_selection() {
+    let mut state = UiState::new(true);
+    state.set_address_suggestions(vec!["a".to_string(), "b".to_string()]);
+    state.suggestion_select_next();
+    state.set_address_suggestions(vec!["c".to_string()]);
+    assert_eq!(state.selected_suggestion(), None);
+}
+
+#[test]
+fn take_selected_suggestion_returns_the_url_and_leaves_command_mode() {
+    let mut state = UiState::new(true);
+    state.enter_command_mode('a');
+    state.set_address_suggestions(vec!["https://a.test/".to_string()]);
+    state.suggestion_select_next();
+    let taken = state.take_selected_suggestion();
+    assert_eq!(taken.as_deref(), Some("https://a.test/"));
+    assert!(!state.is_in_command_mode());
+    assert!(!state.has_address_suggestions());
+}
+
+#[test]
+fn take_selected_suggestion_is_none_without_a_selection() {
+    let mut state = UiState::new(true);
+    state.enter_command_mode('a');
+    state.set_address_suggestions(vec!["https://a.test/".to_string()]);
+    assert_eq!(state.take_selected_suggestion(), None);
+}
+
+#[test]
+fn clearing_address_suggestions_empties_the_list_and_selection() {
+    let mut state = UiState::new(true);
+    state.set_address_suggestions(vec!["a".to_string()]);
+    state.suggestion_select_next();
+    state.clear_address_suggestions();
+    assert!(!state.has_address_suggestions());
+    assert_eq!(state.selected_suggestion(), None);
+}
+
+#[test]
+fn new_state_is_not_in_history_mode() {
+    let state = UiState::new(true);
+    assert!(!state.is_in_history_mode());
+}
+
+#[test]
+fn entering_history_mode_holds_the_entries_and_selects_the_first() {
+    let mut state = UiState::new(true);
+    state.enter_history_mode(vec![
+        history_entry(1, "https://a.test/"),
+        history_entry(2, "https://b.test/"),
+    ]);
+    assert!(state.is_in_history_mode());
+    assert_eq!(state.history_entries().len(), 2);
+    assert_eq!(state.history_selected(), 0);
+    assert_eq!(
+        state.selected_history_entry().map(|entry| entry.url()),
+        Some("https://a.test/")
+    );
+}
+
+#[test]
+fn history_select_next_and_prev_wrap_around_the_list() {
+    let mut state = UiState::new(true);
+    state.enter_history_mode(vec![history_entry(1, "a"), history_entry(2, "b")]);
+    state.history_select_next();
+    assert_eq!(state.history_selected(), 1);
+    state.history_select_next();
+    assert_eq!(state.history_selected(), 0);
+    state.history_select_prev();
+    assert_eq!(state.history_selected(), 1);
+}
+
+#[test]
+fn removing_the_selected_history_entry_drops_it_and_clamps_the_selection() {
+    let mut state = UiState::new(true);
+    state.enter_history_mode(vec![history_entry(1, "a"), history_entry(2, "b")]);
+    state.history_select_next();
+    state.remove_selected_history_entry();
+    assert_eq!(state.history_entries().len(), 1);
+    assert_eq!(state.history_selected(), 0);
+    assert_eq!(
+        state.selected_history_entry().map(|entry| entry.url()),
+        Some("a")
+    );
+}
+
+#[test]
+fn removing_the_last_history_entry_closes_the_list() {
+    let mut state = UiState::new(true);
+    state.enter_history_mode(vec![history_entry(1, "a")]);
+    state.remove_selected_history_entry();
+    assert!(!state.is_in_history_mode());
+    assert!(state.history_entries().is_empty());
+}
+
+#[test]
+fn exiting_history_mode_returns_to_reading() {
+    let mut state = UiState::new(true);
+    state.enter_history_mode(vec![history_entry(1, "a")]);
+    state.exit_history_mode();
+    assert!(!state.is_in_history_mode());
+    assert!(state.history_entries().is_empty());
 }
