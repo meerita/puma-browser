@@ -1,8 +1,5 @@
 # Puma Documentation
 
-This directory holds the project documentation. Everything here is Markdown, with
-Mermaid for diagrams.
-
 ## Contents
 
 | Document | Description |
