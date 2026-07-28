@@ -54,6 +54,39 @@ pub trait HistoryStore {
     fn prune_older_than(&self, cutoff: i64) -> Result<(), StorageError>;
 }
 
+/// Persists per-site cookie policy exceptions: a registrable domain mapped to a raw
+/// policy word that overrides the global default for that site.
+///
+/// The store keeps the policy as opaque text, exactly as [`HistoryStore`] keeps the
+/// history mode. It never interprets the word; the policy enum lives in the privacy and
+/// core crates. It never reads the clock: `created_at` is Unix epoch seconds supplied by
+/// the caller. The table holds a domain and a policy word only, never a cookie value.
+pub trait SitePolicyStore {
+    /// Sets the policy exception for `domain`, replacing any existing row for that
+    /// domain. `domain` is the lowercased registrable domain; `created_at` is Unix epoch
+    /// seconds supplied by the caller.
+    fn set_site_policy(
+        &self,
+        domain: &str,
+        policy: &str,
+        created_at: i64,
+    ) -> Result<(), StorageError>;
+
+    /// Removes the policy exception for `domain`. Removing a domain with no row is not an
+    /// error.
+    fn remove_site_policy(&self, domain: &str) -> Result<(), StorageError>;
+
+    /// Returns the stored policy word for `domain`, or `None` when no exception is set.
+    fn site_policy(&self, domain: &str) -> Result<Option<String>, StorageError>;
+
+    /// Returns every `(domain, policy)` pair, for loading the in-memory exception map at
+    /// startup.
+    fn all_site_policies(&self) -> Result<Vec<(String, String)>, StorageError>;
+
+    /// Removes every stored policy exception.
+    fn clear_site_policies(&self) -> Result<(), StorageError>;
+}
+
 /// Stores and reads back user bookmarks.
 ///
 /// Implementations land in a later milestone. The bookmarked location is passed as
