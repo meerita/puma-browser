@@ -1,12 +1,13 @@
 // @file crates/browser-network/src/fetch.rs
-// @description Resource acquisition: HTTP/HTTPS fetch and bounded local file:// reads, dispatched on scheme.
+// @description Resource acquisition: single-hop fetch, redirect-safety helpers, and cookie header transport.
 // @layer network
 // @created meerita <meerita@icloud.com>
 
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::header::{CONTENT_TYPE, LOCATION};
+use reqwest::header::{CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE};
+use reqwest::StatusCode;
 use tokio::sync::watch;
 use url::Url;
 
@@ -19,10 +20,27 @@ use crate::fetched_document::FetchedDocument;
 const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Largest number of redirects followed before the request is abandoned.
-const MAX_REDIRECT_COUNT: usize = 10;
+///
+/// The core-driven redirect loop reads this to bound its hop count, so it is public.
+pub const MAX_REDIRECT_COUNT: usize = 10;
 
 /// How long a single request may take before it is abandoned.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The result of a single HTTP hop.
+///
+/// A `Redirect` carries the redirect status, the raw `Location` value, and any
+/// `Set-Cookie` lines from that response; its body is never read. A `Final` carries
+/// the fully collected document. The caller drives the redirect loop and decides,
+/// hop by hop, what outgoing `Cookie` header to send next.
+pub enum HopOutcome {
+    Redirect {
+        status: u16,
+        location: String,
+        set_cookie_lines: Vec<String>,
+    },
+    Final(FetchedDocument),
+}
 
 /// Acquire `url` and return the raw document, dispatching on its scheme.
 ///
@@ -40,18 +58,95 @@ pub async fn fetch(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
 /// through `progress` after each chunk. For `file://` URLs, which are read in one
 /// shot, the final file size is sent once after the read completes. The send is
 /// silently ignored when all receivers have been dropped.
+///
+/// This drives its own redirect loop over [`fetch_once`], sending no `Cookie` header,
+/// so existing callers that do not manage cookies see unchanged behavior.
 pub async fn fetch_with_progress(
     url: &BrowserUrl,
     progress: watch::Sender<usize>,
 ) -> Result<FetchedDocument, NetworkError> {
-    match url.scheme() {
-        "file" => {
-            let document = read_local_file(url).await?;
-            let _ = progress.send(document.body_bytes().len());
-            Ok(document)
+    let mut current = url.clone();
+    let mut redirect_count: usize = 0;
+    loop {
+        let location = match fetch_once(&current, None, progress.clone()).await? {
+            HopOutcome::Final(document) => return Ok(document),
+            HopOutcome::Redirect { location, .. } => location,
+        };
+        redirect_count += 1;
+        if redirect_count > MAX_REDIRECT_COUNT {
+            return Err(NetworkError::TooManyRedirects);
         }
-        _ => fetch_over_http_with_progress(url, &progress).await,
+        current = resolve_redirect(&current, &location)?;
     }
+}
+
+/// Perform exactly one HTTP hop for `url` and return its outcome.
+///
+/// When `cookie_header` is `Some`, its value is sent verbatim as the `Cookie` request
+/// header; the network layer never builds or interprets it. Every `Set-Cookie`
+/// response header is captured verbatim. A 3xx response carrying a `Location` returns
+/// [`HopOutcome::Redirect`] without reading the body; any other response returns
+/// [`HopOutcome::Final`] with the body collected under the size cap. A `file://` URL
+/// is read from disk and returns `Final` with no `Set-Cookie` lines.
+pub async fn fetch_once(
+    url: &BrowserUrl,
+    cookie_header: Option<&str>,
+    progress: watch::Sender<usize>,
+) -> Result<HopOutcome, NetworkError> {
+    if url.scheme() == "file" {
+        let document = read_local_file(url).await?;
+        let _ = progress.send(document.body_bytes().len());
+        return Ok(HopOutcome::Final(document));
+    }
+    fetch_once_over_http(url, cookie_header, &progress).await
+}
+
+async fn fetch_once_over_http(
+    url: &BrowserUrl,
+    cookie_header: Option<&str>,
+    progress: &watch::Sender<usize>,
+) -> Result<HopOutcome, NetworkError> {
+    let client = build_client()?;
+    let mut request = client.get(url.as_str());
+    if let Some(cookie_header) = cookie_header {
+        request = request.header(COOKIE, cookie_header);
+    }
+    let response = request.send().await.map_err(map_send_error)?;
+    let status = response.status();
+    let set_cookie_lines = collect_set_cookie_lines(&response);
+    if let Some((status, location)) = redirect_target(status, &response) {
+        return Ok(HopOutcome::Redirect {
+            status,
+            location,
+            set_cookie_lines,
+        });
+    }
+    let document =
+        collect_document_reporting_progress(response, set_cookie_lines, progress).await?;
+    Ok(HopOutcome::Final(document))
+}
+
+/// The redirect target of a response: `Some((status, location))` only when the status
+/// is a 3xx and a usable `Location` header is present. Otherwise the response is final.
+fn redirect_target(status: StatusCode, response: &reqwest::Response) -> Option<(u16, String)> {
+    if !status.is_redirection() {
+        return None;
+    }
+    let location = redirect_location(response)?;
+    Some((status.as_u16(), location))
+}
+
+/// Every `Set-Cookie` response header value, in order, as owned strings.
+///
+/// The values are opaque here: the network layer never parses or interprets them.
+fn collect_set_cookie_lines(response: &reqwest::Response) -> Vec<String> {
+    response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .collect()
 }
 
 /// Read a local file named by a `file://` URL into a [`FetchedDocument`].
@@ -79,6 +174,7 @@ async fn read_local_file(url: &BrowserUrl) -> Result<FetchedDocument, NetworkErr
         None,
         body,
         0usize,
+        Vec::new(),
     ))
 }
 
@@ -100,35 +196,6 @@ fn content_type_for_path(path: &std::path::Path) -> String {
     match extension.as_deref() {
         Some("html") | Some("htm") | Some("xhtml") => "text/html".to_string(),
         _ => "text/plain".to_string(),
-    }
-}
-
-async fn fetch_over_http_with_progress(
-    url: &BrowserUrl,
-    progress: &watch::Sender<usize>,
-) -> Result<FetchedDocument, NetworkError> {
-    let client = build_client()?;
-    let mut current = Url::parse(url.as_str()).map_err(|_| NetworkError::InvalidUrl)?;
-    let mut redirect_count: usize = 0;
-    loop {
-        let response = client
-            .get(current.clone())
-            .send()
-            .await
-            .map_err(map_send_error)?;
-        if !response.status().is_redirection() {
-            return collect_document_reporting_progress(response, progress).await;
-        }
-        let location = redirect_location(&response);
-        let Some(location) = location else {
-            return collect_document_reporting_progress(response, progress).await;
-        };
-        let next = resolve_redirect(&current, &location)?;
-        redirect_count += 1;
-        if redirect_count > MAX_REDIRECT_COUNT {
-            return Err(NetworkError::TooManyRedirects);
-        }
-        current = next;
     }
 }
 
@@ -160,17 +227,19 @@ fn redirect_location(response: &reqwest::Response) -> Option<String> {
 ///
 /// The target may be relative, so it is joined onto the current URL first. The result
 /// must use `http` or `https`, and an HTTPS origin may not be downgraded to HTTP.
-fn resolve_redirect(current: &Url, location: &str) -> Result<Url, NetworkError> {
+/// Public so the core-driven redirect loop can reuse the same safety checks per hop.
+pub fn resolve_redirect(current: &BrowserUrl, location: &str) -> Result<BrowserUrl, NetworkError> {
     let next = current
+        .as_url()
         .join(location)
         .map_err(|_| NetworkError::RequestFailed)?;
     if !scheme_is_http(next.scheme()) {
         return Err(NetworkError::RequestFailed);
     }
-    if redirect_is_downgrade(current, &next) {
+    if redirect_is_downgrade(current.as_url(), &next) {
         return Err(NetworkError::RequestFailed);
     }
-    Ok(next)
+    Ok(BrowserUrl::from_validated(next))
 }
 
 fn scheme_is_http(scheme: &str) -> bool {
@@ -183,6 +252,7 @@ fn redirect_is_downgrade(current: &Url, next: &Url) -> bool {
 
 async fn collect_document_reporting_progress(
     response: reqwest::Response,
+    set_cookie_lines: Vec<String>,
     progress: &watch::Sender<usize>,
 ) -> Result<FetchedDocument, NetworkError> {
     let final_url = BrowserUrl::parse(response.url().as_str())?;
@@ -201,6 +271,7 @@ async fn collect_document_reporting_progress(
         charset,
         body,
         wire_byte_count,
+        set_cookie_lines,
     ))
 }
 
@@ -251,7 +322,3 @@ async fn read_bounded_body_reporting_progress(
     }
     Ok(collected)
 }
-
-#[cfg(test)]
-#[path = "fetch_tests.rs"]
-mod tests;

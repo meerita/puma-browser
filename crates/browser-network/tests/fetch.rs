@@ -91,6 +91,33 @@ async fn redirect_within_limit_resolves_to_final_url_and_body() {
 }
 
 #[tokio::test]
+async fn two_hop_redirect_chain_lands_on_the_final_document() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/a"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/b"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/b"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/c"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/c"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("final"))
+        .mount(&server)
+        .await;
+
+    let document = fetch(&url_for(&server, "/a"))
+        .await
+        .expect("a two-hop redirect chain must resolve to the final document");
+
+    assert_eq!(document.body_bytes(), b"final");
+    assert!(document.final_url().as_str().ends_with("/c"));
+}
+
+#[tokio::test]
 async fn redirect_beyond_limit_returns_too_many_redirects_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -132,6 +132,18 @@ fn with_query_parameter_rejects_an_unsupported_scheme() {
 }
 
 #[test]
+fn origin_omits_the_default_https_port() {
+    let url = BrowserUrl::parse("https://example.com/path").expect("https URL must parse");
+    assert_eq!(url.origin(), "https://example.com");
+}
+
+#[test]
+fn origin_keeps_a_non_default_port() {
+    let url = BrowserUrl::parse("http://example.com:8080/").expect("http URL with port must parse");
+    assert_eq!(url.origin(), "http://example.com:8080");
+}
+
+#[test]
 fn debug_output_omits_url_credentials() {
     let url = BrowserUrl::parse("https://user:secret@example.com/")
         .expect("URL with credentials must parse");
