@@ -16,8 +16,11 @@ use super::{
     ViewState, ViewportBounds, BODY_AREA_TOP_ROW, CONTENT_PADDING,
 };
 use browser_core::{
-    HistoryMode, HistorySettings, HistoryStore, NavigationController, SuggestionEntry,
+    CookiePolicyPair, HistoryMode, HistorySettings, HistoryStore, NavigationController,
+    SitePolicyStore, SuggestionEntry,
 };
+
+use crate::command::CookiesRequest;
 use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
 use browser_layout::{render_document, AnchorSpan, CellBuffer, CellPosition, WidthConfig};
 use browser_storage::{HistoryEntry, NewVisit, StorageError};
@@ -1098,4 +1101,136 @@ async fn the_delete_key_removes_the_selected_history_entry_through_the_store() {
     assert_eq!(store.removed_ids(), vec![7]);
     // The only entry is gone, so the list closes.
     assert!(!ui_state.is_in_history_mode());
+}
+
+/// A site-policy store that records the writes made against it, standing in for SQLite so a
+/// mutation command's effect can be asserted without a database.
+#[derive(Default)]
+struct FakeSitePolicyStore {
+    writes: Mutex<Vec<(String, String)>>,
+}
+
+impl FakeSitePolicyStore {
+    fn writes(&self) -> Vec<(String, String)> {
+        self.writes
+            .lock()
+            .expect("policy store lock must not be poisoned")
+            .clone()
+    }
+}
+
+impl SitePolicyStore for FakeSitePolicyStore {
+    fn set_site_policy(
+        &self,
+        domain: &str,
+        policy: &str,
+        _created_at: i64,
+    ) -> Result<(), StorageError> {
+        self.writes
+            .lock()
+            .expect("policy store lock must not be poisoned")
+            .push((domain.to_string(), policy.to_string()));
+        Ok(())
+    }
+
+    fn remove_site_policy(&self, _domain: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn site_policy(&self, _domain: &str) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+
+    fn all_site_policies(&self) -> Result<Vec<(String, String)>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    fn clear_site_policies(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
+fn app_with_cookie_store(store: Arc<FakeSitePolicyStore>) -> TerminalApp {
+    let policy_store: Option<Arc<dyn SitePolicyStore + Send + Sync>> = Some(store);
+    let controller = NavigationController::new().with_cookies(
+        CookiePolicyPair::default(),
+        policy_store,
+        Vec::new(),
+    );
+    TerminalApp::new(controller, ViewState::Page, test_settings())
+}
+
+#[test]
+fn allow_session_writes_the_session_policy_for_the_site() {
+    let store = Arc::new(FakeSitePolicyStore::default());
+    let mut application = app_with_cookie_store(store.clone());
+    let mut ui_state = UiState::new(true);
+
+    application.run_cookies(
+        CookiesRequest::AllowSession("example.com".to_string()),
+        &mut ui_state,
+        Instant::now(),
+    );
+
+    assert_eq!(
+        store.writes(),
+        vec![("example.com".to_string(), "session".to_string())]
+    );
+}
+
+#[test]
+fn reject_writes_the_reject_policy_for_the_site() {
+    let store = Arc::new(FakeSitePolicyStore::default());
+    let mut application = app_with_cookie_store(store.clone());
+    let mut ui_state = UiState::new(true);
+
+    application.run_cookies(
+        CookiesRequest::Reject("example.com".to_string()),
+        &mut ui_state,
+        Instant::now(),
+    );
+
+    assert_eq!(
+        store.writes(),
+        vec![("example.com".to_string(), "reject".to_string())]
+    );
+}
+
+#[test]
+fn a_cookies_summary_with_no_records_reports_an_empty_session() {
+    let mut application = terminal_app();
+    let mut ui_state = UiState::new(true);
+
+    application.run_cookies(CookiesRequest::Summary, &mut ui_state, Instant::now());
+
+    assert!(!ui_state.is_in_cookies_mode());
+    assert_eq!(
+        ui_state.transient_message(),
+        Some("no cookies recorded this session")
+    );
+}
+
+#[test]
+fn clearing_cookies_confirms_and_does_not_open_the_popup() {
+    let mut application = terminal_app();
+    let mut ui_state = UiState::new(true);
+
+    application.run_cookies(CookiesRequest::Clear, &mut ui_state, Instant::now());
+
+    assert!(!ui_state.is_in_cookies_mode());
+    assert_eq!(ui_state.transient_message(), Some("cookies cleared"));
+}
+
+#[test]
+fn an_unknown_cookies_subcommand_shows_the_usage_message() {
+    let mut application = terminal_app();
+    let mut ui_state = UiState::new(true);
+
+    application.run_cookies(CookiesRequest::Usage, &mut ui_state, Instant::now());
+
+    assert!(!ui_state.is_in_cookies_mode());
+    assert!(ui_state
+        .transient_message()
+        .expect("a usage message must be set")
+        .starts_with("usage: /cookies"));
 }

@@ -11,7 +11,7 @@ use crate::command::filter;
 #[test]
 fn all_commands_render_one_row_each() {
     let matches = filter("");
-    let menu = compose_palette_menu(&matches, 0, 80, 8);
+    let menu = compose_palette_menu(&matches, 0, 80, 9);
     assert_eq!(menu.rows.len(), matches.len());
     assert_eq!(menu.selected_row, 0);
 }
@@ -19,14 +19,14 @@ fn all_commands_render_one_row_each() {
 #[test]
 fn rows_keep_the_leading_slash_on_the_command_name() {
     let matches = filter("");
-    let menu = compose_palette_menu(&matches, 0, 80, 8);
+    let menu = compose_palette_menu(&matches, 0, 80, 9);
     assert!(menu.rows[0].starts_with("/open"));
 }
 
 #[test]
 fn descriptions_align_into_a_shared_column() {
     let matches = filter("");
-    let menu = compose_palette_menu(&matches, 0, 80, 8);
+    let menu = compose_palette_menu(&matches, 0, 80, 9);
     // "/settings" is the widest name (9 columns); a two-space gap puts every description
     // at column 11 regardless of the command name length.
     let open_row = menu
@@ -46,7 +46,7 @@ fn descriptions_align_into_a_shared_column() {
 #[test]
 fn every_row_is_padded_to_the_full_popup_width() {
     let matches = filter("");
-    let menu = compose_palette_menu(&matches, 0, 80, 8);
+    let menu = compose_palette_menu(&matches, 0, 80, 9);
     for row in &menu.rows {
         assert_eq!(UnicodeWidthStr::width(row.as_str()), 80);
     }

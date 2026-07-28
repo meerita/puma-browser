@@ -13,12 +13,14 @@ pub(crate) fn compose_title_bar(
     scroll_percent: u16,
     script_count: usize,
     page_byte_count: usize,
+    cookie_counts: (usize, usize),
     terminal_width: u16,
 ) -> String {
     let width = terminal_width as usize;
     let max_label_cols = width / 2;
     let left = truncate_with_ellipsis(label, max_label_cols);
-    let right = build_right_indicators(scroll_percent, script_count, page_byte_count);
+    let right =
+        build_right_indicators(scroll_percent, script_count, page_byte_count, cookie_counts);
     let left_width = UnicodeWidthStr::width(left.as_str());
     let available = width.saturating_sub(left_width);
     let right_width = UnicodeWidthStr::width(right.as_str());
@@ -50,6 +52,7 @@ fn build_right_indicators(
     scroll_percent: u16,
     script_count: usize,
     page_byte_count: usize,
+    cookie_counts: (usize, usize),
 ) -> String {
     let mut right = String::new();
     if page_byte_count > 0 {
@@ -60,6 +63,10 @@ fn build_right_indicators(
         right.push_str(" · 1 script blocked");
     } else if script_count > 1 {
         right.push_str(&format!(" · {script_count} scripts blocked"));
+    }
+    let (accepted, rejected) = cookie_counts;
+    if accepted > 0 || rejected > 0 {
+        right.push_str(&format!(" · {accepted} accepted · {rejected} rejected"));
     }
     right
 }

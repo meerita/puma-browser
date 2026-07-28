@@ -10,14 +10,17 @@ use browser_network::BrowserUrl;
 ///
 /// This milestone tracks one page at a time, not a set of tabs. It keeps the URL the
 /// fetch finally resolved to (after any redirects), the parsed document, the
-/// document's title so an adapter can show it without walking the node stream, and
-/// the raw byte count of the response body.
+/// document's title so an adapter can show it without walking the node stream, the
+/// raw byte count of the response body, and how many cookies this navigation accepted
+/// and rejected so an adapter can show a per-page indicator.
 #[derive(Debug)]
 pub(crate) struct CurrentPage {
     final_url: BrowserUrl,
     document: Document,
     title: Option<DocumentTitle>,
     byte_count: usize,
+    accepted_cookie_count: usize,
+    rejected_cookie_count: usize,
 }
 
 impl CurrentPage {
@@ -26,12 +29,16 @@ impl CurrentPage {
         document: Document,
         title: Option<DocumentTitle>,
         byte_count: usize,
+        accepted_cookie_count: usize,
+        rejected_cookie_count: usize,
     ) -> Self {
         Self {
             final_url,
             document,
             title,
             byte_count,
+            accepted_cookie_count,
+            rejected_cookie_count,
         }
     }
 
@@ -49,5 +56,13 @@ impl CurrentPage {
 
     pub(crate) fn byte_count(&self) -> usize {
         self.byte_count
+    }
+
+    pub(crate) fn accepted_cookie_count(&self) -> usize {
+        self.accepted_cookie_count
+    }
+
+    pub(crate) fn rejected_cookie_count(&self) -> usize {
+        self.rejected_cookie_count
     }
 }

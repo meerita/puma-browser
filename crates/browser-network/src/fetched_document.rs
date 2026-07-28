@@ -1,5 +1,5 @@
 // @file crates/browser-network/src/fetched_document.rs
-// @description Value object holding a fetched response: final URL, content type, charset, raw body.
+// @description Value object holding a fetched response: final URL, content type, charset, raw body, Set-Cookie lines.
 // @layer network
 // @created meerita <meerita@icloud.com>
 
@@ -12,12 +12,16 @@ use crate::browser_url::BrowserUrl;
 /// undecoded response body. The network layer does not decode the body: decoding
 /// belongs at the parse boundary, where a `<meta charset>` inside the markup can be
 /// honored. The charset is surfaced separately so the parser can use it as a hint.
+///
+/// The raw `Set-Cookie` header values are carried through untouched. The network
+/// layer never parses or interprets them; cookie policy lives entirely in the core.
 pub struct FetchedDocument {
     final_url: BrowserUrl,
     content_type: String,
     charset: Option<String>,
     body: Vec<u8>,
     wire_byte_count: usize,
+    set_cookie_lines: Vec<String>,
 }
 
 impl FetchedDocument {
@@ -27,6 +31,7 @@ impl FetchedDocument {
         charset: Option<String>,
         body: Vec<u8>,
         wire_byte_count: usize,
+        set_cookie_lines: Vec<String>,
     ) -> Self {
         Self {
             final_url,
@@ -34,6 +39,7 @@ impl FetchedDocument {
             charset,
             body,
             wire_byte_count,
+            set_cookie_lines,
         }
     }
 
@@ -60,6 +66,13 @@ impl FetchedDocument {
     /// The wire byte count from the `Content-Length` header, or zero when absent.
     pub fn wire_byte_count(&self) -> usize {
         self.wire_byte_count
+    }
+
+    /// The raw `Set-Cookie` header values from the response, in order and untouched.
+    ///
+    /// These are opaque strings: the network layer does not parse or interpret them.
+    pub fn set_cookie_lines(&self) -> &[String] {
+        &self.set_cookie_lines
     }
 }
 

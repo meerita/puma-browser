@@ -17,9 +17,10 @@ struct Migration {
 /// The ordered migration list. Each entry raises `user_version` by one; new schema
 /// changes are appended here and never edited in place, so an existing database always
 /// reaches the current schema by replaying the entries it has not yet seen.
-const MIGRATIONS: &[Migration] = &[Migration {
-    target_version: 1,
-    sql: "
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        target_version: 1,
+        sql: "
         CREATE TABLE pages (
           id             INTEGER PRIMARY KEY,
           url            TEXT    NOT NULL UNIQUE,
@@ -40,7 +41,19 @@ const MIGRATIONS: &[Migration] = &[Migration {
         CREATE INDEX idx_visits_time ON visits(visited_at DESC);
         CREATE INDEX idx_visits_page ON visits(page_id);
     ",
-}];
+    },
+    Migration {
+        target_version: 2,
+        sql: "
+        CREATE TABLE site_cookie_policies (
+          id         INTEGER PRIMARY KEY,
+          domain     TEXT    NOT NULL UNIQUE,
+          policy     TEXT    NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+    ",
+    },
+];
 
 /// Applies every migration whose target version is greater than the database's current
 /// `user_version`, each inside its own transaction, then advances `user_version`.

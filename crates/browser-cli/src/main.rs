@@ -3,13 +3,14 @@
 //! @layer cli
 //! @created meerita <meerita@icloud.com>
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use browser_core::{
-    history_mode_from_str, HistoryMode, HistorySettings, NavigationController, NavigationSource,
+    history_mode_from_str, parse_policy, CookiePolicy, CookiePolicyPair, HistoryMode,
+    HistorySettings, NavigationController, NavigationSource, SitePolicyStore,
 };
 use browser_mcp::McpServer;
 use browser_network::BrowserUrl;
@@ -141,18 +142,63 @@ async fn run(resolved: ResolvedMode) -> Result<()> {
     }
 }
 
-/// Builds the terminal controller, opening and wiring the history store the mode selects.
+/// Builds the terminal controller, wiring the history store, the cookie default, and the
+/// per-site exception store.
 ///
-/// A `Persistent` mode opens the on-disk database, prunes to the retention window, and
-/// loads the initial suggestion index; `InMemory` opens an ephemeral database that never
-/// reaches disk; `Disabled` wires no store. A failure to open degrades to no history
-/// rather than blocking startup, so browsing always works.
+/// The history store follows the resolved history mode. The cookie default comes from the
+/// `[cookies]` config, and the per-site exception store opens on disk whenever a database
+/// path resolves, independent of the history mode, so exceptions persist even when history
+/// is in-memory or disabled. A failure to open either store degrades to no store rather
+/// than blocking startup, so browsing always works.
 async fn build_terminal_controller(
     config: &BrowserConfig,
     history_settings: HistorySettings,
 ) -> NavigationController {
     let (history, initial_suggestions) = open_history(history_settings, config.data_dir()).await;
-    NavigationController::with_history(history, history_settings, initial_suggestions)
+    let (site_policies, initial_exceptions) = open_site_policy_store(config.data_dir()).await;
+    let default_cookie_policy = resolve_cookie_policy(config);
+    NavigationController::with_history(history, history_settings, initial_suggestions).with_cookies(
+        default_cookie_policy,
+        site_policies,
+        initial_exceptions,
+    )
+}
+
+/// Resolves the default cookie policy pair from the `[cookies]` config section.
+///
+/// Each scope word is mapped independently; an unrecognized value resolves to reject and
+/// logs a warning. With no `[cookies]` section both scopes default to reject, so the
+/// browser accepts no cookie until the user opts a scope or a site in.
+fn resolve_cookie_policy(config: &BrowserConfig) -> CookiePolicyPair {
+    CookiePolicyPair {
+        first_party: resolve_scope_policy(config.cookie_first_party(), "cookies.first_party"),
+        third_party: resolve_scope_policy(config.cookie_third_party(), "cookies.third_party"),
+    }
+}
+
+/// Maps one scope's policy word to a [`CookiePolicy`], warning when it is unrecognized.
+///
+/// A recognized word maps through `parse_policy`. Any other value resolves to `Reject`, the
+/// private default, and logs a warning naming the config key. The key is a fixed field name,
+/// never the value, so nothing a user typed reaches the log.
+fn resolve_scope_policy(word: &str, config_key: &str) -> CookiePolicy {
+    let policy = parse_policy(word);
+    if policy_word_is_unrecognized(word, policy) {
+        tracing::warn!(
+            config_key,
+            "unrecognized cookie policy value; defaulting to reject"
+        );
+    }
+    policy
+}
+
+/// Whether `word` was an unrecognized policy value that `parse_policy` fell back to reject.
+///
+/// `parse_policy` maps every unknown word to `Reject`, so a `Reject` result is genuine only
+/// when the word actually spells "reject"; any other word that produced `Reject` was
+/// unrecognized and worth warning about.
+fn policy_word_is_unrecognized(word: &str, policy: CookiePolicy) -> bool {
+    matches!(policy, CookiePolicy::Reject) && !word.trim().eq_ignore_ascii_case("reject")
 }
 
 /// Opens the history store and initial suggestions for the resolved mode.
@@ -208,6 +254,74 @@ async fn open_persistent_history(
 
 /// Wraps a concrete storage backend as a shared trait object for the controller.
 fn into_history_store(storage: SqliteStorage) -> Arc<dyn HistoryStore + Send + Sync> {
+    Arc::new(storage)
+}
+
+/// Per-site cookie policy exceptions as domain-and-policy pairs, as loaded from the store.
+type SiteExceptions = Vec<(String, CookiePolicy)>;
+
+/// A shared per-site policy store paired with the exceptions loaded from it, as the
+/// composition root hands them to the controller.
+type SitePolicyStoreWithExceptions = (
+    Option<Arc<dyn SitePolicyStore + Send + Sync>>,
+    SiteExceptions,
+);
+
+/// Opens the per-site cookie policy exception store and loads the exceptions already saved.
+///
+/// The store opens on disk whenever a database path resolves, independent of the history
+/// mode, because exceptions persist across runs even when history is in-memory or disabled.
+/// When no on-disk path resolves, an in-memory store keeps exceptions for the run only. A
+/// failure to open degrades to no store rather than blocking startup. Only domain-plus-policy
+/// rows are ever read or written here; no cookie value is stored.
+async fn open_site_policy_store(data_dir: Option<&Path>) -> SitePolicyStoreWithExceptions {
+    match history_database_path(data_dir) {
+        Ok(path) => open_persistent_site_policies(path).await,
+        Err(_) => open_in_memory_site_policies(),
+    }
+}
+
+/// Opens the on-disk database and loads the saved exceptions into policy pairs.
+///
+/// The blocking SQLite work runs on a blocking thread. A failure at any step degrades to no
+/// store and no exceptions rather than blocking startup.
+async fn open_persistent_site_policies(path: PathBuf) -> SitePolicyStoreWithExceptions {
+    let prepared = tokio::task::spawn_blocking(move || open_and_load_site_policies(&path)).await;
+    match prepared {
+        Ok(Ok((storage, exceptions))) => (Some(into_site_policy_store(storage)), exceptions),
+        _ => (None, Vec::new()),
+    }
+}
+
+/// Opens an ephemeral in-memory database for exceptions that do not persist across runs.
+///
+/// The database is discarded on exit, so exceptions set this run are not saved. A failure
+/// to open degrades to no store.
+fn open_in_memory_site_policies() -> SitePolicyStoreWithExceptions {
+    match SqliteStorage::open_in_memory() {
+        Ok(storage) => (Some(into_site_policy_store(storage)), Vec::new()),
+        Err(_) => (None, Vec::new()),
+    }
+}
+
+/// Opens the database at `path` and reads the saved exceptions, mapping each policy word
+/// through `parse_policy`.
+///
+/// Runs on a blocking thread because every call is synchronous SQLite.
+fn open_and_load_site_policies(
+    path: &Path,
+) -> Result<(SqliteStorage, SiteExceptions), StorageError> {
+    let storage = SqliteStorage::open(path)?;
+    let exceptions = storage
+        .all_site_policies()?
+        .into_iter()
+        .map(|(domain, policy)| (domain, parse_policy(&policy)))
+        .collect();
+    Ok((storage, exceptions))
+}
+
+/// Wraps a concrete storage backend as a shared site-policy trait object for the controller.
+fn into_site_policy_store(storage: SqliteStorage) -> Arc<dyn SitePolicyStore + Send + Sync> {
     Arc::new(storage)
 }
 
@@ -371,6 +485,9 @@ fn resolve_history_mode(file_mode: &str, env_override: Option<&str>) -> HistoryM
 }
 
 async fn run_mcp() -> Result<()> {
+    // The MCP controller takes no site-policy store and no config: it keeps the
+    // reject-by-default pair and an in-memory jar, so no cookie value ever persists to disk
+    // or leaks through an MCP response.
     let server = McpServer::new(NavigationController::new());
     server
         .run()

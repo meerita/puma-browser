@@ -77,3 +77,40 @@ fn a_top_level_data_dir_parses_to_some_path() {
     let config = load_config(&path).expect("a data_dir file must load");
     assert_eq!(config.data_dir(), Some(Path::new("/opt/puma/data")));
 }
+
+#[test]
+fn cookie_policies_default_to_reject_when_the_section_is_absent() {
+    let (_directory, path) = write_config("[history]\nmode = \"persistent\"\n");
+    let config = load_config(&path).expect("a file without cookies must load");
+    assert_eq!(config.cookie_first_party(), "reject");
+    assert_eq!(config.cookie_third_party(), "reject");
+}
+
+#[test]
+fn a_partial_cookies_section_fills_the_missing_scope_from_the_default() {
+    let (_directory, path) = write_config("[cookies]\nfirst_party = \"session\"\n");
+    let config = load_config(&path).expect("a partial cookies section must load");
+    assert_eq!(config.cookie_first_party(), "session");
+    assert_eq!(
+        config.cookie_third_party(),
+        "reject",
+        "the unset scope must keep the reject default"
+    );
+}
+
+#[test]
+fn a_full_cookies_section_parses_both_scopes() {
+    let (_directory, path) =
+        write_config("[cookies]\nfirst_party = \"allow\"\nthird_party = \"session\"\n");
+    let config = load_config(&path).expect("a full cookies section must load");
+    assert_eq!(config.cookie_first_party(), "allow");
+    assert_eq!(config.cookie_third_party(), "session");
+}
+
+#[test]
+fn an_unknown_key_under_cookies_is_accepted_and_ignored() {
+    let (_directory, path) =
+        write_config("[cookies]\nfirst_party = \"session\"\nfuture_scope = \"maybe\"\n");
+    let config = load_config(&path).expect("an unknown cookies key must not fail the load");
+    assert_eq!(config.cookie_first_party(), "session");
+}

@@ -16,4 +16,7 @@ pub enum PrivacyError {
 
     #[error("request blocked by policy")]
     RequestBlocked,
+
+    #[error("cookie could not be parsed")]
+    CookieMalformed,
 }

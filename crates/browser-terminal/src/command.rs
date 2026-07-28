@@ -1,5 +1,5 @@
 // @file crates/browser-terminal/src/command.rs
-// @description Slash-command registry and ranked prefix/subsequence matcher for the palette.
+// @description Slash-command registry, ranked palette matcher, and cookies subcommand parser.
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
@@ -12,6 +12,7 @@ pub(crate) enum CommandKind {
     Reload,
     Back,
     History,
+    Cookies,
     Help,
     Quit,
     Settings,
@@ -79,6 +80,13 @@ const REGISTRY: &[CommandSpec] = &[
         description: "list, search, or clear browsing history",
         takes_argument: true,
         kind: CommandKind::History,
+    },
+    CommandSpec {
+        name: "cookies",
+        aliases: &[],
+        description: "inspect and control cookies",
+        takes_argument: true,
+        kind: CommandKind::Cookies,
     },
     CommandSpec {
         name: "help",
@@ -177,6 +185,43 @@ fn collect_by_rank(ranked: &[Option<MatchRank>], wanted: MatchRank) -> Vec<Comma
             _ => None,
         })
         .collect()
+}
+
+/// A parsed `/cookies` request. `AllowSession` and `Reject` carry the site the exception
+/// applies to; `Usage` marks an argument the parser did not recognize so the caller can
+/// show a usage message instead of acting on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CookiesRequest {
+    Summary,
+    Accepted,
+    Rejected,
+    Clear,
+    AllowSession(String),
+    Reject(String),
+    Usage,
+}
+
+/// Parses a `/cookies` argument into a request. An empty argument is the summary; the
+/// `accepted`, `rejected`, and `clear` subcommands take no site; `allow-session` and
+/// `reject` each require a site and yield `Usage` without one. Any other subcommand is
+/// `Usage`, so an unknown word surfaces a usage message rather than a silent no-op.
+pub(crate) fn parse_cookies_request(remainder: &str) -> CookiesRequest {
+    let trimmed = remainder.trim();
+    if trimmed.is_empty() {
+        return CookiesRequest::Summary;
+    }
+    let (subcommand, site) = match trimmed.split_once(char::is_whitespace) {
+        Some((subcommand, rest)) => (subcommand, rest.trim()),
+        None => (trimmed, ""),
+    };
+    match subcommand {
+        "accepted" => CookiesRequest::Accepted,
+        "rejected" => CookiesRequest::Rejected,
+        "clear" => CookiesRequest::Clear,
+        "allow-session" if !site.is_empty() => CookiesRequest::AllowSession(site.to_string()),
+        "reject" if !site.is_empty() => CookiesRequest::Reject(site.to_string()),
+        _ => CookiesRequest::Usage,
+    }
 }
 
 /// True when every character of `query` appears in `candidate` in order, not necessarily

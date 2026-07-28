@@ -3,8 +3,32 @@
 // @layer storage
 // @created meerita <meerita@icloud.com>
 
+use rusqlite::Connection;
+
 use super::SqliteStorage;
 use crate::migrations::run_migrations;
+
+/// The migration-1 schema, applied directly to a raw connection so a test can simulate a
+/// version-1 database that predates the cookie-policy table and then upgrade it.
+const V1_SCHEMA: &str = "
+    CREATE TABLE pages (
+      id             INTEGER PRIMARY KEY,
+      url            TEXT    NOT NULL UNIQUE,
+      host           TEXT    NOT NULL,
+      title          TEXT,
+      visit_count    INTEGER NOT NULL DEFAULT 0,
+      typed_count    INTEGER NOT NULL DEFAULT 0,
+      first_visit_at INTEGER NOT NULL,
+      last_visit_at  INTEGER NOT NULL
+    );
+    CREATE TABLE visits (
+      id         INTEGER PRIMARY KEY,
+      page_id    INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+      visited_at INTEGER NOT NULL,
+      was_typed  INTEGER NOT NULL DEFAULT 0
+    );
+    PRAGMA user_version = 1;
+";
 
 /// Opens a prepared in-memory database for a test, panicking with a clear message if
 /// the substrate itself fails to open.
@@ -29,11 +53,11 @@ fn column_names(storage: &SqliteStorage, table_name: &str) -> Vec<String> {
 }
 
 #[test]
-fn opening_in_memory_migrates_to_version_one() {
+fn opening_in_memory_migrates_to_the_current_version() {
     let storage = open_prepared();
     assert_eq!(
         storage.schema_version().expect("schema version must read"),
-        1
+        2
     );
 }
 
@@ -48,7 +72,67 @@ fn re_running_migrations_on_a_current_database_is_a_no_op() {
     let version: i64 = connection
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .expect("user_version pragma must read");
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
+}
+
+#[test]
+fn site_cookie_policies_table_has_the_expected_columns() {
+    let storage = open_prepared();
+    assert_eq!(
+        column_names(&storage, "site_cookie_policies"),
+        ["id", "domain", "policy", "created_at"]
+    );
+}
+
+#[test]
+fn upgrading_a_version_one_database_reaches_version_two_and_keeps_history_data() {
+    let connection = Connection::open_in_memory().expect("in-memory connection must open");
+    connection
+        .execute_batch(V1_SCHEMA)
+        .expect("version-1 schema must apply");
+    connection
+        .execute(
+            "INSERT INTO pages (id, url, host, first_visit_at, last_visit_at) \
+             VALUES (1, 'https://example.com/', 'example.com', 0, 0);",
+            [],
+        )
+        .expect("page insert must succeed");
+    connection
+        .execute(
+            "INSERT INTO visits (page_id, visited_at, was_typed) VALUES (1, 0, 0);",
+            [],
+        )
+        .expect("visit insert must succeed");
+
+    run_migrations(&connection).expect("upgrade migrations must succeed");
+
+    let version: i64 = connection
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .expect("user_version pragma must read");
+    assert_eq!(version, 2, "the database must reach version 2");
+    let cookie_table_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name = 'site_cookie_policies';",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master must read");
+    assert_eq!(cookie_table_count, 1, "the new table must exist");
+    let pages_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM pages;", [], |row| row.get(0))
+        .expect("page count must read");
+    let visits_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM visits;", [], |row| row.get(0))
+        .expect("visit count must read");
+    assert_eq!(
+        pages_count, 1,
+        "existing page data must survive the upgrade"
+    );
+    assert_eq!(
+        visits_count, 1,
+        "existing visit data must survive the upgrade"
+    );
 }
 
 #[test]

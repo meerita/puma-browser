@@ -79,6 +79,15 @@ impl BrowserUrl {
         self.0.to_file_path().ok()
     }
 
+    /// The origin as `scheme://host[:port]`, with the scheme's default port omitted.
+    ///
+    /// Used as the scope key for the session cookie jar: two URLs sharing an origin
+    /// share cookies. An opaque origin (for example a `file://` URL) serializes to
+    /// the string `"null"`.
+    pub fn origin(&self) -> String {
+        self.0.origin().ascii_serialization()
+    }
+
     pub fn scheme(&self) -> &str {
         self.0.scheme()
     }
@@ -107,6 +116,21 @@ impl BrowserUrl {
         let mut base = self.0.clone();
         base.set_fragment(None);
         BrowserUrl(base)
+    }
+
+    /// The underlying parsed URL, for crate-internal operations that need `url::Url`
+    /// directly (such as joining a relative redirect target).
+    pub(crate) fn as_url(&self) -> &Url {
+        &self.0
+    }
+
+    /// Wrap an already-parsed, scheme-checked URL without re-validating it.
+    ///
+    /// Crate-internal only: the caller must have confirmed the scheme is allowed, so
+    /// this skips the `parse` scheme check. Used when a redirect target has already
+    /// passed the scheme allowlist and downgrade guard.
+    pub(crate) fn from_validated(url: Url) -> Self {
+        Self(url)
     }
 
     /// A copy of the URL string with any username and password removed.

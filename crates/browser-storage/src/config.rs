@@ -22,6 +22,10 @@ const DEFAULT_RETENTION_DAYS: u32 = 90;
 /// Built-in default for whether page titles are stored, when the file omits it.
 const DEFAULT_STORE_TITLES: bool = true;
 
+/// Built-in default cookie policy for both scopes when the file omits them: cookies are
+/// rejected unless the user opts a scope or a site in.
+const DEFAULT_COOKIE_POLICY: &str = "reject";
+
 /// The on-disk representation of the configuration file.
 ///
 /// Every field is optional so a partial or empty file is valid; missing values fall
@@ -33,6 +37,7 @@ const DEFAULT_STORE_TITLES: bool = true;
 struct ConfigFile {
     data_dir: Option<String>,
     history: Option<HistoryFile>,
+    cookies: Option<CookiesFile>,
 }
 
 /// The `[history]` table of the configuration file.
@@ -41,6 +46,13 @@ struct HistoryFile {
     mode: Option<String>,
     retention_days: Option<u32>,
     store_titles: Option<bool>,
+}
+
+/// The `[cookies]` table of the configuration file.
+#[derive(Debug, Default, Deserialize)]
+struct CookiesFile {
+    first_party: Option<String>,
+    third_party: Option<String>,
 }
 
 /// The resolved browser configuration after overlaying the file onto the defaults.
@@ -53,6 +65,8 @@ pub struct BrowserConfig {
     history_mode: String,
     retention_days: u32,
     store_titles: bool,
+    cookie_first_party: String,
+    cookie_third_party: String,
     data_dir: Option<PathBuf>,
 }
 
@@ -62,6 +76,8 @@ impl Default for BrowserConfig {
             history_mode: DEFAULT_HISTORY_MODE.to_string(),
             retention_days: DEFAULT_RETENTION_DAYS,
             store_titles: DEFAULT_STORE_TITLES,
+            cookie_first_party: DEFAULT_COOKIE_POLICY.to_string(),
+            cookie_third_party: DEFAULT_COOKIE_POLICY.to_string(),
             data_dir: None,
         }
     }
@@ -83,21 +99,38 @@ impl BrowserConfig {
         self.store_titles
     }
 
+    /// The raw first-party cookie policy string, mapped to the domain enum by
+    /// `browser-core`.
+    pub fn cookie_first_party(&self) -> &str {
+        &self.cookie_first_party
+    }
+
+    /// The raw third-party cookie policy string, mapped to the domain enum by
+    /// `browser-core`.
+    pub fn cookie_third_party(&self) -> &str {
+        &self.cookie_third_party
+    }
+
     /// The user-configured data directory override, if one is set.
     pub fn data_dir(&self) -> Option<&Path> {
         self.data_dir.as_deref()
     }
 
     /// Overlays a parsed file onto these defaults, returning the resolved configuration.
+    ///
+    /// A missing section keeps every default: an absent `[history]` or `[cookies]`
+    /// table resolves to an all-`None` file struct, so each field falls back through
+    /// `unwrap_or`.
     fn overlay(self, file: ConfigFile) -> Self {
         let data_dir = file.data_dir.map(PathBuf::from).or(self.data_dir);
-        let Some(history) = file.history else {
-            return Self { data_dir, ..self };
-        };
+        let history = file.history.unwrap_or_default();
+        let cookies = file.cookies.unwrap_or_default();
         Self {
             history_mode: history.mode.unwrap_or(self.history_mode),
             retention_days: history.retention_days.unwrap_or(self.retention_days),
             store_titles: history.store_titles.unwrap_or(self.store_titles),
+            cookie_first_party: cookies.first_party.unwrap_or(self.cookie_first_party),
+            cookie_third_party: cookies.third_party.unwrap_or(self.cookie_third_party),
             data_dir,
         }
     }

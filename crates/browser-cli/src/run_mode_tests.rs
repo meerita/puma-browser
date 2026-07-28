@@ -7,12 +7,28 @@ use std::path::Path;
 
 use tempfile::tempdir;
 
-use browser_core::HistoryMode;
+use browser_core::{CookiePolicy, HistoryMode};
+use browser_storage::{load_config, BrowserConfig};
 
 use super::{
-    copy_on_select_enabled, force_osc52_enabled, resolve_history_mode, resolve_mode,
-    search_enabled, unwrap_tracking_enabled, ResolvedMode,
+    copy_on_select_enabled, force_osc52_enabled, resolve_cookie_policy, resolve_history_mode,
+    resolve_mode, search_enabled, unwrap_tracking_enabled, ResolvedMode,
 };
+
+/// Loads a config whose `[cookies]` section carries the given scope words.
+///
+/// The config fields are private, so a real TOML file resolved through `load_config` is the
+/// only way to build one with specific cookie values in a test.
+fn config_with_cookies(first_party: &str, third_party: &str) -> BrowserConfig {
+    let config_directory = tempdir().expect("a temporary config directory must be created");
+    let config_path = config_directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("[cookies]\nfirst_party = \"{first_party}\"\nthird_party = \"{third_party}\"\n"),
+    )
+    .expect("the temporary config file must be written");
+    load_config(&config_path).expect("a well-formed config must load")
+}
 
 fn resolved_in(working_directory: &Path, arguments: &[&str]) -> ResolvedMode {
     resolve_mode(
@@ -225,4 +241,27 @@ fn an_unrecognized_mode_resolves_to_persistent() {
         resolve_history_mode("disabled", Some("nonsense")),
         HistoryMode::Persistent
     );
+}
+
+#[test]
+fn configured_scope_words_resolve_to_the_matching_policy_pair() {
+    let config = config_with_cookies("session", "allow");
+    let pair = resolve_cookie_policy(&config);
+    assert_eq!(pair.first_party, CookiePolicy::Session);
+    assert_eq!(pair.third_party, CookiePolicy::Allow);
+}
+
+#[test]
+fn an_unrecognized_scope_word_resolves_to_reject_for_that_scope() {
+    let config = config_with_cookies("nonsense", "allow");
+    let pair = resolve_cookie_policy(&config);
+    assert_eq!(pair.first_party, CookiePolicy::Reject);
+    assert_eq!(pair.third_party, CookiePolicy::Allow);
+}
+
+#[test]
+fn an_absent_cookies_section_resolves_to_reject_in_both_scopes() {
+    let pair = resolve_cookie_policy(&BrowserConfig::default());
+    assert_eq!(pair.first_party, CookiePolicy::Reject);
+    assert_eq!(pair.third_party, CookiePolicy::Reject);
 }

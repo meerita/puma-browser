@@ -21,33 +21,99 @@ fn reading(code: KeyCode, quit_armed: bool, refresh_armed: bool) -> InputAction 
         false,
         false,
         false,
+        false,
     )
 }
 
 /// Maps a key while a plain (non-palette) command buffer is being edited, so the
 /// command-mode base bindings apply.
 fn command_mode(code: KeyCode) -> InputAction {
-    map_key_event(key(code), false, false, true, false, false, false, false)
+    map_key_event(
+        key(code),
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
 }
 
 /// Maps a key while the slash-command palette is active on top of command mode.
 fn palette_mode(code: KeyCode) -> InputAction {
-    map_key_event(key(code), false, false, true, false, true, false, false)
+    map_key_event(
+        key(code),
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+    )
 }
 
 /// Maps a key while address-bar suggestions are offered over a non-slash command buffer.
 fn suggestion_mode(code: KeyCode) -> InputAction {
-    map_key_event(key(code), false, false, true, false, false, true, false)
+    map_key_event(
+        key(code),
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+    )
 }
 
 /// Maps a key while the history list is open.
 fn history_mode(code: KeyCode) -> InputAction {
-    map_key_event(key(code), false, false, false, false, false, false, true)
+    map_key_event(
+        key(code),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+    )
+}
+
+/// Maps a key while the cookie inspection popup is open.
+fn cookies_mode(code: KeyCode) -> InputAction {
+    map_key_event(
+        key(code),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+    )
 }
 
 /// Maps a key while a link is focused (link-navigation mode).
 fn link_navigation(code: KeyCode) -> InputAction {
-    map_key_event(key(code), false, false, false, true, false, false, false)
+    map_key_event(
+        key(code),
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+    )
 }
 
 #[test]
@@ -64,7 +130,7 @@ fn esc_from_armed_yields_the_quit_action() {
 fn ctrl_c_yields_the_quit_action() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, false),
+        map_key_event(event, false, false, false, false, false, false, false, false),
         InputAction::Quit
     );
 }
@@ -166,7 +232,7 @@ fn unbound_printable_char_with_upper_case_in_reading_mode_enters_command_mode() 
 fn ctrl_c_in_command_mode_yields_quit() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, true, false, false, false, false),
+        map_key_event(event, false, false, true, false, false, false, false, false),
         InputAction::Quit
     );
 }
@@ -345,7 +411,7 @@ fn esc_in_the_history_list_closes_it() {
 fn ctrl_c_still_quits_from_the_history_list() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, true),
+        map_key_event(event, false, false, false, false, false, false, true, false),
         InputAction::Quit
     );
 }
@@ -385,4 +451,29 @@ fn enter_in_link_navigation_returns_activate_focused_link() {
 #[test]
 fn esc_in_link_navigation_returns_disarm() {
     assert_eq!(link_navigation(KeyCode::Esc), InputAction::Disarm);
+}
+
+#[test]
+fn arrows_in_the_cookies_popup_scroll_the_selection() {
+    assert_eq!(cookies_mode(KeyCode::Down), InputAction::CookiesSelectNext);
+    assert_eq!(cookies_mode(KeyCode::Up), InputAction::CookiesSelectPrev);
+}
+
+#[test]
+fn esc_in_the_cookies_popup_closes_it() {
+    assert_eq!(cookies_mode(KeyCode::Esc), InputAction::CookiesClose);
+}
+
+#[test]
+fn a_stray_key_in_the_cookies_popup_is_ignored() {
+    assert_eq!(cookies_mode(KeyCode::Enter), InputAction::Disarm);
+}
+
+#[test]
+fn ctrl_c_still_quits_from_the_cookies_popup() {
+    let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(
+        map_key_event(event, false, false, false, false, false, false, false, true),
+        InputAction::Quit
+    );
 }

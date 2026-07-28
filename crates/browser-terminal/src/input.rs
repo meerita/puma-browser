@@ -37,6 +37,9 @@ pub(crate) enum InputAction {
     HistoryActivateSelected,
     HistoryDeleteSelected,
     HistoryClose,
+    CookiesSelectPrev,
+    CookiesSelectNext,
+    CookiesClose,
     FocusNextLink,
     FocusPreviousLink,
     ActivateFocusedLink,
@@ -61,12 +64,16 @@ pub(crate) fn map_key_event(
     palette_active: bool,
     address_suggestions_active: bool,
     in_history: bool,
+    in_cookies: bool,
 ) -> InputAction {
     if is_quit_combination(event) {
         return InputAction::Quit;
     }
     if in_history {
         return map_history_key(event);
+    }
+    if in_cookies {
+        return map_cookies_key(event);
     }
     if in_command_mode {
         return map_command_mode_key(event, palette_active, address_suggestions_active);
@@ -178,6 +185,19 @@ fn map_history_key(event: KeyEvent) -> InputAction {
         KeyCode::Enter => InputAction::HistoryActivateSelected,
         KeyCode::Delete | KeyCode::Char('d') => InputAction::HistoryDeleteSelected,
         KeyCode::Esc => InputAction::HistoryClose,
+        _ => InputAction::Disarm,
+    }
+}
+
+/// Maps a key while the cookie inspection popup is open. The arrows scroll the highlighted
+/// row and `Esc` closes the popup. Any other key is ignored so a stray keystroke never
+/// dismisses the popup or scrolls the page behind it. The popup is read-only, so there is
+/// no activate or delete action here.
+fn map_cookies_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Up | KeyCode::Char('k') => InputAction::CookiesSelectPrev,
+        KeyCode::Down | KeyCode::Char('j') => InputAction::CookiesSelectNext,
+        KeyCode::Esc => InputAction::CookiesClose,
         _ => InputAction::Disarm,
     }
 }

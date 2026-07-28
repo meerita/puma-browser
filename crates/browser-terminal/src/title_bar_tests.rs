@@ -5,7 +5,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{compose_title_bar, format_page_size, truncate_with_ellipsis};
+use super::{build_right_indicators, compose_title_bar, format_page_size, truncate_with_ellipsis};
 
 #[test]
 fn ascii_title_fits_without_truncation() {
@@ -22,7 +22,7 @@ fn long_title_is_truncated_with_ellipsis() {
 
 #[test]
 fn script_count_zero_omits_script_segment() {
-    let result = compose_title_bar("Page", 50, 0, 0, 40);
+    let result = compose_title_bar("Page", 50, 0, 0, (0, 0), 40);
     assert!(
         !result.contains("script"),
         "unexpected script segment: {result}"
@@ -31,7 +31,7 @@ fn script_count_zero_omits_script_segment() {
 
 #[test]
 fn script_count_one_uses_singular() {
-    let result = compose_title_bar("Page", 50, 1, 0, 80);
+    let result = compose_title_bar("Page", 50, 1, 0, (0, 0), 80);
     assert!(
         result.contains("1 script blocked"),
         "expected singular: {result}"
@@ -41,7 +41,7 @@ fn script_count_one_uses_singular() {
 
 #[test]
 fn script_count_many_uses_plural() {
-    let result = compose_title_bar("Page", 50, 5, 0, 80);
+    let result = compose_title_bar("Page", 50, 5, 0, (0, 0), 80);
     assert!(
         result.contains("5 scripts blocked"),
         "expected plural: {result}"
@@ -56,6 +56,7 @@ fn composed_string_width_equals_terminal_width() {
             75,
             3,
             1536,
+            (0, 0),
             terminal_width,
         );
         let actual_width = UnicodeWidthStr::width(result.as_str());
@@ -68,7 +69,7 @@ fn composed_string_width_equals_terminal_width() {
 
 #[test]
 fn page_size_zero_bytes_omits_size_segment() {
-    let result = compose_title_bar("Page", 0, 0, 0, 80);
+    let result = compose_title_bar("Page", 0, 0, 0, (0, 0), 80);
     assert!(
         !result.contains(" B") && !result.contains("KB") && !result.contains("MB"),
         "size segment should be absent when byte_count is zero: {result}"
@@ -77,10 +78,34 @@ fn page_size_zero_bytes_omits_size_segment() {
 
 #[test]
 fn page_size_shown_when_byte_count_is_nonzero() {
-    let result = compose_title_bar("Page", 50, 0, 2048, 80);
+    let result = compose_title_bar("Page", 50, 0, 2048, (0, 0), 80);
     assert!(
         result.contains("↓ 2.0 KB"),
         "expected page size in indicators: {result}"
+    );
+}
+
+#[test]
+fn the_cookie_indicator_shows_accepted_and_rejected_counts() {
+    let result = build_right_indicators(50, 0, 0, (1, 2));
+    assert!(
+        result.contains("1 accepted · 2 rejected"),
+        "expected cookie counts: {result}"
+    );
+}
+
+#[test]
+fn the_cookie_indicator_joins_after_the_scripts_segment() {
+    let result = build_right_indicators(50, 1, 0, (1, 2));
+    assert_eq!(result, "50% · 1 script blocked · 1 accepted · 2 rejected");
+}
+
+#[test]
+fn zero_cookie_counts_omit_the_cookie_segment() {
+    let result = build_right_indicators(50, 0, 0, (0, 0));
+    assert!(
+        !result.contains("accepted") && !result.contains("rejected"),
+        "cookie segment should be absent when both counts are zero: {result}"
     );
 }
 

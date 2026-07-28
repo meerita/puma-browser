@@ -9,12 +9,18 @@ use browser_privacy::PrivacyError;
 /// test fails to compile here rather than silently escaping the safety check.
 fn display_of(error: &PrivacyError) -> String {
     match error {
-        PrivacyError::CookieRejected | PrivacyError::RequestBlocked => error.to_string(),
+        PrivacyError::CookieRejected
+        | PrivacyError::RequestBlocked
+        | PrivacyError::CookieMalformed => error.to_string(),
     }
 }
 
-fn all_variants() -> [PrivacyError; 2] {
-    [PrivacyError::CookieRejected, PrivacyError::RequestBlocked]
+fn all_variants() -> [PrivacyError; 3] {
+    [
+        PrivacyError::CookieRejected,
+        PrivacyError::RequestBlocked,
+        PrivacyError::CookieMalformed,
+    ]
 }
 
 #[test]
@@ -40,5 +46,13 @@ fn request_blocked_reports_a_blocked_request() {
     assert_eq!(
         PrivacyError::RequestBlocked.to_string(),
         "request blocked by policy"
+    );
+}
+
+#[test]
+fn cookie_malformed_reports_an_unparseable_cookie() {
+    assert_eq!(
+        PrivacyError::CookieMalformed.to_string(),
+        "cookie could not be parsed"
     );
 }

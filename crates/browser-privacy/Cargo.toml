@@ -11,3 +11,5 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+psl = "2.1"
+cookie = "0.18"

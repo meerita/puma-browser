@@ -25,6 +25,7 @@ pub(crate) enum InteractionMode {
     Command,
     LinkNavigation,
     History,
+    Cookies,
 }
 
 pub(crate) struct UiState {
@@ -45,6 +46,8 @@ pub(crate) struct UiState {
     suggestion_selected: Option<usize>,
     history_entries: Vec<HistoryEntry>,
     history_selected_index: usize,
+    cookie_lines: Vec<String>,
+    cookie_selected_index: usize,
     pending_fragment: Option<String>,
     search_enabled: bool,
 }
@@ -69,6 +72,8 @@ impl UiState {
             suggestion_selected: None,
             history_entries: Vec::new(),
             history_selected_index: 0,
+            cookie_lines: Vec::new(),
+            cookie_selected_index: 0,
             pending_fragment: None,
             search_enabled,
         }
@@ -101,6 +106,10 @@ impl UiState {
 
     pub(crate) fn is_in_history_mode(&self) -> bool {
         matches!(self.interaction_mode, InteractionMode::History)
+    }
+
+    pub(crate) fn is_in_cookies_mode(&self) -> bool {
+        matches!(self.interaction_mode, InteractionMode::Cookies)
     }
 
     /// Replaces the address-bar suggestions with `suggestions`, resetting the selection so
@@ -232,6 +241,48 @@ impl UiState {
         }
         let last = self.history_entries.len() - 1;
         self.history_selected_index = self.history_selected_index.min(last);
+    }
+
+    /// Opens the cookie inspection popup on `lines`, selecting the first row. The lines are
+    /// already sanitized and composed by the caller; this only holds them for display.
+    pub(crate) fn enter_cookies_mode(&mut self, lines: Vec<String>) {
+        self.interaction_mode = InteractionMode::Cookies;
+        self.cookie_lines = lines;
+        self.cookie_selected_index = 0;
+    }
+
+    /// Closes the cookie inspection popup and returns to reading mode.
+    pub(crate) fn exit_cookies_mode(&mut self) {
+        self.interaction_mode = InteractionMode::Reading;
+        self.cookie_lines.clear();
+        self.cookie_selected_index = 0;
+    }
+
+    /// The lines shown in the open cookie inspection popup.
+    pub(crate) fn cookie_lines(&self) -> &[String] {
+        &self.cookie_lines
+    }
+
+    /// The index of the highlighted cookie row, so the popup can keep it in view.
+    pub(crate) fn cookie_selected(&self) -> usize {
+        self.cookie_selected_index
+    }
+
+    /// Moves the cookie highlight to the next row, wrapping at the end.
+    pub(crate) fn cookie_select_next(&mut self) {
+        if self.cookie_lines.is_empty() {
+            return;
+        }
+        self.cookie_selected_index = (self.cookie_selected_index + 1) % self.cookie_lines.len();
+    }
+
+    /// Moves the cookie highlight to the previous row, wrapping at the start.
+    pub(crate) fn cookie_select_prev(&mut self) {
+        if self.cookie_lines.is_empty() {
+            return;
+        }
+        let last = self.cookie_lines.len() - 1;
+        self.cookie_selected_index = self.cookie_selected_index.checked_sub(1).unwrap_or(last);
     }
 
     /// Enters link navigation mode and focuses the link at `index`.
