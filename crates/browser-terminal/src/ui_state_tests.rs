@@ -274,7 +274,7 @@ fn entering_slash_fills_the_palette_with_all_commands() {
     let mut state = UiState::new(true);
     state.enter_command_mode('/');
     assert!(state.is_palette_active());
-    assert_eq!(state.palette_matches().len(), 8);
+    assert_eq!(state.palette_matches().len(), 9);
     assert_eq!(state.palette_selected(), 0);
 }
 
@@ -295,7 +295,7 @@ fn deleting_a_character_rewidens_the_palette() {
     state.command_append_char('q');
     assert_eq!(state.palette_matches().len(), 1);
     state.command_delete_before_cursor();
-    assert_eq!(state.palette_matches().len(), 8);
+    assert_eq!(state.palette_matches().len(), 9);
 }
 
 #[test]
@@ -345,7 +345,7 @@ fn palette_select_next_wraps_around_the_match_list() {
     assert_eq!(state.palette_selected(), 0);
     state.palette_select_next();
     assert_eq!(state.palette_selected(), 1);
-    for _ in 0..7 {
+    for _ in 0..8 {
         state.palette_select_next();
     }
     assert_eq!(state.palette_selected(), 0);
@@ -471,7 +471,7 @@ fn backspace_before_the_leading_slash_only_deletes_a_character() {
     state.command_delete_or_exit();
     assert!(state.is_in_command_mode());
     assert_eq!(state.command_buffer(), "/");
-    assert_eq!(state.palette_matches().len(), 8);
+    assert_eq!(state.palette_matches().len(), 9);
 }
 
 #[test]
@@ -516,8 +516,8 @@ fn disabling_search_hides_only_the_search_command_from_the_full_palette() {
     enabled.enter_command_mode('/');
     let mut disabled = UiState::new(false);
     disabled.enter_command_mode('/');
-    assert_eq!(enabled.palette_matches().len(), 8);
-    assert_eq!(disabled.palette_matches().len(), 7);
+    assert_eq!(enabled.palette_matches().len(), 9);
+    assert_eq!(disabled.palette_matches().len(), 8);
 }
 
 #[test]

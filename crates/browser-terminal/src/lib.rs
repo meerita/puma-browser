@@ -8,6 +8,7 @@ mod clipboard;
 #[allow(dead_code)]
 mod command;
 mod command_bar;
+mod cookie_view;
 mod error;
 mod hints_bar;
 mod history_view;
@@ -27,7 +28,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use browser_core::{
-    BrowserUrl, CoreError, HistoryEntryId, NavigationController, NavigationSource,
+    BrowserUrl, CookiePolicy, CoreError, HistoryEntryId, NavigationController, NavigationSource,
     NavigationTarget, SearchEngine,
 };
 use browser_css::{Color, Emphasis};
@@ -54,11 +55,12 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
 use clipboard::{copy_to_clipboard, ClipboardOutcome};
-use command::{parse_command_input, CommandKind};
+use command::{parse_command_input, parse_cookies_request, CommandKind, CookiesRequest};
 use command_bar::{
     command_cursor_col, compose_command_bar_command, compose_command_bar_loading,
     compose_command_bar_reading,
 };
+use cookie_view::CookieFilter;
 use hints_bar::compose_hints_bar;
 use history_view::{
     compose_list_menu, format_history_label, now_unix_seconds, strip_control, ListMenu,
@@ -126,6 +128,10 @@ const ADDRESS_SUGGESTION_LIMIT: usize = 8;
 
 /// The hint shown while the history list is open, describing its controls.
 const HISTORY_CONTROLS_HINT: &str = "↑↓ select · Enter open · Del delete · Esc close";
+
+/// The usage line shown when a `/cookies` argument is not a recognized subcommand.
+const COOKIES_USAGE: &str =
+    "usage: /cookies [accepted | rejected | clear | allow-session <site> | reject <site>]";
 
 /// Drives the terminal user interface over the navigation core.
 ///
@@ -296,6 +302,7 @@ impl TerminalApp {
                 scroll_percent_val,
                 self.controller.script_count(),
                 self.controller.page_byte_count(),
+                self.controller.cookie_counts(),
                 loading_ref,
                 selection_range,
             )?;
@@ -344,6 +351,7 @@ impl TerminalApp {
                                 let palette_active = ui_state.is_palette_active();
                                 let address_suggestions_active = ui_state.has_address_suggestions();
                                 let in_history = ui_state.is_in_history_mode();
+                                let in_cookies = ui_state.is_in_cookies_mode();
                                 let action = map_key_event(
                                     key,
                                     ui_state.quit_armed,
@@ -353,6 +361,7 @@ impl TerminalApp {
                                     palette_active,
                                     address_suggestions_active,
                                     in_history,
+                                    in_cookies,
                                 );
                                 if matches!(action, InputAction::Quit) {
                                     return Ok(());
@@ -720,6 +729,10 @@ impl TerminalApp {
             CommandKind::Reload => self.run_reload(ui_state, now),
             CommandKind::Back => self.run_back(ui_state, cache, scroll, now),
             CommandKind::History => CommandOutcome::History(parse_history_request(remainder)),
+            CommandKind::Cookies => {
+                self.run_cookies(parse_cookies_request(remainder), ui_state, now);
+                CommandOutcome::None
+            }
             CommandKind::Quit => CommandOutcome::Quit,
             CommandKind::Help => {
                 ui_state.enter_command_mode('/');
@@ -819,6 +832,67 @@ impl TerminalApp {
             &mut self.view_state,
         );
         CommandOutcome::None
+    }
+
+    /// Runs a parsed `/cookies` request against core. The summary and the accepted/rejected
+    /// listings open the read-only inspection popup; `clear` empties the session jar;
+    /// `allow-session`/`reject` set a per-site exception. Every outcome is a short status
+    /// message or a sanitized popup; no cookie value and no error internals are ever shown.
+    fn run_cookies(&mut self, request: CookiesRequest, ui_state: &mut UiState, now: Instant) {
+        match request {
+            CookiesRequest::Summary => self.show_cookie_summary(ui_state, now),
+            CookiesRequest::Accepted => self.show_cookie_decision(CookieFilter::Accepted, ui_state),
+            CookiesRequest::Rejected => self.show_cookie_decision(CookieFilter::Rejected, ui_state),
+            CookiesRequest::Clear => {
+                self.controller.clear_cookies();
+                ui_state.set_transient_message("cookies cleared".to_string(), now);
+            }
+            CookiesRequest::AllowSession(site) => {
+                self.set_cookie_policy(&site, CookiePolicy::Session, ui_state, now)
+            }
+            CookiesRequest::Reject(site) => {
+                self.set_cookie_policy(&site, CookiePolicy::Reject, ui_state, now)
+            }
+            CookiesRequest::Usage => {
+                ui_state.set_transient_message(COOKIES_USAGE.to_string(), now);
+            }
+        }
+    }
+
+    /// Opens the `/cookies` summary popup, or reports an empty session when nothing has been
+    /// offered yet so the user is not shown a bare zero-count box.
+    fn show_cookie_summary(&mut self, ui_state: &mut UiState, now: Instant) {
+        let records = self.controller.cookie_records();
+        if records.is_empty() {
+            ui_state.set_transient_message("no cookies recorded this session".to_string(), now);
+            return;
+        }
+        let lines = cookie_view::summary_lines(records);
+        ui_state.enter_cookies_mode(lines);
+    }
+
+    /// Opens the accepted or rejected cookie listing in the inspection popup. The listing
+    /// always carries a header line, so it opens even when the filter matches nothing.
+    fn show_cookie_decision(&mut self, filter: CookieFilter, ui_state: &mut UiState) {
+        let lines = cookie_view::decision_lines(self.controller.cookie_records(), filter);
+        ui_state.enter_cookies_mode(lines);
+    }
+
+    /// Sets a per-site cookie policy exception, confirming it or mapping a store failure to a
+    /// short status message. The site is control-stripped before it appears in the
+    /// confirmation, and a failure surfaces only the safe user message, never internals.
+    fn set_cookie_policy(
+        &mut self,
+        site: &str,
+        policy: CookiePolicy,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) {
+        let message = match self.controller.set_site_cookie_policy(site, policy) {
+            Ok(()) => format!("{}: {}", strip_control(site), policy_confirmation(policy)),
+            Err(error) => TerminalError::from(error).user_message(),
+        };
+        ui_state.set_transient_message(message, now);
     }
 
     /// Recomputes the address-bar suggestions for the current command buffer.
@@ -1054,6 +1128,7 @@ impl TerminalApp {
         scroll_percent: u16,
         script_count: usize,
         page_byte_count: usize,
+        cookie_counts: (usize, usize),
         loading: Option<(usize, &str, usize)>,
         selection_range: Option<(CellPosition, CellPosition)>,
     ) -> Result<(), TerminalError> {
@@ -1069,6 +1144,7 @@ impl TerminalApp {
                     scroll_percent,
                     script_count,
                     page_byte_count,
+                    cookie_counts,
                     loading,
                     selection_range,
                 )
@@ -1097,6 +1173,18 @@ fn parse_history_request(remainder: &str) -> HistoryRequest {
         return HistoryRequest::ClearAll;
     }
     HistoryRequest::ClearSite(rest.to_string())
+}
+
+/// The confirmation phrase for a per-site policy exception. `Session` and `Reject` are the
+/// only policies `/cookies` sets; `Allow` and `Ask` still get a factual phrase so the match
+/// stays exhaustive without a catch-all that would hide a new policy.
+fn policy_confirmation(policy: CookiePolicy) -> &'static str {
+    match policy {
+        CookiePolicy::Session => "session cookies allowed",
+        CookiePolicy::Reject => "cookies rejected",
+        CookiePolicy::Allow => "cookies allowed",
+        CookiePolicy::Ask => "cookies set to ask",
+    }
 }
 
 /// Whether `action` changed the command buffer text and so should trigger a fresh
@@ -1167,6 +1255,7 @@ fn draw_frame(
     scroll_percent: u16,
     script_count: usize,
     page_byte_count: usize,
+    cookie_counts: (usize, usize),
     loading: Option<(usize, &str, usize)>,
     selection_range: Option<(CellPosition, CellPosition)>,
 ) {
@@ -1201,6 +1290,7 @@ fn draw_frame(
     draw_palette_popup(frame, chunks[0], ui_state);
     draw_address_suggestions_popup(frame, chunks[0], ui_state);
     draw_history_popup(frame, chunks[0], ui_state);
+    draw_cookies_popup(frame, chunks[0], ui_state);
 
     draw_separator(frame, chunks[1]);
 
@@ -1228,6 +1318,7 @@ fn draw_frame(
         scroll_percent,
         script_count,
         page_byte_count,
+        cookie_counts,
         terminal_width,
     );
     draw_chrome_row(frame, chunks[4], &title_text);
@@ -1311,6 +1402,30 @@ fn draw_history_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
     let menu = compose_list_menu(
         &labels,
         Some(ui_state.history_selected()),
+        content_area.width,
+        max_rows,
+    );
+    if menu.rows.is_empty() {
+        return;
+    }
+    render_bottom_popup(frame, content_area, list_popup_lines(&menu));
+}
+
+/// Draws the cookie inspection popup over the bottom of the content area while it is open.
+/// Renders nothing when the popup is closed or empty. Every row was sanitized and composed
+/// by `cookie_view` before it reached the state, so no raw remote bytes reach the terminal.
+fn draw_cookies_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState) {
+    if !ui_state.is_in_cookies_mode() {
+        return;
+    }
+    let lines = ui_state.cookie_lines();
+    if lines.is_empty() || content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let max_rows = LIST_MENU_MAX_ROWS.min(content_area.height as usize);
+    let menu = compose_list_menu(
+        lines,
+        Some(ui_state.cookie_selected()),
         content_area.width,
         max_rows,
     );
@@ -1653,6 +1768,9 @@ fn apply_scroll(
         | InputAction::HistoryActivateSelected
         | InputAction::HistoryDeleteSelected
         | InputAction::HistoryClose
+        | InputAction::CookiesSelectPrev
+        | InputAction::CookiesSelectNext
+        | InputAction::CookiesClose
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
         | InputAction::ActivateFocusedLink
@@ -1677,6 +1795,9 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         InputAction::HistorySelectPrev => ui_state.history_select_prev(),
         InputAction::HistorySelectNext => ui_state.history_select_next(),
         InputAction::HistoryClose => ui_state.exit_history_mode(),
+        InputAction::CookiesSelectPrev => ui_state.cookie_select_prev(),
+        InputAction::CookiesSelectNext => ui_state.cookie_select_next(),
+        InputAction::CookiesClose => ui_state.exit_cookies_mode(),
         InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
         | InputAction::ScrollPageDown
@@ -1831,7 +1952,10 @@ fn handle_navigation_action(
         | InputAction::HistorySelectNext
         | InputAction::HistoryActivateSelected
         | InputAction::HistoryDeleteSelected
-        | InputAction::HistoryClose => None,
+        | InputAction::HistoryClose
+        | InputAction::CookiesSelectPrev
+        | InputAction::CookiesSelectNext
+        | InputAction::CookiesClose => None,
     }
 }
 

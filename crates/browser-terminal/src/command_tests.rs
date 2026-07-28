@@ -3,14 +3,17 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
-use super::{filter, parse_command_input, registry, resolve, CommandKind, MatchRank};
+use super::{
+    filter, parse_command_input, parse_cookies_request, registry, resolve, CommandKind,
+    CookiesRequest, MatchRank,
+};
 
 #[test]
-fn registry_holds_exactly_the_eight_commands() {
+fn registry_holds_exactly_the_nine_commands() {
     let names: Vec<&str> = registry().iter().map(|spec| spec.name).collect();
     assert_eq!(
         names,
-        vec!["open", "search", "reload", "back", "history", "help", "quit", "settings"]
+        vec!["open", "search", "reload", "back", "history", "cookies", "help", "quit", "settings"]
     );
 }
 
@@ -74,7 +77,7 @@ fn empty_query_returns_all_commands_in_registry_order() {
     let names: Vec<&str> = matches.iter().map(|found| found.spec.name).collect();
     assert_eq!(
         names,
-        vec!["open", "search", "reload", "back", "history", "help", "quit", "settings"]
+        vec!["open", "search", "reload", "back", "history", "cookies", "help", "quit", "settings"]
     );
     assert!(matches.iter().all(|found| found.rank == MatchRank::Prefix));
 }
@@ -185,4 +188,66 @@ fn a_parsed_alias_resolves_to_the_settings_kind() {
 fn a_parsed_unknown_token_resolves_to_none() {
     let (token, _) = parse_command_input("/bogus");
     assert!(resolve(token).is_none());
+}
+
+#[test]
+fn cookies_resolves_and_takes_an_argument() {
+    let cookies = resolve("cookies").expect("cookies command must exist");
+    assert!(cookies.takes_argument);
+    assert_eq!(cookies.kind, CommandKind::Cookies);
+}
+
+#[test]
+fn a_bare_cookies_argument_is_the_summary() {
+    assert_eq!(parse_cookies_request(""), CookiesRequest::Summary);
+    assert_eq!(parse_cookies_request("   "), CookiesRequest::Summary);
+}
+
+#[test]
+fn the_accepted_subcommand_parses_to_accepted() {
+    assert_eq!(parse_cookies_request("accepted"), CookiesRequest::Accepted);
+}
+
+#[test]
+fn the_rejected_subcommand_parses_to_rejected() {
+    assert_eq!(parse_cookies_request("rejected"), CookiesRequest::Rejected);
+}
+
+#[test]
+fn the_clear_subcommand_parses_to_clear() {
+    assert_eq!(parse_cookies_request("clear"), CookiesRequest::Clear);
+}
+
+#[test]
+fn allow_session_parses_the_site() {
+    assert_eq!(
+        parse_cookies_request("allow-session example.com"),
+        CookiesRequest::AllowSession("example.com".to_string())
+    );
+}
+
+#[test]
+fn reject_parses_the_site() {
+    assert_eq!(
+        parse_cookies_request("reject example.com"),
+        CookiesRequest::Reject("example.com".to_string())
+    );
+}
+
+#[test]
+fn allow_session_without_a_site_is_a_usage_request() {
+    assert_eq!(
+        parse_cookies_request("allow-session"),
+        CookiesRequest::Usage
+    );
+}
+
+#[test]
+fn reject_without_a_site_is_a_usage_request() {
+    assert_eq!(parse_cookies_request("reject"), CookiesRequest::Usage);
+}
+
+#[test]
+fn an_unknown_cookies_subcommand_is_a_usage_request() {
+    assert_eq!(parse_cookies_request("wat"), CookiesRequest::Usage);
 }
