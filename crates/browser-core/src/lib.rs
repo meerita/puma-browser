@@ -38,7 +38,7 @@ pub use suggestion_index::SuggestionIndex;
 pub use tab_id::TabId;
 pub use tab_state::TabState;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -63,7 +63,7 @@ use current_page::CurrentPage;
 #[derive(Default)]
 pub struct NavigationController {
     current_page: Option<CurrentPage>,
-    history_stack: Vec<CurrentPage>,
+    history_stack: VecDeque<CurrentPage>,
     history: Option<Arc<dyn HistoryStore + Send + Sync>>,
     history_settings: HistorySettings,
     suggestion_index: SuggestionIndex,
@@ -132,7 +132,7 @@ impl NavigationController {
     ) -> Self {
         Self {
             current_page: None,
-            history_stack: Vec::new(),
+            history_stack: VecDeque::new(),
             history,
             history_settings,
             suggestion_index: SuggestionIndex::from_entries(initial_suggestions),
@@ -264,9 +264,9 @@ impl NavigationController {
         // it without a second network round-trip.
         if let Some(previous) = self.current_page.take() {
             if self.history_stack.len() >= MAX_HISTORY_DEPTH {
-                self.history_stack.remove(0);
+                self.history_stack.pop_front();
             }
-            self.history_stack.push(previous);
+            self.history_stack.push_back(previous);
         }
         self.current_page = Some(CurrentPage::new(
             fetched.final_url().clone(),
@@ -532,7 +532,7 @@ impl NavigationController {
     /// Returns `true` if a page was restored, `false` when the stack was empty. The
     /// restored page becomes the current page without a network call.
     pub fn go_back(&mut self) -> bool {
-        match self.history_stack.pop() {
+        match self.history_stack.pop_back() {
             Some(page) => {
                 self.current_page = Some(page);
                 true

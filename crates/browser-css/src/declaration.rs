@@ -4,8 +4,8 @@
 // @created meerita <meerita@icloud.com>
 
 use cssparser::{
-    AtRuleParser, CowRcStr, DeclarationParser, ParseError, Parser, ParserInput, ParserState,
-    QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser,
+    match_ignore_ascii_case, AtRuleParser, CowRcStr, DeclarationParser, ParseError, Parser,
+    ParserInput, ParserState, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser,
 };
 
 use crate::style_properties::{
@@ -137,23 +137,22 @@ fn parse_declaration<'i>(
     name: &str,
     input: &mut Parser<'i, '_>,
 ) -> Result<Declaration, ParseError<'i, ()>> {
-    let property = name.to_ascii_lowercase();
-    match property.as_str() {
+    match_ignore_ascii_case! { name,
         "display" => parse_ident_value(input, display_value).map(Declaration::Display),
         "visibility" => parse_ident_value(input, visibility_value).map(Declaration::Visible),
         "white-space" => parse_ident_value(input, white_space_value).map(Declaration::WhiteSpace),
         "text-transform" => {
             parse_ident_value(input, text_transform_value).map(Declaration::TextTransform)
-        }
+        },
         "font-weight" => parse_font_weight(input).map(Declaration::Emphasis),
         "color" => parse_ident_value(input, color_keyword).map(Declaration::Foreground),
         "background-color" | "background" => {
             parse_ident_value(input, color_keyword).map(Declaration::Background)
-        }
+        },
         "text-decoration" | "text-decoration-line" => parse_text_decoration(input),
         "list-style-type" | "list-style" => {
             parse_ident_value(input, list_marker_value).map(Declaration::ListMarker)
-        }
+        },
         _ => Err(input.new_custom_error(())),
     }
 }
@@ -167,15 +166,14 @@ fn parse_ident_value<'i, Value>(
     map: impl Fn(&str) -> Option<Value>,
 ) -> Result<Value, ParseError<'i, ()>> {
     let identifier = input.expect_ident().map_err(ParseError::from)?;
-    map(&identifier.to_ascii_lowercase()).ok_or_else(|| input.new_custom_error(()))
+    map(identifier).ok_or_else(|| input.new_custom_error(()))
 }
 
 /// Read a `font-weight` value as bold-or-not: a numeric weight of 600 or more, or a
 /// bold-ish keyword, folds to bold; every other recognized value folds to no emphasis.
 fn parse_font_weight<'i>(input: &mut Parser<'i, '_>) -> Result<Emphasis, ParseError<'i, ()>> {
     if let Ok(identifier) = input.try_parse(|parser| parser.expect_ident_cloned()) {
-        return font_weight_keyword(&identifier.to_ascii_lowercase())
-            .ok_or_else(|| input.new_custom_error(()));
+        return font_weight_keyword(&identifier).ok_or_else(|| input.new_custom_error(()));
     }
     let weight = input.expect_number().map_err(ParseError::from)?;
     Ok(emphasis_for_weight(weight))
@@ -188,17 +186,17 @@ fn parse_text_decoration<'i>(
     let mut strike = false;
     let mut recognized = false;
     while let Ok(identifier) = input.try_parse(|parser| parser.expect_ident_cloned()) {
-        match identifier.to_ascii_lowercase().as_str() {
+        match_ignore_ascii_case! { &*identifier,
             "underline" => {
                 underline = true;
                 recognized = true;
-            }
+            },
             "line-through" => {
                 strike = true;
                 recognized = true;
-            }
+            },
             "none" => recognized = true,
-            _ => {}
+            _ => {},
         }
     }
     if !recognized {
@@ -208,7 +206,7 @@ fn parse_text_decoration<'i>(
 }
 
 fn display_value(value: &str) -> Option<DisplayMode> {
-    match value {
+    match_ignore_ascii_case! { value,
         "none" => Some(DisplayMode::Hidden),
         "block" => Some(DisplayMode::Block),
         "inline" | "inline-block" => Some(DisplayMode::Inline),
@@ -218,7 +216,7 @@ fn display_value(value: &str) -> Option<DisplayMode> {
 }
 
 fn visibility_value(value: &str) -> Option<bool> {
-    match value {
+    match_ignore_ascii_case! { value,
         "visible" => Some(true),
         "hidden" | "collapse" => Some(false),
         _ => None,
@@ -226,7 +224,7 @@ fn visibility_value(value: &str) -> Option<bool> {
 }
 
 fn white_space_value(value: &str) -> Option<WhiteSpace> {
-    match value {
+    match_ignore_ascii_case! { value,
         "normal" => Some(WhiteSpace::Normal),
         "nowrap" => Some(WhiteSpace::NoWrap),
         "pre" | "pre-wrap" | "pre-line" => Some(WhiteSpace::Pre),
@@ -235,7 +233,7 @@ fn white_space_value(value: &str) -> Option<WhiteSpace> {
 }
 
 fn text_transform_value(value: &str) -> Option<TextTransform> {
-    match value {
+    match_ignore_ascii_case! { value,
         "none" => Some(TextTransform::None),
         "uppercase" => Some(TextTransform::Uppercase),
         "lowercase" => Some(TextTransform::Lowercase),
@@ -245,7 +243,7 @@ fn text_transform_value(value: &str) -> Option<TextTransform> {
 }
 
 fn list_marker_value(value: &str) -> Option<ListMarker> {
-    match value {
+    match_ignore_ascii_case! { value,
         "none" => Some(ListMarker::None),
         "decimal" => Some(ListMarker::Decimal),
         "disc" | "circle" | "square" => Some(ListMarker::Disc),
@@ -254,7 +252,7 @@ fn list_marker_value(value: &str) -> Option<ListMarker> {
 }
 
 fn font_weight_keyword(value: &str) -> Option<Emphasis> {
-    match value {
+    match_ignore_ascii_case! { value,
         "bold" | "bolder" => Some(Emphasis::Bold),
         "normal" | "lighter" => Some(Emphasis::None),
         _ => None,
@@ -275,7 +273,7 @@ fn emphasis_for_weight(weight: f32) -> Emphasis {
 /// no palette entry and leave the property at its user-agent value, since the reduced
 /// palette cannot represent an arbitrary color faithfully.
 fn color_keyword(value: &str) -> Option<Color> {
-    match value {
+    match_ignore_ascii_case! { value,
         "black" => Some(Color::Black),
         "red" => Some(Color::Red),
         "green" => Some(Color::Green),

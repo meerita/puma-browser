@@ -3,6 +3,8 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
+use std::borrow::Cow;
+
 use browser_css::{cascade, computed_run_style, Color, DisplayMode, TextStyle, TextTransform};
 use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
@@ -232,12 +234,12 @@ pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
 /// Capitalization uppercases the first character of each whitespace-separated word and
 /// leaves the rest untouched, which is a close reading of CSS `capitalize` without full
 /// word-boundary detection.
-fn transform_text(text: &str, transform: TextTransform) -> String {
+fn transform_text(text: &str, transform: TextTransform) -> Cow<'_, str> {
     match transform {
-        TextTransform::None => text.to_string(),
-        TextTransform::Uppercase => text.to_uppercase(),
-        TextTransform::Lowercase => text.to_lowercase(),
-        TextTransform::Capitalize => capitalize_words(text),
+        TextTransform::None => Cow::Borrowed(text),
+        TextTransform::Uppercase => Cow::Owned(text.to_uppercase()),
+        TextTransform::Lowercase => Cow::Owned(text.to_lowercase()),
+        TextTransform::Capitalize => Cow::Owned(capitalize_words(text)),
     }
 }
 
