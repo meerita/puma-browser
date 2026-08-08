@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::{
     action_refreshes_suggestions, advance_link_focus, build_settings_model, cell_is_selected,
@@ -14,8 +14,10 @@ use super::{
     retreat_link_focus, sanitize_fragment_for_display, CachedPage, CommandOutcome, EnvOverrides,
     HistoryRequest, InputAction, LoadState, ScrollState, SettingsModel, SettingsMutation,
     TerminalApp, TerminalSettings, TextSelection, UiState, ViewState, ViewportBounds,
-    BODY_AREA_TOP_ROW, CONTENT_PADDING, SETTINGS_ENV_LOCKED,
+    BODY_AREA_TOP_ROW, CONTENT_PADDING, SETTINGS_ENV_LOCKED, SETTINGS_TEXT_INVALID,
 };
+use crate::settings_view::SettingId;
+use crate::ui_state::SETTINGS_AUTOSAVE_DEBOUNCE;
 use browser_core::{
     CookiePolicy, CookiePolicyPair, HistoryMode, HistorySettings, HistoryStore,
     NavigationController, SearchEngine, SitePolicyStore, SuggestionEntry,
@@ -1354,4 +1356,136 @@ fn a_mutation_on_an_env_overridden_row_changes_nothing_and_explains_why() {
     assert!(!application.settings.force_osc52);
     assert!(store.writes().is_empty());
     assert_eq!(ui_state.transient_message(), Some(SETTINGS_ENV_LOCKED));
+}
+
+/// Opens the panel, focuses the search base URL text row (the sixth row), and seeds its draft
+/// through the reconciler, leaving the application ready for a text edit to be typed.
+fn app_editing_search_base_url() -> (Arc<FakeConfigStore>, TerminalApp, UiState, Instant) {
+    let store = Arc::new(FakeConfigStore::default());
+    let settings = test_settings();
+    let mut application = app_with_config_store(store.clone(), settings);
+    let mut ui_state = UiState::new(true);
+    ui_state.enter_settings_mode(settings_model_for(&settings, CookiePolicyPair::default()));
+    for _ in 0..5 {
+        ui_state.settings_focus_next();
+    }
+    let now = Instant::now();
+    application.reconcile_settings_text_field(&mut ui_state, now);
+    assert_eq!(
+        ui_state.settings_text_edit_id(),
+        Some(SettingId::SearchBaseUrl)
+    );
+    (store, application, ui_state, now)
+}
+
+/// Replaces the focused text field's draft with `text`, one keystroke at a time, so the edit
+/// path (dirty, debounce, validation) runs exactly as it would for real input. The delete count
+/// clears any seeded value the field opened with before the new text is typed.
+fn retype_text_field(ui_state: &mut UiState, text: &str, now: Instant) {
+    for _ in 0..256 {
+        ui_state.settings_text_delete_back(now);
+    }
+    for character in text.chars() {
+        ui_state.settings_text_input(character, now);
+    }
+}
+
+#[test]
+fn a_valid_text_edit_persists_through_the_controller_and_clears_dirty() {
+    let (store, mut application, mut ui_state, now) = app_editing_search_base_url();
+    retype_text_field(&mut ui_state, "https://search.test/", now);
+
+    application.maybe_autosave_settings_text(&mut ui_state, now + SETTINGS_AUTOSAVE_DEBOUNCE);
+
+    assert!(
+        ui_state.settings_text_pending_save().is_none(),
+        "a saved field must no longer be dirty"
+    );
+    assert_eq!(
+        application.controller().search_engine().base_url(),
+        "https://search.test/"
+    );
+    assert!(store.writes().contains(&(
+        "search.base_url".to_string(),
+        "https://search.test/".to_string()
+    )));
+}
+
+#[test]
+fn a_file_scheme_base_url_is_rejected_and_never_persisted() {
+    let (store, mut application, mut ui_state, now) = app_editing_search_base_url();
+    let default_base_url = application
+        .controller()
+        .search_engine()
+        .base_url()
+        .to_string();
+    retype_text_field(&mut ui_state, "file:///etc/passwd", now);
+
+    application.maybe_autosave_settings_text(&mut ui_state, now + SETTINGS_AUTOSAVE_DEBOUNCE);
+
+    assert!(
+        ui_state.settings_text_pending_save().is_some(),
+        "a rejected value must stay dirty"
+    );
+    assert_eq!(ui_state.settings_text_error(), Some(SETTINGS_TEXT_INVALID));
+    assert_eq!(
+        application.controller().search_engine().base_url(),
+        default_base_url,
+        "the live engine must be unchanged after a rejected edit"
+    );
+    assert!(
+        !store
+            .writes()
+            .iter()
+            .any(|(key, _)| key == "search.base_url"),
+        "a rejected value must not be written to the store"
+    );
+}
+
+#[test]
+fn an_empty_base_url_is_rejected_and_never_persisted() {
+    let (store, mut application, mut ui_state, now) = app_editing_search_base_url();
+    retype_text_field(&mut ui_state, "", now);
+
+    application.maybe_autosave_settings_text(&mut ui_state, now + SETTINGS_AUTOSAVE_DEBOUNCE);
+
+    assert!(ui_state.settings_text_pending_save().is_some());
+    assert_eq!(ui_state.settings_text_error(), Some(SETTINGS_TEXT_INVALID));
+    assert!(store.writes().is_empty());
+}
+
+#[test]
+fn moving_focus_off_a_dirty_valid_field_saves_it_immediately() {
+    let (store, mut application, mut ui_state, now) = app_editing_search_base_url();
+    retype_text_field(&mut ui_state, "https://leave.test/", now);
+
+    // Move focus to the next row and reconcile at `now`, before any debounce could elapse.
+    ui_state.settings_focus_next();
+    application.reconcile_settings_text_field(&mut ui_state, now);
+
+    assert_eq!(
+        application.controller().search_engine().base_url(),
+        "https://leave.test/"
+    );
+    assert!(store.writes().contains(&(
+        "search.base_url".to_string(),
+        "https://leave.test/".to_string()
+    )));
+}
+
+#[test]
+fn a_dirty_field_does_not_save_before_the_debounce_elapses() {
+    let (store, mut application, mut ui_state, now) = app_editing_search_base_url();
+    retype_text_field(&mut ui_state, "https://early.test/", now);
+
+    application.maybe_autosave_settings_text(&mut ui_state, now + Duration::from_millis(200));
+
+    assert!(
+        ui_state.settings_text_pending_save().is_some(),
+        "the field must remain dirty before the debounce elapses"
+    );
+    assert!(!store
+        .writes()
+        .iter()
+        .any(|(key, _)| key == "search.base_url"));
 }

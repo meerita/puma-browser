@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use browser_core::{CookiePolicy, CookiePolicyPair, HistoryEntry, SearchEngine};
 
-use super::{UiState, READING_HINTS};
+use super::{
+    should_save, SettingsEscOutcome, TextEditor, UiState, READING_HINTS, SETTINGS_AUTOSAVE_DEBOUNCE,
+};
 use crate::settings_view::{build_settings_model, CycleDirection, SettingId, SettingsModel};
 use crate::{EnvOverrides, TerminalSettings};
 
@@ -788,4 +790,188 @@ fn re_enabling_search_live_restores_it_to_the_open_palette() {
     state.set_search_enabled(true);
     state.command_append_char('s');
     assert!(palette_contains(&state, "search"));
+}
+
+#[test]
+fn text_editor_inserts_at_the_cursor_and_advances_it() {
+    let mut editor = TextEditor::new();
+    editor.insert_char('a');
+    editor.insert_char('b');
+    assert_eq!(editor.buffer(), "ab");
+    assert_eq!(editor.cursor_byte_offset(), 2);
+}
+
+#[test]
+fn text_editor_inserts_at_a_mid_string_cursor() {
+    let mut editor = TextEditor::seeded("ac");
+    editor.move_left();
+    editor.insert_char('b');
+    assert_eq!(editor.buffer(), "abc");
+    assert_eq!(editor.cursor_byte_offset(), 2);
+}
+
+#[test]
+fn text_editor_seeds_the_cursor_at_the_end_of_the_value() {
+    let editor = TextEditor::seeded("https://example.test/");
+    assert_eq!(editor.cursor_byte_offset(), "https://example.test/".len());
+}
+
+#[test]
+fn text_editor_deletes_the_character_before_the_cursor() {
+    let mut editor = TextEditor::seeded("abc");
+    editor.delete_before_cursor();
+    assert_eq!(editor.buffer(), "ab");
+    assert_eq!(editor.cursor_byte_offset(), 2);
+}
+
+#[test]
+fn text_editor_moves_over_multibyte_characters_without_splitting_them() {
+    let mut editor = TextEditor::seeded("áé");
+    editor.move_left();
+    assert_eq!(editor.cursor_byte_offset(), "á".len());
+    editor.delete_before_cursor();
+    assert_eq!(editor.buffer(), "é");
+}
+
+#[test]
+fn should_save_holds_off_before_the_debounce_elapses() {
+    let now = Instant::now();
+    let last_keystroke = now - Duration::from_millis(500);
+    assert!(!should_save(
+        now,
+        last_keystroke,
+        true,
+        SETTINGS_AUTOSAVE_DEBOUNCE
+    ));
+}
+
+#[test]
+fn should_save_fires_once_the_debounce_elapses_on_a_dirty_field() {
+    let now = Instant::now();
+    let last_keystroke = now - Duration::from_millis(2000);
+    assert!(should_save(
+        now,
+        last_keystroke,
+        true,
+        SETTINGS_AUTOSAVE_DEBOUNCE
+    ));
+}
+
+#[test]
+fn should_save_never_fires_on_a_clean_field() {
+    let now = Instant::now();
+    let last_keystroke = now - Duration::from_millis(5000);
+    assert!(!should_save(
+        now,
+        last_keystroke,
+        false,
+        SETTINGS_AUTOSAVE_DEBOUNCE
+    ));
+}
+
+/// Focuses the search base URL text row (the sixth row) in an open panel with a seeded draft.
+fn state_editing_search_base_url() -> UiState {
+    let mut state = UiState::new(true);
+    state.enter_settings_mode(sample_settings_model());
+    for _ in 0..5 {
+        state.settings_focus_next();
+    }
+    assert_eq!(
+        state.focused_settings_text_id(),
+        Some(SettingId::SearchBaseUrl)
+    );
+    state.begin_settings_text_edit(SettingId::SearchBaseUrl, Instant::now());
+    state
+}
+
+#[test]
+fn a_seeded_text_edit_starts_clean_with_no_due_save() {
+    let state = state_editing_search_base_url();
+    assert!(state.settings_text_pending_save().is_none());
+    assert!(state.settings_text_due_save(Instant::now()).is_none());
+}
+
+#[test]
+fn typing_in_a_text_field_marks_it_dirty_and_pending() {
+    let mut state = state_editing_search_base_url();
+    state.settings_text_input('x', Instant::now());
+    let pending = state
+        .settings_text_pending_save()
+        .expect("a dirty field must have a pending save");
+    assert_eq!(pending.id, SettingId::SearchBaseUrl);
+    assert!(pending.value.ends_with('x'));
+}
+
+#[test]
+fn a_dirty_text_field_is_due_to_save_after_the_debounce() {
+    let mut state = state_editing_search_base_url();
+    let typed_at = Instant::now();
+    state.settings_text_input('x', typed_at);
+    assert!(state
+        .settings_text_due_save(typed_at + SETTINGS_AUTOSAVE_DEBOUNCE)
+        .is_some());
+    assert!(state
+        .settings_text_due_save(typed_at + Duration::from_millis(100))
+        .is_none());
+}
+
+#[test]
+fn a_rejected_save_suppresses_further_autosaves_until_the_next_edit() {
+    let mut state = state_editing_search_base_url();
+    let typed_at = Instant::now();
+    state.settings_text_input('x', typed_at);
+    state.mark_settings_text_save_failed("invalid value, not saved".to_string());
+    // The field stays dirty and shows the error, but auto-save is held off.
+    assert_eq!(
+        state.settings_text_error(),
+        Some("invalid value, not saved")
+    );
+    assert!(state
+        .settings_text_due_save(typed_at + SETTINGS_AUTOSAVE_DEBOUNCE)
+        .is_none());
+    // The next keystroke clears the suppression and the error.
+    let retyped_at = typed_at + Duration::from_secs(1);
+    state.settings_text_input('y', retyped_at);
+    assert_eq!(state.settings_text_error(), None);
+    assert!(state
+        .settings_text_due_save(retyped_at + SETTINGS_AUTOSAVE_DEBOUNCE)
+        .is_some());
+}
+
+#[test]
+fn marking_a_text_field_saved_clears_dirty_and_updates_the_rows() {
+    let mut state = state_editing_search_base_url();
+    state.settings_text_input('x', Instant::now());
+    state.mark_settings_text_saved("https://saved.test/", "q");
+    assert!(state.settings_text_pending_save().is_none());
+    assert_eq!(
+        state
+            .settings_model()
+            .and_then(|model| model.text_value(SettingId::SearchBaseUrl)),
+        Some("https://saved.test/")
+    );
+}
+
+#[test]
+fn esc_on_a_dirty_text_field_reverts_the_draft_and_keeps_the_panel_open() {
+    let mut state = state_editing_search_base_url();
+    let seeded = state.settings_text_draft().map(str::to_string);
+    state.settings_text_input('x', Instant::now());
+    assert_eq!(state.settings_text_cancel(), SettingsEscOutcome::Reverted);
+    assert_eq!(state.settings_text_draft().map(str::to_string), seeded);
+    assert!(state.settings_text_pending_save().is_none());
+}
+
+#[test]
+fn esc_on_a_clean_text_field_asks_to_close_the_panel() {
+    let mut state = state_editing_search_base_url();
+    assert_eq!(state.settings_text_cancel(), SettingsEscOutcome::ClosePanel);
+}
+
+#[test]
+fn closing_the_settings_panel_drops_the_active_text_edit() {
+    let mut state = state_editing_search_base_url();
+    state.settings_text_input('x', Instant::now());
+    state.exit_settings_mode();
+    assert!(state.settings_text_edit_id().is_none());
 }

@@ -110,6 +110,38 @@ impl SettingsModel {
         Some((row.id, *checked))
     }
 
+    /// The current value of the text-input row identified by `id`, or `None` when no row has
+    /// that id or the row is not a text input. Used to seed a field's draft editor and to
+    /// restore it when an edit is cancelled.
+    pub(crate) fn text_value(&self, id: SettingId) -> Option<&str> {
+        let row = self
+            .sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .find(|row| row.id == id)?;
+        match &row.control {
+            SettingsControl::TextInput { value } => Some(value),
+            SettingsControl::Checkbox { .. } | SettingsControl::Radio { .. } => None,
+        }
+    }
+
+    /// Replaces the value of the text-input row identified by `id`, so a saved edit shows the
+    /// stored value once focus leaves the field. A no-op when no such text row exists.
+    pub(crate) fn set_text_value(&mut self, id: SettingId, value: &str) {
+        let Some(row) = self
+            .sections
+            .iter_mut()
+            .flat_map(|section| section.rows.iter_mut())
+            .find(|row| row.id == id)
+        else {
+            return;
+        };
+        if let SettingsControl::TextInput { value: current } = &mut row.control {
+            current.clear();
+            current.push_str(value);
+        }
+    }
+
     /// Moves the radio selection at flat index `focus` one option in `direction`, wrapping at
     /// the ends, and returns the row identity with the newly selected policy, or `None` when
     /// that row is not a radio group.
@@ -150,6 +182,15 @@ pub(crate) fn checkbox_config_key(id: SettingId) -> Option<&'static str> {
         | SettingId::CookiesThirdParty
         | SettingId::SearchBaseUrl
         | SettingId::SearchQueryParameter => None,
+    }
+}
+
+/// The id of `row` when it is a text input, or `None` for a checkbox or radio row. Lets the
+/// focus reconciler tell whether the focused row is an editable text field.
+pub(crate) fn text_field_id(row: &SettingsRow) -> Option<SettingId> {
+    match row.control {
+        SettingsControl::TextInput { .. } => Some(row.id),
+        SettingsControl::Checkbox { .. } | SettingsControl::Radio { .. } => None,
     }
 }
 

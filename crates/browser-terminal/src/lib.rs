@@ -75,8 +75,9 @@ use settings_view::{
     SettingId, SettingsControl, SettingsModel, SettingsRow,
 };
 use title_bar::compose_title_bar;
-use ui_state::UiState;
+use ui_state::{SettingsEscOutcome, SettingsTextSave, UiState};
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use viewport::{max_scroll_offset, scroll_percentage, ScrollState, ViewportBounds};
 
 /// Rows consumed by the five fixed chrome zones (title + sep + cmd + sep + hints).
@@ -154,6 +155,13 @@ const SETTINGS_ENV_LOCKED: &str = "This setting is fixed by an environment varia
 
 /// The message shown when a setting changed for the running session but could not be saved.
 const SETTINGS_SAVE_FAILED: &str = "Setting changed for this session but could not be saved";
+
+/// The confirmation shown briefly after a settings text field saves.
+const SETTINGS_TEXT_SAVED: &str = "Setting saved";
+
+/// The inline note shown on a settings text row when its value was rejected and not saved. The
+/// message names no internals, only that the value is invalid.
+const SETTINGS_TEXT_INVALID: &str = "invalid value, not saved";
 
 /// The number of address-bar suggestions requested from the index on each edit.
 const ADDRESS_SUGGESTION_LIMIT: usize = 8;
@@ -400,6 +408,8 @@ impl TerminalApp {
                                 let in_history = ui_state.is_in_history_mode();
                                 let in_cookies = ui_state.is_in_cookies_mode();
                                 let in_settings = ui_state.is_in_settings_mode();
+                                let settings_text_field_focused =
+                                    ui_state.is_settings_text_field_focused();
                                 let action = map_key_event(
                                     key,
                                     ui_state.quit_armed,
@@ -411,6 +421,7 @@ impl TerminalApp {
                                     in_history,
                                     in_cookies,
                                     in_settings,
+                                    settings_text_field_focused,
                                 );
                                 if matches!(action, InputAction::Quit) {
                                     return Ok(());
@@ -425,6 +436,7 @@ impl TerminalApp {
                                 } else {
                                     apply_command_action(action, &mut ui_state);
                                 }
+                                apply_settings_text_action(action, &mut ui_state, now);
                                 if action_refreshes_suggestions(action) {
                                     self.refresh_address_suggestions(&mut ui_state);
                                 }
@@ -552,6 +564,12 @@ impl TerminalApp {
             if let Some(mutation) = settings_mutation {
                 self.apply_settings_mutation(mutation, &mut ui_state, now);
             }
+
+            // Reconcile the text-field draft with the focused row (seed on entry, commit on
+            // leave) and run the debounced auto-save. Both run every iteration so the 80ms tick
+            // drives the debounce even when no key was pressed.
+            self.reconcile_settings_text_field(&mut ui_state, now);
+            self.maybe_autosave_settings_text(&mut ui_state, now);
 
             // Apply page refresh — re-fetch the current URL using the same load pipeline.
             if let Some(url) = reload_url {
@@ -689,6 +707,93 @@ impl TerminalApp {
         {
             ui_state.set_transient_message(SETTINGS_SAVE_FAILED.to_string(), now);
         }
+    }
+
+    /// Keeps the active text-field draft in step with the focused row. Focusing a text field
+    /// seeds its draft from the shown value; leaving a text field, or moving straight to another
+    /// one, commits the field being left before the new one is seeded. Anything outside a text
+    /// row (a control row or a closed panel) leaves no draft behind.
+    fn reconcile_settings_text_field(&mut self, ui_state: &mut UiState, now: Instant) {
+        if !ui_state.is_in_settings_mode() {
+            ui_state.clear_settings_text_edit();
+            return;
+        }
+        let focused = ui_state.focused_settings_text_id();
+        let editing = ui_state.settings_text_edit_id();
+        match (focused, editing) {
+            (Some(focused_id), Some(editing_id)) if focused_id == editing_id => {}
+            (Some(focused_id), Some(_)) => {
+                self.commit_settings_text_field(ui_state, now);
+                ui_state.begin_settings_text_edit(focused_id, now);
+            }
+            (Some(focused_id), None) => ui_state.begin_settings_text_edit(focused_id, now),
+            (None, Some(_)) => self.commit_settings_text_field(ui_state, now),
+            (None, None) => {}
+        }
+    }
+
+    /// Saves the field being left when its draft is dirty, then drops the draft. A rejected save
+    /// leaves the stored value untouched, so dropping the draft reverts the row to the last saved
+    /// value rather than keeping an invalid edit that focus has already moved away from.
+    fn commit_settings_text_field(&mut self, ui_state: &mut UiState, now: Instant) {
+        if let Some(save) = ui_state.settings_text_pending_save() {
+            self.persist_settings_text(save, ui_state, now);
+        }
+        ui_state.clear_settings_text_edit();
+    }
+
+    /// Runs the debounced auto-save: when the focused field has been idle long enough, its draft
+    /// is validated, applied, and persisted. The draft stays in place so editing continues.
+    fn maybe_autosave_settings_text(&mut self, ui_state: &mut UiState, now: Instant) {
+        let Some(save) = ui_state.settings_text_due_save(now) else {
+            return;
+        };
+        self.persist_settings_text(save, ui_state, now);
+    }
+
+    /// Validates and persists a settings text field through the controller. The search engine is
+    /// validated by [`NavigationController::set_search_engine`], which rejects a `file://` or
+    /// otherwise malformed base URL, so an invalid value is never applied or stored. On success
+    /// the stored values are reflected back onto the rows and the field is marked clean; on
+    /// rejection the field keeps its draft and shows an inline note.
+    fn persist_settings_text(
+        &mut self,
+        save: SettingsTextSave,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) {
+        let (base_url, query_parameter) = match save.id {
+            SettingId::SearchBaseUrl => (
+                save.value,
+                self.controller
+                    .search_engine()
+                    .query_parameter()
+                    .to_string(),
+            ),
+            SettingId::SearchQueryParameter => (
+                self.controller.search_engine().base_url().to_string(),
+                save.value,
+            ),
+            SettingId::CookiesFirstParty
+            | SettingId::CookiesThirdParty
+            | SettingId::CopyOnSelect
+            | SettingId::ForceOsc52
+            | SettingId::SearchEnabled
+            | SettingId::UnwrapTracking => return,
+        };
+        if self
+            .controller
+            .set_search_engine(base_url, query_parameter)
+            .is_err()
+        {
+            ui_state.mark_settings_text_save_failed(SETTINGS_TEXT_INVALID.to_string());
+            return;
+        }
+        let engine = self.controller.search_engine();
+        let saved_base_url = engine.base_url().to_string();
+        let saved_query_parameter = engine.query_parameter().to_string();
+        ui_state.mark_settings_text_saved(&saved_base_url, &saved_query_parameter);
+        ui_state.set_transient_message(SETTINGS_TEXT_SAVED.to_string(), now);
     }
 
     /// Routes a submitted command-bar buffer. A buffer whose trimmed text starts with `/`
@@ -1893,6 +1998,9 @@ const SETTINGS_CONTROLS_HINT: &str = "↑↓ move · Esc close";
 /// The suffix marking a row whose value an environment variable fixes for the session.
 const ENV_OVERRIDE_NOTE: &str = " (set by environment)";
 
+/// The marker shown before a settings text row's inline error after a rejected save.
+const SETTINGS_ERROR_MARKER: &str = "⚠";
+
 /// Renders the full-screen settings panel into `area`, listing every section and row with its
 /// current value. The focused row is reverse-highlighted and environment-fixed rows are dimmed
 /// and marked. Every string is a local, browser-owned value composed here, so no remote content
@@ -1908,14 +2016,75 @@ fn draw_settings(frame: &mut Frame, area: Rect, ui_state: &UiState) {
         height: area.height,
     };
     frame.render_widget(Clear, area);
-    let lines = settings_lines(model, ui_state.settings_focus());
+    let focus = ui_state.settings_focus();
+    let draft = ui_state.settings_text_draft();
+    let error = ui_state.settings_text_error();
+    let lines = settings_lines(model, focus, draft, error);
     frame.render_widget(Paragraph::new(lines), padded);
+    // Place the terminal cursor in the focused text field's draft, the same way the command
+    // bar shows its cursor. Only an active text edit yields a position, so control rows never
+    // display a cursor.
+    if let Some((buffer, cursor_byte_offset)) = ui_state.settings_text_cursor() {
+        if let Some((cursor_x, cursor_y)) =
+            settings_text_cursor_position(model, focus, buffer, cursor_byte_offset, padded)
+        {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
+}
+
+/// The terminal cursor position for the focused text field's draft, or `None` when the focused
+/// row is not a text input. The column is the width of the row's label prefix plus the width of
+/// the draft up to the cursor; the row is the screen line the focused row renders on.
+fn settings_text_cursor_position(
+    model: &SettingsModel,
+    focus: usize,
+    buffer: &str,
+    cursor_byte_offset: usize,
+    area: Rect,
+) -> Option<(u16, u16)> {
+    let row = model.row_at(focus)?;
+    let SettingsControl::TextInput { .. } = &row.control else {
+        return None;
+    };
+    let line_index = focused_row_line_index(model, focus)?;
+    let prefix = format!("  {}:  ", row.label);
+    let prefix_cols = UnicodeWidthStr::width(prefix.as_str());
+    let before_cursor = buffer.get(..cursor_byte_offset).unwrap_or(buffer);
+    let cursor_cols = UnicodeWidthStr::width(before_cursor);
+    let cursor_x = area.x.saturating_add((prefix_cols + cursor_cols) as u16);
+    let cursor_y = area.y.saturating_add(line_index as u16);
+    Some((cursor_x, cursor_y))
+}
+
+/// The screen line index the focused row renders on, matching the line order [`settings_lines`]
+/// builds: a heading line, then for each section a blank line, a title line, and one line per
+/// row. `None` when `focus` is past the last row.
+fn focused_row_line_index(model: &SettingsModel, focus: usize) -> Option<usize> {
+    let mut line_index = 1;
+    let mut row_index = 0;
+    for section in &model.sections {
+        line_index += 2;
+        for _ in &section.rows {
+            if row_index == focus {
+                return Some(line_index);
+            }
+            line_index += 1;
+            row_index += 1;
+        }
+    }
+    None
 }
 
 /// Builds the panel's styled lines: a heading, then each section's title and rows, then a
 /// controls hint. Rows are numbered in a flat sequence so the focused index highlights the
 /// right one regardless of how the sections split them.
-fn settings_lines(model: &SettingsModel, focus: usize) -> Vec<Line<'static>> {
+fn settings_lines(
+    model: &SettingsModel,
+    focus: usize,
+    draft: Option<&str>,
+    error: Option<&str>,
+) -> Vec<Line<'static>> {
     let heading_style = Style::default().add_modifier(Modifier::BOLD);
     let mut lines: Vec<Line<'static>> =
         vec![Line::styled(SETTINGS_HEADING.to_string(), heading_style)];
@@ -1924,7 +2093,12 @@ fn settings_lines(model: &SettingsModel, focus: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(String::new()));
         lines.push(Line::styled(section.title.clone(), heading_style));
         for row in &section.rows {
-            lines.push(settings_row_line(row, row_index == focus));
+            let is_focused = row_index == focus;
+            // The draft and inline error belong to the focused text field only; every other row
+            // shows its stored value with no error.
+            let row_draft = if is_focused { draft } else { None };
+            let row_error = if is_focused { error } else { None };
+            lines.push(settings_row_line(row, is_focused, row_draft, row_error));
             row_index += 1;
         }
     }
@@ -1934,12 +2108,21 @@ fn settings_lines(model: &SettingsModel, focus: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// Composes one row's line: an indented label and control state, an environment note when the
-/// row is fixed, and the focus or environment style.
-fn settings_row_line(row: &SettingsRow, is_focused: bool) -> Line<'static> {
-    let mut text = format!("  {}", compose_settings_row_text(row));
+/// Composes one row's line: an indented label and control state, the draft value when the row
+/// is the focused text field, an environment note when the row is fixed, an inline error after a
+/// rejected save, and the focus or environment style.
+fn settings_row_line(
+    row: &SettingsRow,
+    is_focused: bool,
+    draft: Option<&str>,
+    error: Option<&str>,
+) -> Line<'static> {
+    let mut text = format!("  {}", compose_settings_row_text(row, draft));
     if row.env_overridden {
         text.push_str(ENV_OVERRIDE_NOTE);
+    }
+    if let Some(message) = error {
+        text.push_str(&format!("  {SETTINGS_ERROR_MARKER} {message}"));
     }
     Line::styled(text, settings_row_style(row, is_focused))
 }
@@ -1959,7 +2142,7 @@ fn settings_row_style(row: &SettingsRow, is_focused: bool) -> Style {
 /// The label-and-value text for a row, without indentation or styling. Text-input values are
 /// control-stripped at this render boundary as a defensive measure, even though a configured
 /// URL or token carries no control bytes.
-fn compose_settings_row_text(row: &SettingsRow) -> String {
+fn compose_settings_row_text(row: &SettingsRow, draft: Option<&str>) -> String {
     match &row.control {
         SettingsControl::Checkbox { checked } => {
             let marker = if *checked { "[x]" } else { "[ ]" };
@@ -1969,7 +2152,8 @@ fn compose_settings_row_text(row: &SettingsRow) -> String {
             format!("{}:  {}", row.label, compose_radio_options(options))
         }
         SettingsControl::TextInput { value } => {
-            format!("{}:  {}", row.label, strip_control(value))
+            let shown = draft.unwrap_or(value);
+            format!("{}:  {}", row.label, strip_control(shown))
         }
     }
 }
@@ -2032,10 +2216,38 @@ fn apply_scroll(
         | InputAction::SettingsCyclePrev
         | InputAction::SettingsCycleNext
         | InputAction::SettingsClose
+        | InputAction::SettingsTextInput(_)
+        | InputAction::SettingsTextDeleteBack
+        | InputAction::SettingsTextMoveCursorLeft
+        | InputAction::SettingsTextMoveCursorRight
+        | InputAction::SettingsTextCancel
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
         | InputAction::ActivateFocusedLink
         | InputAction::NavigateBack => {}
+    }
+}
+
+/// Applies a settings text-field editing action to the focused field's draft. Character and
+/// cursor keys edit the draft; `Esc` reverts an unsaved draft or, when there is nothing to
+/// revert, closes the panel. Every other action is ignored here. The debounced save, the
+/// focus-leave commit, and the seed of a newly focused field run in the owning app, which holds
+/// the controller; this only touches UI state, so it can run inside the event borrow.
+fn apply_settings_text_action(action: InputAction, ui_state: &mut UiState, now: Instant) {
+    match action {
+        InputAction::SettingsTextInput(character) => ui_state.settings_text_input(character, now),
+        InputAction::SettingsTextDeleteBack => ui_state.settings_text_delete_back(now),
+        InputAction::SettingsTextMoveCursorLeft => ui_state.settings_text_move_left(),
+        InputAction::SettingsTextMoveCursorRight => ui_state.settings_text_move_right(),
+        InputAction::SettingsTextCancel => {
+            if matches!(
+                ui_state.settings_text_cancel(),
+                SettingsEscOutcome::ClosePanel
+            ) {
+                ui_state.exit_settings_mode();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2063,10 +2275,17 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         InputAction::SettingsSelectNext => ui_state.settings_focus_next(),
         InputAction::SettingsClose => ui_state.exit_settings_mode(),
         // The settings mutation actions need the controller and live settings, so they are
-        // applied by the owning app after the event borrow ends, not here.
+        // applied by the owning app after the event borrow ends, not here. The settings
+        // text-edit actions are applied by `apply_settings_text_action`, which has the keystroke
+        // time the debounce needs.
         InputAction::SettingsToggle
         | InputAction::SettingsCyclePrev
         | InputAction::SettingsCycleNext
+        | InputAction::SettingsTextInput(_)
+        | InputAction::SettingsTextDeleteBack
+        | InputAction::SettingsTextMoveCursorLeft
+        | InputAction::SettingsTextMoveCursorRight
+        | InputAction::SettingsTextCancel
         | InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
         | InputAction::ScrollPageDown
@@ -2230,7 +2449,12 @@ fn handle_navigation_action(
         | InputAction::SettingsToggle
         | InputAction::SettingsCyclePrev
         | InputAction::SettingsCycleNext
-        | InputAction::SettingsClose => None,
+        | InputAction::SettingsClose
+        | InputAction::SettingsTextInput(_)
+        | InputAction::SettingsTextDeleteBack
+        | InputAction::SettingsTextMoveCursorLeft
+        | InputAction::SettingsTextMoveCursorRight
+        | InputAction::SettingsTextCancel => None,
     }
 }
 

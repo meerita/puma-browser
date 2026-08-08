@@ -46,6 +46,11 @@ pub(crate) enum InputAction {
     SettingsCyclePrev,
     SettingsCycleNext,
     SettingsClose,
+    SettingsTextInput(char),
+    SettingsTextDeleteBack,
+    SettingsTextMoveCursorLeft,
+    SettingsTextMoveCursorRight,
+    SettingsTextCancel,
     FocusNextLink,
     FocusPreviousLink,
     ActivateFocusedLink,
@@ -72,12 +77,13 @@ pub(crate) fn map_key_event(
     in_history: bool,
     in_cookies: bool,
     in_settings: bool,
+    settings_text_field_focused: bool,
 ) -> InputAction {
     if is_quit_combination(event) {
         return InputAction::Quit;
     }
     if in_settings {
-        return map_settings_key(event);
+        return map_settings_key(event, settings_text_field_focused);
     }
     if in_history {
         return map_history_key(event);
@@ -212,11 +218,15 @@ fn map_cookies_key(event: KeyEvent) -> InputAction {
     }
 }
 
-/// Maps a key while the settings panel is open. The arrows (and `k`/`j`) move the focused
-/// row, `Space`/`Enter` toggles a focused checkbox, `Left`/`Right` cycle a focused radio
-/// group's selection, and `Esc` closes the panel. Any other key is ignored so a stray
-/// keystroke never dismisses the panel.
-fn map_settings_key(event: KeyEvent) -> InputAction {
+/// Maps a key while the settings panel is open. A focused text input takes its own key map so
+/// printable characters edit the draft; every other row uses the control map. In the control
+/// map the arrows (and `k`/`j`) move the focused row, `Space`/`Enter` toggles a focused
+/// checkbox, `Left`/`Right` cycle a focused radio group's selection, and `Esc` closes the
+/// panel. Any other key is ignored so a stray keystroke never dismisses the panel.
+fn map_settings_key(event: KeyEvent, text_field_focused: bool) -> InputAction {
+    if text_field_focused {
+        return map_settings_text_key(event);
+    }
     match event.code {
         KeyCode::Up | KeyCode::Char('k') => InputAction::SettingsSelectPrev,
         KeyCode::Down | KeyCode::Char('j') => InputAction::SettingsSelectNext,
@@ -224,6 +234,27 @@ fn map_settings_key(event: KeyEvent) -> InputAction {
         KeyCode::Left | KeyCode::Char('h') => InputAction::SettingsCyclePrev,
         KeyCode::Right | KeyCode::Char('l') => InputAction::SettingsCycleNext,
         KeyCode::Esc => InputAction::SettingsClose,
+        _ => InputAction::Disarm,
+    }
+}
+
+/// Maps a key while a settings text input is focused. Printable characters (including space)
+/// edit the draft, `Backspace` deletes, `Left`/`Right` move the cursor, the vertical arrows
+/// move focus to the next or previous row (committing the edit on the way out), `Enter` moves
+/// to the next row for the same reason, and `Esc` reverts an unsaved draft or closes the panel.
+/// Only the vertical arrows move focus here: `j`, `k`, `h`, and `l` are ordinary characters in
+/// a text field, not navigation.
+fn map_settings_text_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Up => InputAction::SettingsSelectPrev,
+        KeyCode::Down | KeyCode::Enter => InputAction::SettingsSelectNext,
+        KeyCode::Left => InputAction::SettingsTextMoveCursorLeft,
+        KeyCode::Right => InputAction::SettingsTextMoveCursorRight,
+        KeyCode::Backspace => InputAction::SettingsTextDeleteBack,
+        KeyCode::Esc => InputAction::SettingsTextCancel,
+        KeyCode::Char(character) if !character.is_control() => {
+            InputAction::SettingsTextInput(character)
+        }
         _ => InputAction::Disarm,
     }
 }
