@@ -398,7 +398,9 @@ async fn setting_the_global_first_party_default_to_allow_accepts_and_resends_a_c
     mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
     mount_plain_page(&server, "/echo").await;
     let mut controller = NavigationController::new();
-    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow);
+    controller
+        .set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow)
+        .expect("applying a global policy without a store must succeed");
 
     controller
         .load(url_for(&server, "/set"), NavigationSource::AddressBar)
@@ -428,7 +430,9 @@ async fn tightening_the_global_first_party_default_to_reject_drops_held_cookies(
     mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
     mount_plain_page(&server, "/echo").await;
     let mut controller = NavigationController::new();
-    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow);
+    controller
+        .set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow)
+        .expect("applying a global policy without a store must succeed");
     controller
         .load(url_for(&server, "/set"), NavigationSource::AddressBar)
         .await
@@ -444,7 +448,9 @@ async fn tightening_the_global_first_party_default_to_reject_drops_held_cookies(
         "the held cookie is resent while the default still allows it"
     );
 
-    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Reject);
+    controller
+        .set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Reject)
+        .expect("applying a global policy without a store must succeed");
     controller
         .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
         .await
@@ -464,7 +470,9 @@ async fn setting_the_third_party_default_does_not_change_first_party_behavior() 
     let server = MockServer::start().await;
     mount_page_with_set_cookie(&server, "/", "sid=abc").await;
     let mut controller = NavigationController::new();
-    controller.set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Allow);
+    controller
+        .set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Allow)
+        .expect("applying a global policy without a store must succeed");
 
     controller
         .load(url_for(&server, "/"), NavigationSource::AddressBar)
@@ -487,13 +495,17 @@ async fn relaxing_the_third_party_default_does_not_prune_first_party_cookies() {
     mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
     mount_plain_page(&server, "/echo").await;
     let mut controller = NavigationController::new();
-    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow);
+    controller
+        .set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow)
+        .expect("applying a global policy without a store must succeed");
     controller
         .load(url_for(&server, "/set"), NavigationSource::AddressBar)
         .await
         .expect("the first-party cookie must be accepted and held");
 
-    controller.set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Allow);
+    controller
+        .set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Allow)
+        .expect("applying a global policy without a store must succeed");
     controller
         .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
         .await
@@ -513,13 +525,17 @@ async fn tightening_the_third_party_default_to_reject_keeps_first_party_cookies(
     mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
     mount_plain_page(&server, "/echo").await;
     let mut controller = NavigationController::new();
-    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow);
+    controller
+        .set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow)
+        .expect("applying a global policy without a store must succeed");
     controller
         .load(url_for(&server, "/set"), NavigationSource::AddressBar)
         .await
         .expect("the first-party cookie must be accepted and held");
 
-    controller.set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Reject);
+    controller
+        .set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Reject)
+        .expect("applying a global policy without a store must succeed");
     controller
         .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
         .await
@@ -547,7 +563,9 @@ async fn a_site_allow_exception_survives_a_global_first_party_reject() {
         .await
         .expect("the cookie must be accepted under the site exception");
 
-    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Reject);
+    controller
+        .set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Reject)
+        .expect("applying a global policy without a store must succeed");
     controller
         .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
         .await
