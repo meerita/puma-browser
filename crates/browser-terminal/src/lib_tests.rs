@@ -8,22 +8,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::{
-    action_refreshes_suggestions, advance_link_focus, cell_is_selected,
+    action_refreshes_suggestions, advance_link_focus, build_settings_model, cell_is_selected,
     clamped_document_coordinate, copied_message, decode_fragment, document_coordinate,
     handle_mouse_event, max_scroll_offset, parse_history_request, resolve_anchor_row,
     retreat_link_focus, sanitize_fragment_for_display, CachedPage, CommandOutcome, EnvOverrides,
-    HistoryRequest, InputAction, LoadState, ScrollState, TerminalApp, TerminalSettings,
-    TextSelection, UiState, ViewState, ViewportBounds, BODY_AREA_TOP_ROW, CONTENT_PADDING,
+    HistoryRequest, InputAction, LoadState, ScrollState, SettingsModel, SettingsMutation,
+    TerminalApp, TerminalSettings, TextSelection, UiState, ViewState, ViewportBounds,
+    BODY_AREA_TOP_ROW, CONTENT_PADDING, SETTINGS_ENV_LOCKED,
 };
 use browser_core::{
-    CookiePolicyPair, HistoryMode, HistorySettings, HistoryStore, NavigationController,
-    SitePolicyStore, SuggestionEntry,
+    CookiePolicy, CookiePolicyPair, HistoryMode, HistorySettings, HistoryStore,
+    NavigationController, SearchEngine, SitePolicyStore, SuggestionEntry,
 };
 
 use crate::command::CookiesRequest;
 use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
 use browser_layout::{render_document, AnchorSpan, CellBuffer, CellPosition, WidthConfig};
-use browser_storage::{HistoryEntry, NewVisit, StorageError};
+use browser_storage::{ConfigStore, HistoryEntry, NewVisit, StorageError};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 fn anchor(name: &str, row: u16) -> AnchorSpan {
@@ -1236,4 +1237,121 @@ fn an_unknown_cookies_subcommand_shows_the_usage_message() {
         .transient_message()
         .expect("a usage message must be set")
         .starts_with("usage: /cookies"));
+}
+
+/// A config store that records every write, standing in for SQLite so an instant-apply
+/// setting's persistence can be asserted without a database.
+#[derive(Default)]
+struct FakeConfigStore {
+    writes: Mutex<Vec<(String, String)>>,
+}
+
+impl FakeConfigStore {
+    fn writes(&self) -> Vec<(String, String)> {
+        self.writes
+            .lock()
+            .expect("config store lock must not be poisoned")
+            .clone()
+    }
+}
+
+impl ConfigStore for FakeConfigStore {
+    fn config_value(&self, _key: &str) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+
+    fn set_config_value(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.writes
+            .lock()
+            .expect("config store lock must not be poisoned")
+            .push((key.to_string(), value.to_string()));
+        Ok(())
+    }
+}
+
+fn app_with_config_store(store: Arc<FakeConfigStore>, settings: TerminalSettings) -> TerminalApp {
+    let config: Arc<dyn ConfigStore + Send + Sync> = store;
+    let controller = NavigationController::new().with_config_store(config);
+    TerminalApp::new(controller, ViewState::Page, settings)
+}
+
+/// A panel model built from `settings`, the given cookie policy, and the default search
+/// engine, matching what the app shows when the panel opens.
+fn settings_model_for(settings: &TerminalSettings, policy: CookiePolicyPair) -> SettingsModel {
+    build_settings_model(settings, policy, &SearchEngine::default())
+}
+
+#[test]
+fn toggling_a_checkbox_in_the_panel_applies_it_live_and_persists_it() {
+    let store = Arc::new(FakeConfigStore::default());
+    let settings = TerminalSettings {
+        copy_on_select: true,
+        force_osc52: false,
+        search_enabled: true,
+        unwrap_tracking: true,
+        env_overridden: EnvOverrides::default(),
+    };
+    let mut application = app_with_config_store(store.clone(), settings);
+    let mut ui_state = UiState::new(true);
+    ui_state.enter_settings_mode(settings_model_for(&settings, CookiePolicyPair::default()));
+    // Move focus onto the copy-on-select checkbox (the third row).
+    ui_state.settings_focus_next();
+    ui_state.settings_focus_next();
+
+    application.apply_settings_mutation(SettingsMutation::Toggle, &mut ui_state, Instant::now());
+
+    assert!(!application.settings.copy_on_select);
+    assert_eq!(
+        store.writes(),
+        vec![("ui.copy_on_select".to_string(), "false".to_string())]
+    );
+}
+
+#[test]
+fn cycling_a_cookie_radio_in_the_panel_applies_it_live_and_persists_the_policy() {
+    let store = Arc::new(FakeConfigStore::default());
+    let settings = test_settings();
+    let mut application = app_with_config_store(store.clone(), settings);
+    let mut ui_state = UiState::new(true);
+    ui_state.enter_settings_mode(settings_model_for(&settings, CookiePolicyPair::default()));
+
+    // The first row is the first-party cookie radio; the default reject cycles to allow.
+    application.apply_settings_mutation(SettingsMutation::CycleNext, &mut ui_state, Instant::now());
+
+    assert_eq!(
+        application.controller().cookie_policy().first_party,
+        CookiePolicy::Allow
+    );
+    assert_eq!(
+        store.writes(),
+        vec![("cookies.first_party".to_string(), "allow".to_string())]
+    );
+}
+
+#[test]
+fn a_mutation_on_an_env_overridden_row_changes_nothing_and_explains_why() {
+    let store = Arc::new(FakeConfigStore::default());
+    let settings = TerminalSettings {
+        copy_on_select: false,
+        force_osc52: false,
+        search_enabled: true,
+        unwrap_tracking: true,
+        env_overridden: EnvOverrides {
+            force_osc52: true,
+            ..EnvOverrides::default()
+        },
+    };
+    let mut application = app_with_config_store(store.clone(), settings);
+    let mut ui_state = UiState::new(true);
+    ui_state.enter_settings_mode(settings_model_for(&settings, CookiePolicyPair::default()));
+    // Focus the force-osc52 checkbox (the fourth row), which the environment fixes.
+    for _ in 0..3 {
+        ui_state.settings_focus_next();
+    }
+
+    application.apply_settings_mutation(SettingsMutation::Toggle, &mut ui_state, Instant::now());
+
+    assert!(!application.settings.force_osc52);
+    assert!(store.writes().is_empty());
+    assert_eq!(ui_state.transient_message(), Some(SETTINGS_ENV_LOCKED));
 }

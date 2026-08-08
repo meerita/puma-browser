@@ -42,6 +42,9 @@ pub(crate) enum InputAction {
     CookiesClose,
     SettingsSelectPrev,
     SettingsSelectNext,
+    SettingsToggle,
+    SettingsCyclePrev,
+    SettingsCycleNext,
     SettingsClose,
     FocusNextLink,
     FocusPreviousLink,
@@ -210,12 +213,16 @@ fn map_cookies_key(event: KeyEvent) -> InputAction {
 }
 
 /// Maps a key while the settings panel is open. The arrows (and `k`/`j`) move the focused
-/// row and `Esc` closes the panel. Any other key is ignored so a stray keystroke never
-/// dismisses the panel. This phase is read-only, so there is no mutation key here yet.
+/// row, `Space`/`Enter` toggles a focused checkbox, `Left`/`Right` cycle a focused radio
+/// group's selection, and `Esc` closes the panel. Any other key is ignored so a stray
+/// keystroke never dismisses the panel.
 fn map_settings_key(event: KeyEvent) -> InputAction {
     match event.code {
         KeyCode::Up | KeyCode::Char('k') => InputAction::SettingsSelectPrev,
         KeyCode::Down | KeyCode::Char('j') => InputAction::SettingsSelectNext,
+        KeyCode::Char(' ') | KeyCode::Enter => InputAction::SettingsToggle,
+        KeyCode::Left | KeyCode::Char('h') => InputAction::SettingsCyclePrev,
+        KeyCode::Right | KeyCode::Char('l') => InputAction::SettingsCycleNext,
         KeyCode::Esc => InputAction::SettingsClose,
         _ => InputAction::Disarm,
     }

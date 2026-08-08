@@ -3,9 +3,12 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
-use browser_core::{CookiePolicy, CookiePolicyPair, SearchEngine};
+use browser_core::{CookiePolicy, CookiePolicyPair, CookieScope, SearchEngine};
 
-use super::{build_settings_model, SettingId, SettingsControl, SettingsModel, SettingsRow};
+use super::{
+    build_settings_model, checkbox_config_key, cookie_scope, CycleDirection, SettingId,
+    SettingsControl, SettingsModel, SettingsRow,
+};
 use crate::{EnvOverrides, TerminalSettings};
 
 /// Terminal settings with fixed toggle values and the given environment overrides, so a test
@@ -39,6 +42,31 @@ fn find_row(model: &SettingsModel, id: SettingId) -> &SettingsRow {
         .flat_map(|section| &section.rows)
         .find(|row| row.id == id)
         .expect("the model must contain the requested row")
+}
+
+/// The flat row index carrying `id`, panicking when the model has no such row.
+fn flat_index(model: &SettingsModel, id: SettingId) -> usize {
+    model
+        .sections
+        .iter()
+        .flat_map(|section| &section.rows)
+        .position(|row| row.id == id)
+        .expect("the model must contain the requested row")
+}
+
+/// Whether the option labelled `label` is the selected one in the radio row carrying `id`,
+/// panicking when the row is not a radio or the label is absent.
+fn radio_option_selected(model: &SettingsModel, id: SettingId, label: &str) -> bool {
+    match &find_row(model, id).control {
+        SettingsControl::Radio { options } => {
+            options
+                .iter()
+                .find(|option| option.label == label)
+                .expect("the option must exist")
+                .selected
+        }
+        _ => panic!("the row must be a radio control"),
+    }
 }
 
 #[test]
@@ -137,4 +165,112 @@ fn search_rows_carry_the_engine_values() {
         SettingsControl::TextInput { value } => assert_eq!(value, "query"),
         _ => panic!("the query parameter must be a text input"),
     }
+}
+
+#[test]
+fn toggling_a_checkbox_flips_it_and_reports_the_new_state() {
+    let mut model = model_with(CookiePolicyPair::default(), &SearchEngine::default());
+    let index = flat_index(&model, SettingId::CopyOnSelect);
+    // The row is seeded true, so a toggle turns it off.
+    assert_eq!(
+        model.toggle_checkbox(index),
+        Some((SettingId::CopyOnSelect, false))
+    );
+    match &find_row(&model, SettingId::CopyOnSelect).control {
+        SettingsControl::Checkbox { checked } => assert!(!checked),
+        _ => panic!("copy-on-select must be a checkbox"),
+    }
+}
+
+#[test]
+fn toggling_a_non_checkbox_row_returns_none() {
+    let mut model = model_with(CookiePolicyPair::default(), &SearchEngine::default());
+    let index = flat_index(&model, SettingId::CookiesFirstParty);
+    assert_eq!(model.toggle_checkbox(index), None);
+}
+
+#[test]
+fn cycling_a_radio_forward_moves_to_the_next_option() {
+    let policy = CookiePolicyPair {
+        first_party: CookiePolicy::Allow,
+        third_party: CookiePolicy::Reject,
+    };
+    let mut model = model_with(policy, &SearchEngine::default());
+    let index = flat_index(&model, SettingId::CookiesFirstParty);
+    assert_eq!(
+        model.cycle_radio(index, CycleDirection::Next),
+        Some((SettingId::CookiesFirstParty, CookiePolicy::Session))
+    );
+    assert!(radio_option_selected(
+        &model,
+        SettingId::CookiesFirstParty,
+        "session"
+    ));
+    assert!(!radio_option_selected(
+        &model,
+        SettingId::CookiesFirstParty,
+        "allow"
+    ));
+}
+
+#[test]
+fn cycling_a_radio_backward_wraps_to_the_last_option() {
+    let policy = CookiePolicyPair {
+        first_party: CookiePolicy::Allow,
+        third_party: CookiePolicy::Reject,
+    };
+    let mut model = model_with(policy, &SearchEngine::default());
+    let index = flat_index(&model, SettingId::CookiesFirstParty);
+    assert_eq!(
+        model.cycle_radio(index, CycleDirection::Prev),
+        Some((SettingId::CookiesFirstParty, CookiePolicy::Reject))
+    );
+    assert!(radio_option_selected(
+        &model,
+        SettingId::CookiesFirstParty,
+        "reject"
+    ));
+}
+
+#[test]
+fn cycling_a_non_radio_row_returns_none() {
+    let mut model = model_with(CookiePolicyPair::default(), &SearchEngine::default());
+    let index = flat_index(&model, SettingId::CopyOnSelect);
+    assert_eq!(model.cycle_radio(index, CycleDirection::Next), None);
+}
+
+#[test]
+fn checkbox_config_key_maps_each_toggle_and_rejects_radios_and_text() {
+    assert_eq!(
+        checkbox_config_key(SettingId::CopyOnSelect),
+        Some("ui.copy_on_select")
+    );
+    assert_eq!(
+        checkbox_config_key(SettingId::ForceOsc52),
+        Some("ui.force_osc52")
+    );
+    assert_eq!(
+        checkbox_config_key(SettingId::SearchEnabled),
+        Some("search.enabled")
+    );
+    assert_eq!(
+        checkbox_config_key(SettingId::UnwrapTracking),
+        Some("network.unwrap_tracking")
+    );
+    assert_eq!(checkbox_config_key(SettingId::CookiesFirstParty), None);
+    assert_eq!(checkbox_config_key(SettingId::SearchBaseUrl), None);
+}
+
+#[test]
+fn cookie_scope_maps_radios_and_rejects_other_rows() {
+    assert_eq!(
+        cookie_scope(SettingId::CookiesFirstParty),
+        Some(CookieScope::FirstParty)
+    );
+    assert_eq!(
+        cookie_scope(SettingId::CookiesThirdParty),
+        Some(CookieScope::ThirdParty)
+    );
+    assert_eq!(cookie_scope(SettingId::CopyOnSelect), None);
+    assert_eq!(cookie_scope(SettingId::SearchBaseUrl), None);
 }

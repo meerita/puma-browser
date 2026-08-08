@@ -6,10 +6,10 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use browser_core::HistoryEntry;
+use browser_core::{CookiePolicy, HistoryEntry};
 
 use crate::command::{self, CommandKind, CommandMatch};
-use crate::settings_view::SettingsModel;
+use crate::settings_view::{CycleDirection, SettingId, SettingsModel, SettingsRow};
 
 pub(crate) const READING_HINTS: &[&str] = &[
     "Type a URL or press / for commands",
@@ -324,6 +324,38 @@ impl UiState {
     /// The index of the focused settings row within the flattened row list.
     pub(crate) fn settings_focus(&self) -> usize {
         self.settings_focus_index
+    }
+
+    /// The focused settings row, or `None` when the panel is closed or has no rows. The caller
+    /// reads its identity and environment-override flag before applying a change.
+    pub(crate) fn focused_settings_row(&self) -> Option<&SettingsRow> {
+        self.settings_model
+            .as_ref()?
+            .row_at(self.settings_focus_index)
+    }
+
+    /// Flips the focused checkbox in the open panel and returns its identity and new state, or
+    /// `None` when the panel is closed or the focused row is not a checkbox.
+    pub(crate) fn toggle_focused_checkbox(&mut self) -> Option<(SettingId, bool)> {
+        let focus = self.settings_focus_index;
+        self.settings_model.as_mut()?.toggle_checkbox(focus)
+    }
+
+    /// Moves the focused radio group's selection one option in `direction` and returns its
+    /// identity and the newly selected policy, or `None` when the panel is closed or the
+    /// focused row is not a radio group.
+    pub(crate) fn cycle_focused_radio(
+        &mut self,
+        direction: CycleDirection,
+    ) -> Option<(SettingId, CookiePolicy)> {
+        let focus = self.settings_focus_index;
+        self.settings_model.as_mut()?.cycle_radio(focus, direction)
+    }
+
+    /// Updates the live search-enabled flag the palette filter reads, so toggling the setting
+    /// adds or removes `/search` from the palette without a restart.
+    pub(crate) fn set_search_enabled(&mut self, search_enabled: bool) {
+        self.search_enabled = search_enabled;
     }
 
     /// Moves the settings focus to the next row, wrapping at the end. A no-op when the panel

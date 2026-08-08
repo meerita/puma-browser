@@ -528,8 +528,34 @@ fn esc_in_the_settings_panel_closes_it() {
 }
 
 #[test]
+fn space_and_enter_in_the_settings_panel_toggle_the_focused_row() {
+    assert_eq!(
+        settings_mode(KeyCode::Char(' ')),
+        InputAction::SettingsToggle
+    );
+    assert_eq!(settings_mode(KeyCode::Enter), InputAction::SettingsToggle);
+}
+
+#[test]
+fn left_and_right_in_the_settings_panel_cycle_the_focused_radio() {
+    assert_eq!(settings_mode(KeyCode::Left), InputAction::SettingsCyclePrev);
+    assert_eq!(
+        settings_mode(KeyCode::Char('h')),
+        InputAction::SettingsCyclePrev
+    );
+    assert_eq!(
+        settings_mode(KeyCode::Right),
+        InputAction::SettingsCycleNext
+    );
+    assert_eq!(
+        settings_mode(KeyCode::Char('l')),
+        InputAction::SettingsCycleNext
+    );
+}
+
+#[test]
 fn a_stray_key_in_the_settings_panel_is_ignored() {
-    assert_eq!(settings_mode(KeyCode::Enter), InputAction::Disarm);
+    assert_eq!(settings_mode(KeyCode::Tab), InputAction::Disarm);
 }
 
 #[test]

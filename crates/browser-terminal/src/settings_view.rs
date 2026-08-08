@@ -3,7 +3,7 @@
 // @layer terminal
 // @created meerita <meerita@icloud.com>
 
-use browser_core::{CookiePolicy, CookiePolicyPair, SearchEngine};
+use browser_core::{CookiePolicy, CookiePolicyPair, CookieScope, SearchEngine};
 
 use crate::TerminalSettings;
 
@@ -50,13 +50,19 @@ pub(crate) enum SettingsControl {
 /// One setting shown in the panel: a stable identity, a human label, its control with the
 /// current value, and whether a `PUMA_*` environment variable currently fixes it for the run.
 pub(crate) struct SettingsRow {
-    // Read by the editing phases, not the read-only scaffold; keeps the row's stable identity
-    // available so an applied change knows which setting it changed.
-    #[allow(dead_code)]
+    // The row's stable identity, so an applied change knows which setting it changed and which
+    // config key to persist it under.
     pub(crate) id: SettingId,
     pub(crate) label: String,
     pub(crate) control: SettingsControl,
     pub(crate) env_overridden: bool,
+}
+
+/// The direction a radio group's selection moves when the user cycles it with the arrow keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CycleDirection {
+    Prev,
+    Next,
 }
 
 /// A titled group of rows.
@@ -74,6 +80,103 @@ impl SettingsModel {
     /// The total number of rows across all sections, so focus can wrap over a flat index.
     pub(crate) fn row_count(&self) -> usize {
         self.sections.iter().map(|section| section.rows.len()).sum()
+    }
+
+    /// The row at flat index `focus` across all sections in display order, or `None` when the
+    /// index is past the last row.
+    pub(crate) fn row_at(&self, focus: usize) -> Option<&SettingsRow> {
+        self.sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .nth(focus)
+    }
+
+    /// The mutable row at flat index `focus`, or `None` when the index is past the last row.
+    fn row_at_mut(&mut self, focus: usize) -> Option<&mut SettingsRow> {
+        self.sections
+            .iter_mut()
+            .flat_map(|section| section.rows.iter_mut())
+            .nth(focus)
+    }
+
+    /// Flips the checkbox at flat index `focus` in place and returns its identity and new state,
+    /// or `None` when that row is not a checkbox. Radio and text rows are left unchanged.
+    pub(crate) fn toggle_checkbox(&mut self, focus: usize) -> Option<(SettingId, bool)> {
+        let row = self.row_at_mut(focus)?;
+        let SettingsControl::Checkbox { checked } = &mut row.control else {
+            return None;
+        };
+        *checked = !*checked;
+        Some((row.id, *checked))
+    }
+
+    /// Moves the radio selection at flat index `focus` one option in `direction`, wrapping at
+    /// the ends, and returns the row identity with the newly selected policy, or `None` when
+    /// that row is not a radio group.
+    pub(crate) fn cycle_radio(
+        &mut self,
+        focus: usize,
+        direction: CycleDirection,
+    ) -> Option<(SettingId, CookiePolicy)> {
+        let row = self.row_at_mut(focus)?;
+        let SettingsControl::Radio { options } = &mut row.control else {
+            return None;
+        };
+        let current = options
+            .iter()
+            .position(|option| option.selected)
+            .unwrap_or(0);
+        let next = cycle_index(current, options.len(), direction);
+        // The options are built from POLICY_OPTIONS in the same order, so a valid option index
+        // is always a valid policy index; resolving the policy before mutating keeps the model
+        // unchanged on the impossible miss rather than leaving a selection with no policy.
+        let policy = POLICY_OPTIONS.get(next).map(|(_, policy)| *policy)?;
+        for (index, option) in options.iter_mut().enumerate() {
+            option.selected = index == next;
+        }
+        Some((row.id, policy))
+    }
+}
+
+/// The config-store key a checkbox setting persists under, or `None` for an id that is not a
+/// checkbox. Keeps the id-to-key mapping beside the ids it names.
+pub(crate) fn checkbox_config_key(id: SettingId) -> Option<&'static str> {
+    match id {
+        SettingId::CopyOnSelect => Some("ui.copy_on_select"),
+        SettingId::ForceOsc52 => Some("ui.force_osc52"),
+        SettingId::SearchEnabled => Some("search.enabled"),
+        SettingId::UnwrapTracking => Some("network.unwrap_tracking"),
+        SettingId::CookiesFirstParty
+        | SettingId::CookiesThirdParty
+        | SettingId::SearchBaseUrl
+        | SettingId::SearchQueryParameter => None,
+    }
+}
+
+/// The cookie scope a radio setting controls, or `None` for an id that is not a cookie radio.
+pub(crate) fn cookie_scope(id: SettingId) -> Option<CookieScope> {
+    match id {
+        SettingId::CookiesFirstParty => Some(CookieScope::FirstParty),
+        SettingId::CookiesThirdParty => Some(CookieScope::ThirdParty),
+        SettingId::CopyOnSelect
+        | SettingId::ForceOsc52
+        | SettingId::SearchEnabled
+        | SettingId::UnwrapTracking
+        | SettingId::SearchBaseUrl
+        | SettingId::SearchQueryParameter => None,
+    }
+}
+
+/// The next option index after `current` when cycling a group of `len` options in `direction`,
+/// wrapping at both ends. Returns zero for an empty group so the caller never indexes out of
+/// range.
+fn cycle_index(current: usize, len: usize, direction: CycleDirection) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    match direction {
+        CycleDirection::Next => (current + 1) % len,
+        CycleDirection::Prev => current.checked_sub(1).unwrap_or(len - 1),
     }
 }
 

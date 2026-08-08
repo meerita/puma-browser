@@ -71,7 +71,8 @@ use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use palette_menu::{compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
 use selection::TextSelection;
 use settings_view::{
-    build_settings_model, RadioOption, SettingsControl, SettingsModel, SettingsRow,
+    build_settings_model, checkbox_config_key, cookie_scope, CycleDirection, RadioOption,
+    SettingId, SettingsControl, SettingsModel, SettingsRow,
 };
 use title_bar::compose_title_bar;
 use ui_state::UiState;
@@ -126,6 +127,33 @@ enum HistoryRequest {
     ClearAll,
     ClearSite(String),
 }
+
+/// A settings-panel change the user asked for with a key while a row is focused: toggle the
+/// focused checkbox, or move the focused radio group's selection one option in a direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsMutation {
+    Toggle,
+    CyclePrev,
+    CycleNext,
+}
+
+/// The settings mutation a key action requests, or `None` when it is not a settings mutation.
+/// Mirrors the palette and suggestion key maps: a small pure classifier the event loop reads.
+fn settings_mutation_for(action: InputAction) -> Option<SettingsMutation> {
+    match action {
+        InputAction::SettingsToggle => Some(SettingsMutation::Toggle),
+        InputAction::SettingsCyclePrev => Some(SettingsMutation::CyclePrev),
+        InputAction::SettingsCycleNext => Some(SettingsMutation::CycleNext),
+        _ => None,
+    }
+}
+
+/// The message shown when the user tries to change a row a `PUMA_*` environment variable fixes
+/// for the session.
+const SETTINGS_ENV_LOCKED: &str = "This setting is fixed by an environment variable";
+
+/// The message shown when a setting changed for the running session but could not be saved.
+const SETTINGS_SAVE_FAILED: &str = "Setting changed for this session but could not be saved";
 
 /// The number of address-bar suggestions requested from the index on each edit.
 const ADDRESS_SUGGESTION_LIMIT: usize = 8;
@@ -246,13 +274,10 @@ impl TerminalApp {
     }
 
     async fn drive(&mut self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
-        let TerminalSettings {
-            copy_on_select,
-            force_osc52,
-            search_enabled,
-            unwrap_tracking: _,
-            env_overridden: _,
-        } = self.settings;
+        // Only the initial search-enabled value is read here to seed the palette filter; the
+        // copy-on-select and force-osc52 settings are read live from `self.settings` at each
+        // mouse release so a panel toggle changes clipboard behavior at once.
+        let TerminalSettings { search_enabled, .. } = self.settings;
         let mut scroll = ScrollState::new();
         let mut selection = TextSelection::new();
         let mut ui_state = UiState::new(search_enabled);
@@ -335,6 +360,7 @@ impl TerminalApp {
             let mut reload_url: Option<BrowserUrl> = None;
             let mut navigate_to_url: Option<String> = None;
             let mut history_key_action: Option<InputAction> = None;
+            let mut settings_mutation: Option<SettingsMutation> = None;
 
             if let LoadState::Active {
                 ref mut handle,
@@ -412,6 +438,7 @@ impl TerminalApp {
                                 ) {
                                     history_key_action = Some(action);
                                 }
+                                settings_mutation = settings_mutation_for(action);
                                 if let Some(link_url) = handle_navigation_action(
                                     action,
                                     &mut self.controller,
@@ -444,8 +471,8 @@ impl TerminalApp {
                                     &mut navigate_to_url,
                                     &mut ui_state,
                                     now,
-                                    copy_on_select,
-                                    force_osc52,
+                                    self.settings.copy_on_select,
+                                    self.settings.force_osc52,
                                 );
                             }
                             _ => {}
@@ -520,6 +547,12 @@ impl TerminalApp {
                 }
             }
 
+            // Apply a settings-panel mutation: flip a checkbox or cycle a radio, applying the
+            // change to the running session and persisting it through the controller.
+            if let Some(mutation) = settings_mutation {
+                self.apply_settings_mutation(mutation, &mut ui_state, now);
+            }
+
             // Apply page refresh — re-fetch the current URL using the same load pipeline.
             if let Some(url) = reload_url {
                 load_state = self.start_load(url);
@@ -567,6 +600,94 @@ impl TerminalApp {
                 now,
             ),
             _ => None,
+        }
+    }
+
+    /// Applies a settings-panel mutation to the focused row: a checkbox toggle or a radio
+    /// cycle. The change takes effect on the running session at once and is persisted through
+    /// the controller. A row a `PUMA_*` environment variable fixes refuses the change and
+    /// explains why, leaving both the live value and the rendered row unchanged.
+    fn apply_settings_mutation(
+        &mut self,
+        mutation: SettingsMutation,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) {
+        let env_overridden = match ui_state.focused_settings_row() {
+            Some(row) => row.env_overridden,
+            None => return,
+        };
+        if env_overridden {
+            ui_state.set_transient_message(SETTINGS_ENV_LOCKED.to_string(), now);
+            return;
+        }
+        match mutation {
+            SettingsMutation::Toggle => self.apply_settings_toggle(ui_state, now),
+            SettingsMutation::CyclePrev => {
+                self.apply_settings_cycle(ui_state, CycleDirection::Prev, now)
+            }
+            SettingsMutation::CycleNext => {
+                self.apply_settings_cycle(ui_state, CycleDirection::Next, now)
+            }
+        }
+    }
+
+    /// Toggles the focused checkbox: flips its live setting, updates the rendered row, and
+    /// persists the new value under its config key. A no-op when the focused row is not a
+    /// checkbox, so a toggle key on a radio or text row does nothing.
+    fn apply_settings_toggle(&mut self, ui_state: &mut UiState, now: Instant) {
+        let Some((id, checked)) = ui_state.toggle_focused_checkbox() else {
+            return;
+        };
+        self.apply_checkbox_setting(id, checked, ui_state);
+        let Some(key) = checkbox_config_key(id) else {
+            return;
+        };
+        let encoded = if checked { "true" } else { "false" };
+        if self.controller.persist_setting(key, encoded).is_err() {
+            ui_state.set_transient_message(SETTINGS_SAVE_FAILED.to_string(), now);
+        }
+    }
+
+    /// Writes a checkbox's new value into the matching live setting. The search-enabled flag is
+    /// mirrored into the UI state so the palette filter drops or restores `/search` at once.
+    fn apply_checkbox_setting(&mut self, id: SettingId, checked: bool, ui_state: &mut UiState) {
+        match id {
+            SettingId::CopyOnSelect => self.settings.copy_on_select = checked,
+            SettingId::ForceOsc52 => self.settings.force_osc52 = checked,
+            SettingId::SearchEnabled => {
+                self.settings.search_enabled = checked;
+                ui_state.set_search_enabled(checked);
+            }
+            SettingId::UnwrapTracking => self.settings.unwrap_tracking = checked,
+            SettingId::CookiesFirstParty
+            | SettingId::CookiesThirdParty
+            | SettingId::SearchBaseUrl
+            | SettingId::SearchQueryParameter => {}
+        }
+    }
+
+    /// Cycles the focused radio group's selection, applying the chosen cookie policy to the
+    /// running session and persisting it. The controller prunes the jar when the first-party
+    /// default tightens to reject. A no-op when the focused row is not a cookie radio.
+    fn apply_settings_cycle(
+        &mut self,
+        ui_state: &mut UiState,
+        direction: CycleDirection,
+        now: Instant,
+    ) {
+        let Some((id, policy)) = ui_state.cycle_focused_radio(direction) else {
+            return;
+        };
+        let Some(scope) = cookie_scope(id) else {
+            return;
+        };
+        if self
+            .controller
+            .set_global_cookie_policy(scope, policy)
+            .is_err()
+        {
+            ui_state.set_transient_message(SETTINGS_SAVE_FAILED.to_string(), now);
         }
     }
 
@@ -1907,6 +2028,9 @@ fn apply_scroll(
         | InputAction::CookiesClose
         | InputAction::SettingsSelectPrev
         | InputAction::SettingsSelectNext
+        | InputAction::SettingsToggle
+        | InputAction::SettingsCyclePrev
+        | InputAction::SettingsCycleNext
         | InputAction::SettingsClose
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
@@ -1938,7 +2062,12 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         InputAction::SettingsSelectPrev => ui_state.settings_focus_prev(),
         InputAction::SettingsSelectNext => ui_state.settings_focus_next(),
         InputAction::SettingsClose => ui_state.exit_settings_mode(),
-        InputAction::ScrollLineDown
+        // The settings mutation actions need the controller and live settings, so they are
+        // applied by the owning app after the event borrow ends, not here.
+        InputAction::SettingsToggle
+        | InputAction::SettingsCyclePrev
+        | InputAction::SettingsCycleNext
+        | InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
         | InputAction::ScrollPageDown
         | InputAction::ScrollPageUp
@@ -2098,6 +2227,9 @@ fn handle_navigation_action(
         | InputAction::CookiesClose
         | InputAction::SettingsSelectPrev
         | InputAction::SettingsSelectNext
+        | InputAction::SettingsToggle
+        | InputAction::SettingsCyclePrev
+        | InputAction::SettingsCycleNext
         | InputAction::SettingsClose => None,
     }
 }

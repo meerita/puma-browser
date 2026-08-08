@@ -5,14 +5,22 @@
 
 use std::time::{Duration, Instant};
 
-use browser_core::{CookiePolicyPair, HistoryEntry, SearchEngine};
+use browser_core::{CookiePolicy, CookiePolicyPair, HistoryEntry, SearchEngine};
 
 use super::{UiState, READING_HINTS};
-use crate::settings_view::{build_settings_model, SettingsModel};
+use crate::settings_view::{build_settings_model, CycleDirection, SettingId, SettingsModel};
 use crate::{EnvOverrides, TerminalSettings};
 
 fn history_entry(id: u64, url: &str) -> HistoryEntry {
     HistoryEntry::new(id, url.to_string(), None, 0)
+}
+
+/// Whether the open palette currently offers the command named `name`.
+fn palette_contains(state: &UiState, name: &str) -> bool {
+    state
+        .palette_matches()
+        .iter()
+        .any(|found| found.spec.name == name)
 }
 
 /// A settings model with the default policy and engine, giving the eight config-key rows the
@@ -724,4 +732,60 @@ fn settings_focus_is_a_no_op_when_the_panel_is_closed() {
     let mut state = UiState::new(true);
     state.settings_focus_next();
     assert_eq!(state.settings_focus(), 0);
+}
+
+#[test]
+fn toggling_the_focused_checkbox_flips_only_a_checkbox_row() {
+    let mut state = UiState::new(true);
+    state.enter_settings_mode(sample_settings_model());
+    // The first row is the first-party cookie radio, so a toggle does nothing there.
+    assert_eq!(state.toggle_focused_checkbox(), None);
+    // Move focus to the copy-on-select checkbox, seeded true, and toggle it off.
+    state.settings_focus_next();
+    state.settings_focus_next();
+    assert_eq!(
+        state.toggle_focused_checkbox(),
+        Some((SettingId::CopyOnSelect, false))
+    );
+}
+
+#[test]
+fn cycling_the_focused_radio_reports_the_new_policy() {
+    let mut state = UiState::new(true);
+    state.enter_settings_mode(sample_settings_model());
+    // The first-party default is reject, the last option, so cycling forward wraps to allow.
+    assert_eq!(
+        state.cycle_focused_radio(CycleDirection::Next),
+        Some((SettingId::CookiesFirstParty, CookiePolicy::Allow))
+    );
+}
+
+#[test]
+fn cycling_the_focused_radio_does_nothing_on_a_checkbox_row() {
+    let mut state = UiState::new(true);
+    state.enter_settings_mode(sample_settings_model());
+    state.settings_focus_next();
+    state.settings_focus_next();
+    assert_eq!(state.cycle_focused_radio(CycleDirection::Next), None);
+}
+
+#[test]
+fn disabling_search_live_removes_it_from_the_open_palette() {
+    let mut state = UiState::new(true);
+    state.enter_command_mode('/');
+    assert!(palette_contains(&state, "search"));
+    state.set_search_enabled(false);
+    // Editing the buffer refreshes the palette against the new flag.
+    state.command_append_char('s');
+    assert!(!palette_contains(&state, "search"));
+}
+
+#[test]
+fn re_enabling_search_live_restores_it_to_the_open_palette() {
+    let mut state = UiState::new(false);
+    state.enter_command_mode('/');
+    assert!(!palette_contains(&state, "search"));
+    state.set_search_enabled(true);
+    state.command_append_char('s');
+    assert!(palette_contains(&state, "search"));
 }
