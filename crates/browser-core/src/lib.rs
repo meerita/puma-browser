@@ -23,7 +23,7 @@ pub use address_resolver::resolve_address;
 pub use browser_html::{Document, DocumentTitle};
 pub use browser_layout::CellBuffer;
 pub use browser_network::BrowserUrl;
-pub use browser_privacy::{CookiePolicy, RejectionReason, SameSite};
+pub use browser_privacy::{CookiePolicy, CookieScope, RejectionReason, SameSite};
 pub use browser_storage::{HistoryEntry, HistoryStore, SitePolicyStore, SuggestionEntry};
 pub use cookie_record::CookieRecord;
 pub use cookie_settings::{parse_policy, CookiePolicyPair};
@@ -47,7 +47,7 @@ use browser_network::{
     fetch_once, resolve_redirect, FetchedDocument, HopOutcome, NetworkError, MAX_REDIRECT_COUNT,
 };
 use browser_privacy::{
-    classify, decide, registrable_domain, CookieContext, CookieDecision, CookieScope, ParsedCookie,
+    classify, decide, registrable_domain, CookieContext, CookieDecision, ParsedCookie,
 };
 use browser_storage::{NewVisit, StorageError};
 
@@ -680,6 +680,43 @@ impl NavigationController {
         Ok(())
     }
 
+    /// Sets the global default cookie policy for one scope and applies it to the running
+    /// session at once.
+    ///
+    /// The default governs every site with no per-site exception. Tightening the first-party
+    /// default to [`CookiePolicy::Reject`] also drops the cookies the jar could still send:
+    /// the jar only ever sends cookies first-party, so a held cookie for a domain no
+    /// exception permits is now forbidden and is removed immediately, not merely on the next
+    /// decision. Relaxing a scope, or changing the third-party default, leaves held cookies
+    /// in place. The built-in default pair stays `Reject`/`Reject`; this changes the running
+    /// value, not that default.
+    pub fn set_global_cookie_policy(&mut self, scope: CookieScope, policy: CookiePolicy) {
+        self.assign_scope_policy(scope, policy);
+        if first_party_tightened_to_reject(scope, policy) {
+            self.drop_cookies_without_permitting_exception();
+        }
+    }
+
+    /// Writes `policy` into the matching scope field of the default policy pair.
+    fn assign_scope_policy(&mut self, scope: CookieScope, policy: CookiePolicy) {
+        match scope {
+            CookieScope::FirstParty => self.default_cookie_policy.first_party = policy,
+            CookieScope::ThirdParty => self.default_cookie_policy.third_party = policy,
+        }
+    }
+
+    /// Drops every jar cookie whose domain relies on the global default, keeping only those a
+    /// per-site exception still permits.
+    ///
+    /// Called when the first-party default tightens to reject. A domain with its own
+    /// permitting exception is governed by that exception, not the global default, so its
+    /// cookies survive; every other held cookie is now forbidden and is removed.
+    fn drop_cookies_without_permitting_exception(&mut self) {
+        let site_exceptions = &self.site_exceptions;
+        self.cookie_jar
+            .retain_domains(|domain| domain_has_permitting_exception(site_exceptions, domain));
+    }
+
     /// Closes the tab with the given identifier.
     ///
     /// Not implemented in this milestone; returns [`CoreError::TabNotFound`].
@@ -700,6 +737,30 @@ fn flatten_storage_result<T>(
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(CoreError::Storage(error)),
         Err(_) => Err(CoreError::Storage(StorageError::QueryFailed)),
+    }
+}
+
+/// Whether a global cookie change tightens the first-party default to reject.
+///
+/// Only this case drops cookies already held: the jar sends cookies first-party only, so a
+/// first-party reject forbids every held cookie no exception still permits. Relaxing, or any
+/// change to the third-party default, leaves the jar untouched.
+fn first_party_tightened_to_reject(scope: CookieScope, policy: CookiePolicy) -> bool {
+    matches!(scope, CookieScope::FirstParty) && matches!(policy, CookiePolicy::Reject)
+}
+
+/// Whether a domain keeps its cookies when the global first-party default tightens to reject.
+///
+/// A per-site exception that is not reject governs that domain in place of the global
+/// default, so its cookies survive the tightening. A domain with no exception follows the
+/// default and loses them.
+fn domain_has_permitting_exception(
+    site_exceptions: &HashMap<String, CookiePolicy>,
+    domain: &str,
+) -> bool {
+    match site_exceptions.get(domain) {
+        Some(policy) => !matches!(policy, CookiePolicy::Reject),
+        None => false,
     }
 }
 

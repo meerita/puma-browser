@@ -141,6 +141,15 @@ impl CookieJar {
     pub(crate) fn clear_domain(&mut self, registrable_domain: &str) {
         self.by_domain.remove(registrable_domain);
     }
+
+    /// Keeps only the domains for which `keep` returns true, dropping the rest.
+    ///
+    /// The key passed to `keep` is the registrable domain. This prunes the jar when the
+    /// global first-party default tightens to reject: cookies for domains no exception
+    /// permits are dropped so the tighter policy takes hold at once.
+    pub(crate) fn retain_domains(&mut self, keep: impl Fn(&str) -> bool) {
+        self.by_domain.retain(|domain, _| keep(domain));
+    }
 }
 
 impl fmt::Debug for CookieJar {

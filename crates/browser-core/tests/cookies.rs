@@ -6,8 +6,8 @@
 use std::sync::{Arc, Mutex};
 
 use browser_core::{
-    BrowserUrl, CookiePolicy, CookiePolicyPair, NavigationController, NavigationSource,
-    RejectionReason, SitePolicyStore,
+    BrowserUrl, CookiePolicy, CookiePolicyPair, CookieScope, NavigationController,
+    NavigationSource, RejectionReason, SitePolicyStore,
 };
 use browser_storage::StorageError;
 use wiremock::matchers::{method, path};
@@ -390,4 +390,173 @@ async fn a_site_exception_is_written_through_to_the_store() {
         .site_policy("example.com")
         .expect("the store read must succeed");
     assert_eq!(persisted.as_deref(), Some("session"));
+}
+
+#[tokio::test]
+async fn setting_the_global_first_party_default_to_allow_accepts_and_resends_a_cookie() {
+    let server = MockServer::start().await;
+    mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
+    mount_plain_page(&server, "/echo").await;
+    let mut controller = NavigationController::new();
+    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow);
+
+    controller
+        .load(url_for(&server, "/set"), NavigationSource::AddressBar)
+        .await
+        .expect("the first-party cookie must be accepted under the allow default");
+    assert_eq!(
+        controller.cookie_counts(),
+        (1, 0),
+        "the allow default accepts the first-party cookie with no per-site exception"
+    );
+
+    controller
+        .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
+        .await
+        .expect("the echo page must load while the cookie is held");
+    let echo = requests_to(&server, "/echo").await;
+    assert_eq!(
+        cookie_header(&echo[0]).as_deref(),
+        Some("sid=abc"),
+        "a cookie accepted by the global default is resent on the next same-origin request"
+    );
+}
+
+#[tokio::test]
+async fn tightening_the_global_first_party_default_to_reject_drops_held_cookies() {
+    let server = MockServer::start().await;
+    mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
+    mount_plain_page(&server, "/echo").await;
+    let mut controller = NavigationController::new();
+    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow);
+    controller
+        .load(url_for(&server, "/set"), NavigationSource::AddressBar)
+        .await
+        .expect("the cookie must be accepted while the default allows it");
+    controller
+        .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
+        .await
+        .expect("the echo page must load while the cookie is held");
+    let before = requests_to(&server, "/echo").await;
+    assert_eq!(
+        cookie_header(&before[0]).as_deref(),
+        Some("sid=abc"),
+        "the held cookie is resent while the default still allows it"
+    );
+
+    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Reject);
+    controller
+        .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
+        .await
+        .expect("the echo page must still load after the jar is pruned");
+
+    let after = requests_to(&server, "/echo").await;
+    assert_eq!(after.len(), 2, "a second echo request was made");
+    assert_eq!(
+        cookie_header(&after[1]),
+        None,
+        "tightening the first-party default to reject drops the held cookie, so nothing is resent"
+    );
+}
+
+#[tokio::test]
+async fn setting_the_third_party_default_does_not_change_first_party_behavior() {
+    let server = MockServer::start().await;
+    mount_page_with_set_cookie(&server, "/", "sid=abc").await;
+    let mut controller = NavigationController::new();
+    controller.set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Allow);
+
+    controller
+        .load(url_for(&server, "/"), NavigationSource::AddressBar)
+        .await
+        .expect("the page must load with its first-party cookie still governed by reject");
+
+    let records = controller.cookie_records();
+    assert_eq!(records.len(), 1);
+    assert!(
+        !records[0].accepted(),
+        "the first-party default is untouched, so the first-party cookie is still rejected"
+    );
+    assert!(records[0].first_party());
+    assert_eq!(records[0].reason(), Some(RejectionReason::Policy));
+}
+
+#[tokio::test]
+async fn relaxing_the_third_party_default_does_not_prune_first_party_cookies() {
+    let server = MockServer::start().await;
+    mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
+    mount_plain_page(&server, "/echo").await;
+    let mut controller = NavigationController::new();
+    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow);
+    controller
+        .load(url_for(&server, "/set"), NavigationSource::AddressBar)
+        .await
+        .expect("the first-party cookie must be accepted and held");
+
+    controller.set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Allow);
+    controller
+        .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
+        .await
+        .expect("the echo page must load with the first-party cookie still held");
+
+    let echo = requests_to(&server, "/echo").await;
+    assert_eq!(
+        cookie_header(&echo[0]).as_deref(),
+        Some("sid=abc"),
+        "relaxing the third-party default leaves first-party cookies in place"
+    );
+}
+
+#[tokio::test]
+async fn tightening_the_third_party_default_to_reject_keeps_first_party_cookies() {
+    let server = MockServer::start().await;
+    mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
+    mount_plain_page(&server, "/echo").await;
+    let mut controller = NavigationController::new();
+    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow);
+    controller
+        .load(url_for(&server, "/set"), NavigationSource::AddressBar)
+        .await
+        .expect("the first-party cookie must be accepted and held");
+
+    controller.set_global_cookie_policy(CookieScope::ThirdParty, CookiePolicy::Reject);
+    controller
+        .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
+        .await
+        .expect("the echo page must load with the first-party cookie still held");
+
+    let echo = requests_to(&server, "/echo").await;
+    assert_eq!(
+        cookie_header(&echo[0]).as_deref(),
+        Some("sid=abc"),
+        "tightening the third-party default does not drop cookies the jar sends first-party"
+    );
+}
+
+#[tokio::test]
+async fn a_site_allow_exception_survives_a_global_first_party_reject() {
+    let server = MockServer::start().await;
+    mount_page_with_set_cookie(&server, "/set", "sid=abc").await;
+    mount_plain_page(&server, "/echo").await;
+    let mut controller = NavigationController::new();
+    controller
+        .set_site_cookie_policy(&server_host(&server), CookiePolicy::Allow)
+        .expect("setting an allow exception must succeed");
+    controller
+        .load(url_for(&server, "/set"), NavigationSource::AddressBar)
+        .await
+        .expect("the cookie must be accepted under the site exception");
+
+    controller.set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Reject);
+    controller
+        .load(url_for(&server, "/echo"), NavigationSource::AddressBar)
+        .await
+        .expect("the echo page must load with the excepted site's cookie still held");
+
+    let echo = requests_to(&server, "/echo").await;
+    assert_eq!(
+        cookie_header(&echo[0]).as_deref(),
+        Some("sid=abc"),
+        "a site with a permitting exception keeps its cookies when the global default tightens"
+    );
 }
