@@ -15,6 +15,7 @@ mod history_view;
 mod input;
 mod palette_menu;
 mod selection;
+mod settings_view;
 mod title_bar;
 mod ui_state;
 mod view_state;
@@ -69,6 +70,9 @@ use history_view::{
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use palette_menu::{compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
 use selection::TextSelection;
+use settings_view::{
+    build_settings_model, RadioOption, SettingsControl, SettingsModel, SettingsRow,
+};
 use title_bar::compose_title_bar;
 use ui_state::UiState;
 use unicode_segmentation::UnicodeSegmentation;
@@ -369,6 +373,7 @@ impl TerminalApp {
                                 let address_suggestions_active = ui_state.has_address_suggestions();
                                 let in_history = ui_state.is_in_history_mode();
                                 let in_cookies = ui_state.is_in_cookies_mode();
+                                let in_settings = ui_state.is_in_settings_mode();
                                 let action = map_key_event(
                                     key,
                                     ui_state.quit_armed,
@@ -379,6 +384,7 @@ impl TerminalApp {
                                     address_suggestions_active,
                                     in_history,
                                     in_cookies,
+                                    in_settings,
                                 );
                                 if matches!(action, InputAction::Quit) {
                                     return Ok(());
@@ -756,7 +762,12 @@ impl TerminalApp {
                 CommandOutcome::None
             }
             CommandKind::Settings => {
-                ui_state.set_transient_message("Settings panel coming soon".to_string(), now);
+                let model = build_settings_model(
+                    &self.settings,
+                    self.controller.cookie_policy(),
+                    self.controller.search_engine(),
+                );
+                ui_state.enter_settings_mode(model);
                 CommandOutcome::None
             }
         }
@@ -1294,20 +1305,23 @@ fn draw_frame(
         focused_url,
         ui_state,
     };
-    draw_body(
-        frame,
-        view,
-        page,
-        chunks[0],
-        scroll_offset,
-        &link_context,
-        selection_range,
-    );
-
-    draw_palette_popup(frame, chunks[0], ui_state);
-    draw_address_suggestions_popup(frame, chunks[0], ui_state);
-    draw_history_popup(frame, chunks[0], ui_state);
-    draw_cookies_popup(frame, chunks[0], ui_state);
+    if ui_state.is_in_settings_mode() {
+        draw_settings(frame, chunks[0], ui_state);
+    } else {
+        draw_body(
+            frame,
+            view,
+            page,
+            chunks[0],
+            scroll_offset,
+            &link_context,
+            selection_range,
+        );
+        draw_palette_popup(frame, chunks[0], ui_state);
+        draw_address_suggestions_popup(frame, chunks[0], ui_state);
+        draw_history_popup(frame, chunks[0], ui_state);
+        draw_cookies_popup(frame, chunks[0], ui_state);
+    }
 
     draw_separator(frame, chunks[1]);
 
@@ -1749,6 +1763,109 @@ fn draw_message(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(paragraph, area);
 }
 
+/// The panel's top heading.
+const SETTINGS_HEADING: &str = "Settings";
+
+/// The controls line shown at the foot of the panel.
+const SETTINGS_CONTROLS_HINT: &str = "↑↓ move · Esc close";
+
+/// The suffix marking a row whose value an environment variable fixes for the session.
+const ENV_OVERRIDE_NOTE: &str = " (set by environment)";
+
+/// Renders the full-screen settings panel into `area`, listing every section and row with its
+/// current value. The focused row is reverse-highlighted and environment-fixed rows are dimmed
+/// and marked. Every string is a local, browser-owned value composed here, so no remote content
+/// or escape sequence reaches the terminal through this view.
+fn draw_settings(frame: &mut Frame, area: Rect, ui_state: &UiState) {
+    let Some(model) = ui_state.settings_model() else {
+        return;
+    };
+    let padded = Rect {
+        x: area.x.saturating_add(CONTENT_PADDING),
+        y: area.y,
+        width: area.width.saturating_sub(CONTENT_PADDING * 2),
+        height: area.height,
+    };
+    frame.render_widget(Clear, area);
+    let lines = settings_lines(model, ui_state.settings_focus());
+    frame.render_widget(Paragraph::new(lines), padded);
+}
+
+/// Builds the panel's styled lines: a heading, then each section's title and rows, then a
+/// controls hint. Rows are numbered in a flat sequence so the focused index highlights the
+/// right one regardless of how the sections split them.
+fn settings_lines(model: &SettingsModel, focus: usize) -> Vec<Line<'static>> {
+    let heading_style = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'static>> =
+        vec![Line::styled(SETTINGS_HEADING.to_string(), heading_style)];
+    let mut row_index = 0;
+    for section in &model.sections {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::styled(section.title.clone(), heading_style));
+        for row in &section.rows {
+            lines.push(settings_row_line(row, row_index == focus));
+            row_index += 1;
+        }
+    }
+    lines.push(Line::from(String::new()));
+    let hint_style = Style::default().fg(TerminalColor::DarkGray);
+    lines.push(Line::styled(SETTINGS_CONTROLS_HINT.to_string(), hint_style));
+    lines
+}
+
+/// Composes one row's line: an indented label and control state, an environment note when the
+/// row is fixed, and the focus or environment style.
+fn settings_row_line(row: &SettingsRow, is_focused: bool) -> Line<'static> {
+    let mut text = format!("  {}", compose_settings_row_text(row));
+    if row.env_overridden {
+        text.push_str(ENV_OVERRIDE_NOTE);
+    }
+    Line::styled(text, settings_row_style(row, is_focused))
+}
+
+/// The style for a settings row: focus reverses it, an environment-fixed row is dimmed, and
+/// every other row is plain. Focus wins over the environment dim so the highlight stays visible.
+fn settings_row_style(row: &SettingsRow, is_focused: bool) -> Style {
+    if is_focused {
+        return Style::default().add_modifier(Modifier::REVERSED);
+    }
+    if row.env_overridden {
+        return Style::default().fg(TerminalColor::DarkGray);
+    }
+    Style::default()
+}
+
+/// The label-and-value text for a row, without indentation or styling. Text-input values are
+/// control-stripped at this render boundary as a defensive measure, even though a configured
+/// URL or token carries no control bytes.
+fn compose_settings_row_text(row: &SettingsRow) -> String {
+    match &row.control {
+        SettingsControl::Checkbox { checked } => {
+            let marker = if *checked { "[x]" } else { "[ ]" };
+            format!("{marker} {}", row.label)
+        }
+        SettingsControl::Radio { options } => {
+            format!("{}:  {}", row.label, compose_radio_options(options))
+        }
+        SettingsControl::TextInput { value } => {
+            format!("{}:  {}", row.label, strip_control(value))
+        }
+    }
+}
+
+/// Joins a radio control's options into one line, marking the selected option with a filled
+/// bullet and the rest with an empty one.
+fn compose_radio_options(options: &[RadioOption]) -> String {
+    options
+        .iter()
+        .map(|option| {
+            let marker = if option.selected { "(•)" } else { "( )" };
+            format!("{marker} {}", option.label)
+        })
+        .collect::<Vec<String>>()
+        .join("  ")
+}
+
 fn apply_scroll(
     action: InputAction,
     scroll: &mut ScrollState,
@@ -1788,6 +1905,9 @@ fn apply_scroll(
         | InputAction::CookiesSelectPrev
         | InputAction::CookiesSelectNext
         | InputAction::CookiesClose
+        | InputAction::SettingsSelectPrev
+        | InputAction::SettingsSelectNext
+        | InputAction::SettingsClose
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
         | InputAction::ActivateFocusedLink
@@ -1815,6 +1935,9 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         InputAction::CookiesSelectPrev => ui_state.cookie_select_prev(),
         InputAction::CookiesSelectNext => ui_state.cookie_select_next(),
         InputAction::CookiesClose => ui_state.exit_cookies_mode(),
+        InputAction::SettingsSelectPrev => ui_state.settings_focus_prev(),
+        InputAction::SettingsSelectNext => ui_state.settings_focus_next(),
+        InputAction::SettingsClose => ui_state.exit_settings_mode(),
         InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
         | InputAction::ScrollPageDown
@@ -1972,7 +2095,10 @@ fn handle_navigation_action(
         | InputAction::HistoryClose
         | InputAction::CookiesSelectPrev
         | InputAction::CookiesSelectNext
-        | InputAction::CookiesClose => None,
+        | InputAction::CookiesClose
+        | InputAction::SettingsSelectPrev
+        | InputAction::SettingsSelectNext
+        | InputAction::SettingsClose => None,
     }
 }
 

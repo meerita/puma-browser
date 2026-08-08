@@ -40,6 +40,9 @@ pub(crate) enum InputAction {
     CookiesSelectPrev,
     CookiesSelectNext,
     CookiesClose,
+    SettingsSelectPrev,
+    SettingsSelectNext,
+    SettingsClose,
     FocusNextLink,
     FocusPreviousLink,
     ActivateFocusedLink,
@@ -65,9 +68,13 @@ pub(crate) fn map_key_event(
     address_suggestions_active: bool,
     in_history: bool,
     in_cookies: bool,
+    in_settings: bool,
 ) -> InputAction {
     if is_quit_combination(event) {
         return InputAction::Quit;
+    }
+    if in_settings {
+        return map_settings_key(event);
     }
     if in_history {
         return map_history_key(event);
@@ -198,6 +205,18 @@ fn map_cookies_key(event: KeyEvent) -> InputAction {
         KeyCode::Up | KeyCode::Char('k') => InputAction::CookiesSelectPrev,
         KeyCode::Down | KeyCode::Char('j') => InputAction::CookiesSelectNext,
         KeyCode::Esc => InputAction::CookiesClose,
+        _ => InputAction::Disarm,
+    }
+}
+
+/// Maps a key while the settings panel is open. The arrows (and `k`/`j`) move the focused
+/// row and `Esc` closes the panel. Any other key is ignored so a stray keystroke never
+/// dismisses the panel. This phase is read-only, so there is no mutation key here yet.
+fn map_settings_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Up | KeyCode::Char('k') => InputAction::SettingsSelectPrev,
+        KeyCode::Down | KeyCode::Char('j') => InputAction::SettingsSelectNext,
+        KeyCode::Esc => InputAction::SettingsClose,
         _ => InputAction::Disarm,
     }
 }

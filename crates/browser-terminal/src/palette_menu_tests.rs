@@ -40,7 +40,7 @@ fn descriptions_align_into_a_shared_column() {
         .find(|row| row.starts_with("/settings"))
         .expect("settings command must be present");
     assert!(open_row[11..].starts_with("open a URL"));
-    assert!(settings_row[11..].starts_with("open browser settings"));
+    assert!(settings_row[11..].starts_with("open the browser settings"));
 }
 
 #[test]

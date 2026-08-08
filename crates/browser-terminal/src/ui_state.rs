@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use browser_core::HistoryEntry;
 
 use crate::command::{self, CommandKind, CommandMatch};
+use crate::settings_view::SettingsModel;
 
 pub(crate) const READING_HINTS: &[&str] = &[
     "Type a URL or press / for commands",
@@ -20,12 +21,14 @@ pub(crate) const READING_HINTS: &[&str] = &[
 const HINT_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 const TRANSIENT_HINT_DURATION: Duration = Duration::from_secs(5);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InteractionMode {
     Reading,
     Command,
     LinkNavigation,
     History,
     Cookies,
+    Settings,
 }
 
 pub(crate) struct UiState {
@@ -48,6 +51,9 @@ pub(crate) struct UiState {
     history_selected_index: usize,
     cookie_lines: Vec<String>,
     cookie_selected_index: usize,
+    settings_model: Option<SettingsModel>,
+    settings_focus_index: usize,
+    settings_return_mode: InteractionMode,
     pending_fragment: Option<String>,
     search_enabled: bool,
 }
@@ -74,6 +80,9 @@ impl UiState {
             history_selected_index: 0,
             cookie_lines: Vec::new(),
             cookie_selected_index: 0,
+            settings_model: None,
+            settings_focus_index: 0,
+            settings_return_mode: InteractionMode::Reading,
             pending_fragment: None,
             search_enabled,
         }
@@ -110,6 +119,10 @@ impl UiState {
 
     pub(crate) fn is_in_cookies_mode(&self) -> bool {
         matches!(self.interaction_mode, InteractionMode::Cookies)
+    }
+
+    pub(crate) fn is_in_settings_mode(&self) -> bool {
+        matches!(self.interaction_mode, InteractionMode::Settings)
     }
 
     /// Replaces the address-bar suggestions with `suggestions`, resetting the selection so
@@ -283,6 +296,62 @@ impl UiState {
         }
         let last = self.cookie_lines.len() - 1;
         self.cookie_selected_index = self.cookie_selected_index.checked_sub(1).unwrap_or(last);
+    }
+
+    /// Opens the settings panel on `model`, focusing the first row and remembering the mode
+    /// to return to. The model is built by the caller from live settings and controller
+    /// state; this only holds it for display and focus.
+    pub(crate) fn enter_settings_mode(&mut self, model: SettingsModel) {
+        self.settings_return_mode = self.interaction_mode;
+        self.interaction_mode = InteractionMode::Settings;
+        self.settings_model = Some(model);
+        self.settings_focus_index = 0;
+    }
+
+    /// Closes the settings panel, dropping its model and restoring the mode that was active
+    /// when it opened.
+    pub(crate) fn exit_settings_mode(&mut self) {
+        self.interaction_mode = self.settings_return_mode;
+        self.settings_model = None;
+        self.settings_focus_index = 0;
+    }
+
+    /// The model shown in the open settings panel, or `None` when it is closed.
+    pub(crate) fn settings_model(&self) -> Option<&SettingsModel> {
+        self.settings_model.as_ref()
+    }
+
+    /// The index of the focused settings row within the flattened row list.
+    pub(crate) fn settings_focus(&self) -> usize {
+        self.settings_focus_index
+    }
+
+    /// Moves the settings focus to the next row, wrapping at the end. A no-op when the panel
+    /// is closed or has no rows.
+    pub(crate) fn settings_focus_next(&mut self) {
+        let row_count = self.settings_row_count();
+        if row_count == 0 {
+            return;
+        }
+        self.settings_focus_index = (self.settings_focus_index + 1) % row_count;
+    }
+
+    /// Moves the settings focus to the previous row, wrapping at the start. A no-op when the
+    /// panel is closed or has no rows.
+    pub(crate) fn settings_focus_prev(&mut self) {
+        let row_count = self.settings_row_count();
+        if row_count == 0 {
+            return;
+        }
+        let last = row_count - 1;
+        self.settings_focus_index = self.settings_focus_index.checked_sub(1).unwrap_or(last);
+    }
+
+    /// The number of focusable rows in the open panel, or zero when it is closed.
+    fn settings_row_count(&self) -> usize {
+        self.settings_model
+            .as_ref()
+            .map_or(0, SettingsModel::row_count)
     }
 
     /// Enters link navigation mode and focuses the link at `index`.

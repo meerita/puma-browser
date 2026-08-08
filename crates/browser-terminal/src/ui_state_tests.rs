@@ -5,12 +5,31 @@
 
 use std::time::{Duration, Instant};
 
-use browser_core::HistoryEntry;
+use browser_core::{CookiePolicyPair, HistoryEntry, SearchEngine};
 
 use super::{UiState, READING_HINTS};
+use crate::settings_view::{build_settings_model, SettingsModel};
+use crate::{EnvOverrides, TerminalSettings};
 
 fn history_entry(id: u64, url: &str) -> HistoryEntry {
     HistoryEntry::new(id, url.to_string(), None, 0)
+}
+
+/// A settings model with the default policy and engine, giving the eight config-key rows the
+/// focus tests wrap over.
+fn sample_settings_model() -> SettingsModel {
+    let settings = TerminalSettings {
+        copy_on_select: true,
+        force_osc52: false,
+        search_enabled: true,
+        unwrap_tracking: false,
+        env_overridden: EnvOverrides::default(),
+    };
+    build_settings_model(
+        &settings,
+        CookiePolicyPair::default(),
+        &SearchEngine::default(),
+    )
 }
 
 #[test]
@@ -658,4 +677,51 @@ fn exiting_history_mode_returns_to_reading() {
     state.exit_history_mode();
     assert!(!state.is_in_history_mode());
     assert!(state.history_entries().is_empty());
+}
+
+#[test]
+fn entering_settings_mode_focuses_the_first_row() {
+    let mut state = UiState::new(true);
+    state.enter_settings_mode(sample_settings_model());
+    assert!(state.is_in_settings_mode());
+    assert_eq!(state.settings_focus(), 0);
+}
+
+#[test]
+fn exiting_settings_mode_restores_the_previous_mode() {
+    let mut state = UiState::new(true);
+    state.enter_link_navigation(0);
+    state.enter_settings_mode(sample_settings_model());
+    assert!(state.is_in_settings_mode());
+    state.exit_settings_mode();
+    assert!(!state.is_in_settings_mode());
+    assert!(state.is_in_link_navigation());
+    assert!(state.settings_model().is_none());
+}
+
+#[test]
+fn settings_focus_next_wraps_from_the_last_row_to_the_first() {
+    let mut state = UiState::new(true);
+    state.enter_settings_mode(sample_settings_model());
+    for _ in 0..7 {
+        state.settings_focus_next();
+    }
+    assert_eq!(state.settings_focus(), 7);
+    state.settings_focus_next();
+    assert_eq!(state.settings_focus(), 0);
+}
+
+#[test]
+fn settings_focus_prev_wraps_from_the_first_row_to_the_last() {
+    let mut state = UiState::new(true);
+    state.enter_settings_mode(sample_settings_model());
+    state.settings_focus_prev();
+    assert_eq!(state.settings_focus(), 7);
+}
+
+#[test]
+fn settings_focus_is_a_no_op_when_the_panel_is_closed() {
+    let mut state = UiState::new(true);
+    state.settings_focus_next();
+    assert_eq!(state.settings_focus(), 0);
 }

@@ -186,6 +186,15 @@ impl NavigationController {
         &self.search_engine
     }
 
+    /// The global default cookie policy for both scopes, for the caller to read live.
+    ///
+    /// Returns a copy of the pair the resolver consults when no per-site exception applies,
+    /// so an adapter can show the current first- and third-party defaults without reaching
+    /// into controller internals.
+    pub fn cookie_policy(&self) -> CookiePolicyPair {
+        self.default_cookie_policy
+    }
+
     /// Wires a configuration store so setting changes both apply live and persist.
     ///
     /// A consuming builder mirroring [`with_cookies`](Self::with_cookies) and

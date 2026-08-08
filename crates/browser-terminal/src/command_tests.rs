@@ -32,10 +32,10 @@ fn search_resolves_and_takes_an_argument() {
 }
 
 #[test]
-fn settings_carries_the_config_alias_and_coming_soon_description() {
+fn settings_carries_the_config_alias_and_panel_description() {
     let settings = resolve("settings").expect("settings command must exist");
     assert_eq!(settings.aliases, &["config"]);
-    assert!(settings.description.contains("coming soon"));
+    assert!(settings.description.contains("settings panel"));
     assert_eq!(settings.kind, CommandKind::Settings);
 }
 

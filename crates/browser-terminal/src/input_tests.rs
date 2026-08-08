@@ -22,6 +22,7 @@ fn reading(code: KeyCode, quit_armed: bool, refresh_armed: bool) -> InputAction 
         false,
         false,
         false,
+        false,
     )
 }
 
@@ -33,6 +34,7 @@ fn command_mode(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
         false,
         false,
         false,
@@ -53,6 +55,7 @@ fn palette_mode(code: KeyCode) -> InputAction {
         false,
         false,
         false,
+        false,
     )
 }
 
@@ -66,6 +69,7 @@ fn suggestion_mode(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
         false,
         false,
     )
@@ -83,6 +87,7 @@ fn history_mode(code: KeyCode) -> InputAction {
         false,
         true,
         false,
+        false,
     )
 }
 
@@ -90,6 +95,23 @@ fn history_mode(code: KeyCode) -> InputAction {
 fn cookies_mode(code: KeyCode) -> InputAction {
     map_key_event(
         key(code),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+    )
+}
+
+/// Maps a key while the settings panel is open.
+fn settings_mode(code: KeyCode) -> InputAction {
+    map_key_event(
+        key(code),
+        false,
         false,
         false,
         false,
@@ -113,6 +135,7 @@ fn link_navigation(code: KeyCode) -> InputAction {
         false,
         false,
         false,
+        false,
     )
 }
 
@@ -130,7 +153,7 @@ fn esc_from_armed_yields_the_quit_action() {
 fn ctrl_c_yields_the_quit_action() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, false, false),
+        map_key_event(event, false, false, false, false, false, false, false, false, false),
         InputAction::Quit
     );
 }
@@ -232,7 +255,7 @@ fn unbound_printable_char_with_upper_case_in_reading_mode_enters_command_mode() 
 fn ctrl_c_in_command_mode_yields_quit() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, true, false, false, false, false, false),
+        map_key_event(event, false, false, true, false, false, false, false, false, false),
         InputAction::Quit
     );
 }
@@ -411,7 +434,7 @@ fn esc_in_the_history_list_closes_it() {
 fn ctrl_c_still_quits_from_the_history_list() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, true, false),
+        map_key_event(event, false, false, false, false, false, false, true, false, false),
         InputAction::Quit
     );
 }
@@ -473,7 +496,47 @@ fn a_stray_key_in_the_cookies_popup_is_ignored() {
 fn ctrl_c_still_quits_from_the_cookies_popup() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, false, true),
+        map_key_event(event, false, false, false, false, false, false, false, true, false),
+        InputAction::Quit
+    );
+}
+
+#[test]
+fn arrows_in_the_settings_panel_move_the_focus() {
+    assert_eq!(
+        settings_mode(KeyCode::Down),
+        InputAction::SettingsSelectNext
+    );
+    assert_eq!(settings_mode(KeyCode::Up), InputAction::SettingsSelectPrev);
+}
+
+#[test]
+fn vim_keys_in_the_settings_panel_move_the_focus() {
+    assert_eq!(
+        settings_mode(KeyCode::Char('j')),
+        InputAction::SettingsSelectNext
+    );
+    assert_eq!(
+        settings_mode(KeyCode::Char('k')),
+        InputAction::SettingsSelectPrev
+    );
+}
+
+#[test]
+fn esc_in_the_settings_panel_closes_it() {
+    assert_eq!(settings_mode(KeyCode::Esc), InputAction::SettingsClose);
+}
+
+#[test]
+fn a_stray_key_in_the_settings_panel_is_ignored() {
+    assert_eq!(settings_mode(KeyCode::Enter), InputAction::Disarm);
+}
+
+#[test]
+fn ctrl_c_still_quits_from_the_settings_panel() {
+    let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(
+        map_key_event(event, false, false, false, false, false, false, false, false, true),
         InputAction::Quit
     );
 }

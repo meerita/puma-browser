@@ -105,7 +105,7 @@ const REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "settings",
         aliases: &["config"],
-        description: "open browser settings (coming soon)",
+        description: "open the browser settings panel",
         takes_argument: false,
         kind: CommandKind::Settings,
     },
