@@ -4,16 +4,17 @@
 // @created meerita <meerita@icloud.com>
 
 use std::path::Path;
+use std::sync::Arc;
 
 use tempfile::tempdir;
 
-use browser_core::{ConfigStore, CookiePolicy, HistoryMode};
+use browser_core::{ConfigStore, CookiePolicy, CookieScope, HistoryMode, NavigationController};
 use browser_storage::{load_config, BrowserConfig, SqliteStorage};
 
 use super::{
     copy_on_select_enabled, force_osc52_enabled, resolve_cookie_policy, resolve_history_mode,
-    resolve_mode, resolve_setting, resolve_toggle, search_enabled, unwrap_tracking_enabled,
-    ResolvedMode, COOKIES_FIRST_PARTY_KEY, COPY_ON_SELECT_KEY,
+    resolve_mode, resolve_search_engine, resolve_setting, resolve_toggle, search_enabled,
+    unwrap_tracking_enabled, ResolvedMode, COOKIES_FIRST_PARTY_KEY, COPY_ON_SELECT_KEY,
 };
 
 /// Loads a config whose `[cookies]` section carries the given scope words.
@@ -335,4 +336,76 @@ fn a_stored_toggle_read_through_the_config_store_key_resolves() {
         .expect("the config value must read back");
     let resolved = resolve_toggle(stored.as_deref(), None, copy_on_select_enabled);
     assert!(!resolved.value);
+}
+
+/// A shared in-memory store the controller writes through and the resolver reads back, standing
+/// in for the SQLite file the panel and the next startup both open.
+fn shared_store() -> Arc<SqliteStorage> {
+    Arc::new(SqliteStorage::open_in_memory().expect("in-memory SQLite must open and migrate"))
+}
+
+#[test]
+fn a_checkbox_persisted_through_the_controller_is_read_back_by_the_resolver() {
+    let storage = shared_store();
+    let controller = NavigationController::new().with_config_store(storage.clone());
+
+    controller
+        .persist_setting(COPY_ON_SELECT_KEY, "false")
+        .expect("the checkbox value must persist through the store");
+
+    let stored = storage
+        .config_value(COPY_ON_SELECT_KEY)
+        .expect("the value must read back from the same store");
+    let resolved = resolve_toggle(stored.as_deref(), None, copy_on_select_enabled);
+    assert!(!resolved.value);
+}
+
+#[test]
+fn a_cookie_policy_set_through_the_controller_is_read_back_above_the_toml_value() {
+    let storage = shared_store();
+    let mut controller = NavigationController::new().with_config_store(storage.clone());
+
+    controller
+        .set_global_cookie_policy(CookieScope::FirstParty, CookiePolicy::Allow)
+        .expect("the global cookie policy must apply and persist");
+
+    // The panel-written store value must win over the TOML first-party value, while the
+    // third-party scope, absent from the store, keeps the TOML value.
+    let config = config_with_cookies("session", "session");
+    let pair = resolve_cookie_policy(&config, Some(storage.as_ref()));
+    assert_eq!(pair.first_party, CookiePolicy::Allow);
+    assert_eq!(pair.third_party, CookiePolicy::Session);
+}
+
+#[test]
+fn a_search_engine_set_through_the_controller_is_read_back_by_the_resolver() {
+    let storage = shared_store();
+    let mut controller = NavigationController::new().with_config_store(storage.clone());
+
+    controller
+        .set_search_engine("https://roundtrip.test/".to_string(), "qq".to_string())
+        .expect("a valid search engine must apply and persist");
+
+    let engine = resolve_search_engine(Some(storage.as_ref()));
+    assert_eq!(engine.base_url(), "https://roundtrip.test/");
+    assert_eq!(engine.query_parameter(), "qq");
+}
+
+#[test]
+fn a_panel_written_toggle_loses_to_an_env_override() {
+    let storage = shared_store();
+    let controller = NavigationController::new().with_config_store(storage.clone());
+
+    controller
+        .persist_setting(COPY_ON_SELECT_KEY, "false")
+        .expect("the checkbox value must persist through the store");
+
+    // The store value written by the panel is overridden by a PUMA_* environment variable and
+    // reported as environment-fixed, confirming the store sits below env in the precedence chain.
+    let stored = storage
+        .config_value(COPY_ON_SELECT_KEY)
+        .expect("the value must read back from the same store");
+    let resolved = resolve_toggle(stored.as_deref(), Some("true"), copy_on_select_enabled);
+    assert!(resolved.value);
+    assert!(resolved.env_overridden);
 }

@@ -1992,8 +1992,10 @@ fn draw_message(frame: &mut Frame, area: Rect, message: &str) {
 /// The panel's top heading.
 const SETTINGS_HEADING: &str = "Settings";
 
-/// The controls line shown at the foot of the panel.
-const SETTINGS_CONTROLS_HINT: &str = "↑↓ move · Esc close";
+/// The controls legend shown at the foot of the panel, covering every row type: moving the
+/// focus, toggling a checkbox, cycling a radio, editing a text field, and leaving.
+const SETTINGS_CONTROLS_HINT: &str =
+    "↑↓ move · Space toggle · ←→ cycle · type to edit · Esc revert/close";
 
 /// The suffix marking a row whose value an environment variable fixes for the session.
 const ENV_OVERRIDE_NOTE: &str = " (set by environment)";
