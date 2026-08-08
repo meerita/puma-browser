@@ -30,6 +30,34 @@ const V1_SCHEMA: &str = "
     PRAGMA user_version = 1;
 ";
 
+/// The migration-2 schema, applied directly to a raw connection so a test can simulate a
+/// version-2 database that predates the config table and then upgrade it.
+const V2_SCHEMA: &str = "
+    CREATE TABLE pages (
+      id             INTEGER PRIMARY KEY,
+      url            TEXT    NOT NULL UNIQUE,
+      host           TEXT    NOT NULL,
+      title          TEXT,
+      visit_count    INTEGER NOT NULL DEFAULT 0,
+      typed_count    INTEGER NOT NULL DEFAULT 0,
+      first_visit_at INTEGER NOT NULL,
+      last_visit_at  INTEGER NOT NULL
+    );
+    CREATE TABLE visits (
+      id         INTEGER PRIMARY KEY,
+      page_id    INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+      visited_at INTEGER NOT NULL,
+      was_typed  INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE site_cookie_policies (
+      id         INTEGER PRIMARY KEY,
+      domain     TEXT    NOT NULL UNIQUE,
+      policy     TEXT    NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    PRAGMA user_version = 2;
+";
+
 /// Opens a prepared in-memory database for a test, panicking with a clear message if
 /// the substrate itself fails to open.
 fn open_prepared() -> SqliteStorage {
@@ -57,7 +85,7 @@ fn opening_in_memory_migrates_to_the_current_version() {
     let storage = open_prepared();
     assert_eq!(
         storage.schema_version().expect("schema version must read"),
-        2
+        3
     );
 }
 
@@ -72,7 +100,7 @@ fn re_running_migrations_on_a_current_database_is_a_no_op() {
     let version: i64 = connection
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .expect("user_version pragma must read");
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 #[test]
@@ -85,7 +113,56 @@ fn site_cookie_policies_table_has_the_expected_columns() {
 }
 
 #[test]
-fn upgrading_a_version_one_database_reaches_version_two_and_keeps_history_data() {
+fn config_table_has_the_expected_columns() {
+    let storage = open_prepared();
+    assert_eq!(
+        column_names(&storage, "config"),
+        ["key", "value", "updated_at"]
+    );
+}
+
+#[test]
+fn upgrading_a_version_two_database_reaches_version_three_and_keeps_site_policy_data() {
+    let connection = Connection::open_in_memory().expect("in-memory connection must open");
+    connection
+        .execute_batch(V2_SCHEMA)
+        .expect("version-2 schema must apply");
+    connection
+        .execute(
+            "INSERT INTO site_cookie_policies (domain, policy, created_at) \
+             VALUES ('example.com', 'session', 0);",
+            [],
+        )
+        .expect("site policy insert must succeed");
+
+    run_migrations(&connection).expect("upgrade migrations must succeed");
+
+    let version: i64 = connection
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .expect("user_version pragma must read");
+    assert_eq!(version, 3, "the database must reach version 3");
+    let config_table_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name = 'config';",
+            [],
+            |row| row.get(0),
+        )
+        .expect("sqlite_master must read");
+    assert_eq!(config_table_count, 1, "the new config table must exist");
+    let policy_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM site_cookie_policies;", [], |row| {
+            row.get(0)
+        })
+        .expect("site policy count must read");
+    assert_eq!(
+        policy_count, 1,
+        "existing site-policy data must survive the upgrade"
+    );
+}
+
+#[test]
+fn upgrading_a_version_one_database_reaches_the_current_version_and_keeps_history_data() {
     let connection = Connection::open_in_memory().expect("in-memory connection must open");
     connection
         .execute_batch(V1_SCHEMA)
@@ -109,7 +186,7 @@ fn upgrading_a_version_one_database_reaches_version_two_and_keeps_history_data()
     let version: i64 = connection
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .expect("user_version pragma must read");
-    assert_eq!(version, 2, "the database must reach version 2");
+    assert_eq!(version, 3, "the database must reach the current version");
     let cookie_table_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master \
