@@ -72,6 +72,7 @@ pub struct NavigationController {
     site_policies: Option<Arc<dyn SitePolicyStore + Send + Sync>>,
     site_exceptions: HashMap<String, CookiePolicy>,
     cookie_records: Vec<CookieRecord>,
+    search_engine: SearchEngine,
 }
 
 impl fmt::Debug for NavigationController {
@@ -92,6 +93,7 @@ impl fmt::Debug for NavigationController {
             .field("has_site_policy_store", &self.site_policies.is_some())
             .field("site_exceptions", &self.site_exceptions)
             .field("cookie_records", &self.cookie_records)
+            .field("search_engine", &self.search_engine)
             .finish()
     }
 }
@@ -141,6 +143,7 @@ impl NavigationController {
             site_policies: None,
             site_exceptions: HashMap::new(),
             cookie_records: Vec::new(),
+            search_engine: SearchEngine::default(),
         }
     }
 
@@ -161,6 +164,21 @@ impl NavigationController {
         self.site_policies = store;
         self.site_exceptions = initial_exceptions.into_iter().collect();
         self
+    }
+
+    /// Seeds the search engine `/search` sends queries to.
+    ///
+    /// A consuming builder mirroring [`with_cookies`](Self::with_cookies) so startup can
+    /// override the DuckDuckGo lite default without reshuffling the other constructors. A
+    /// caller that never calls this keeps [`SearchEngine::default`].
+    pub fn with_search_engine(mut self, search_engine: SearchEngine) -> Self {
+        self.search_engine = search_engine;
+        self
+    }
+
+    /// The search engine `/search` sends queries to, for the caller to read live.
+    pub fn search_engine(&self) -> &SearchEngine {
+        &self.search_engine
     }
 
     /// Fetch and parse the document at `url`, then hold it as the current page.

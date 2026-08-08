@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use browser_core::{
     BrowserUrl, CookiePolicy, CoreError, HistoryEntryId, NavigationController, NavigationSource,
-    NavigationTarget, SearchEngine,
+    NavigationTarget,
 };
 use browser_css::{Color, Emphasis};
 use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkSpan};
@@ -792,7 +792,7 @@ impl TerminalApp {
             ui_state.set_transient_message("usage: /search <query>".to_string(), now);
             return CommandOutcome::None;
         }
-        match SearchEngine::default().result_url(query) {
+        match self.controller.search_engine().result_url(query) {
             Ok(url) => CommandOutcome::Load(self.start_load(url)),
             Err(_) => {
                 ui_state.set_transient_message("could not build search URL".to_string(), now);
