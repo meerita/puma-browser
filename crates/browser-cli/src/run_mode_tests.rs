@@ -7,12 +7,13 @@ use std::path::Path;
 
 use tempfile::tempdir;
 
-use browser_core::{CookiePolicy, HistoryMode};
-use browser_storage::{load_config, BrowserConfig};
+use browser_core::{ConfigStore, CookiePolicy, HistoryMode};
+use browser_storage::{load_config, BrowserConfig, SqliteStorage};
 
 use super::{
     copy_on_select_enabled, force_osc52_enabled, resolve_cookie_policy, resolve_history_mode,
-    resolve_mode, search_enabled, unwrap_tracking_enabled, ResolvedMode,
+    resolve_mode, resolve_setting, resolve_toggle, search_enabled, unwrap_tracking_enabled,
+    ResolvedMode, COOKIES_FIRST_PARTY_KEY, COPY_ON_SELECT_KEY,
 };
 
 /// Loads a config whose `[cookies]` section carries the given scope words.
@@ -246,7 +247,7 @@ fn an_unrecognized_mode_resolves_to_persistent() {
 #[test]
 fn configured_scope_words_resolve_to_the_matching_policy_pair() {
     let config = config_with_cookies("session", "allow");
-    let pair = resolve_cookie_policy(&config);
+    let pair = resolve_cookie_policy(&config, None);
     assert_eq!(pair.first_party, CookiePolicy::Session);
     assert_eq!(pair.third_party, CookiePolicy::Allow);
 }
@@ -254,14 +255,84 @@ fn configured_scope_words_resolve_to_the_matching_policy_pair() {
 #[test]
 fn an_unrecognized_scope_word_resolves_to_reject_for_that_scope() {
     let config = config_with_cookies("nonsense", "allow");
-    let pair = resolve_cookie_policy(&config);
+    let pair = resolve_cookie_policy(&config, None);
     assert_eq!(pair.first_party, CookiePolicy::Reject);
     assert_eq!(pair.third_party, CookiePolicy::Allow);
 }
 
 #[test]
 fn an_absent_cookies_section_resolves_to_reject_in_both_scopes() {
-    let pair = resolve_cookie_policy(&BrowserConfig::default());
+    let pair = resolve_cookie_policy(&BrowserConfig::default(), None);
     assert_eq!(pair.first_party, CookiePolicy::Reject);
     assert_eq!(pair.third_party, CookiePolicy::Reject);
+}
+
+#[test]
+fn a_stored_cookie_policy_overrides_the_toml_value() {
+    let config = config_with_cookies("session", "allow");
+    let storage = SqliteStorage::open_in_memory().expect("in-memory SQLite must open");
+    storage
+        .set_config_value(COOKIES_FIRST_PARTY_KEY, "reject")
+        .expect("the config value must persist");
+    let pair = resolve_cookie_policy(&config, Some(&storage));
+    assert_eq!(pair.first_party, CookiePolicy::Reject);
+    assert_eq!(pair.third_party, CookiePolicy::Allow);
+}
+
+#[test]
+fn the_config_store_value_overrides_the_toml_value() {
+    assert_eq!(
+        resolve_setting("default", Some("toml"), Some("store"), None),
+        "store"
+    );
+}
+
+#[test]
+fn the_env_value_wins_over_the_config_store_value() {
+    assert_eq!(
+        resolve_setting("default", Some("toml"), Some("store"), Some("env")),
+        "env"
+    );
+}
+
+#[test]
+fn an_absent_value_in_every_layer_yields_the_built_in_default() {
+    assert_eq!(
+        resolve_setting("default", None, None, None::<&str>),
+        "default"
+    );
+}
+
+#[test]
+fn a_stored_toggle_value_applies_when_no_env_variable_is_set() {
+    let resolved = resolve_toggle(Some("false"), None, copy_on_select_enabled);
+    assert!(!resolved.value);
+    assert!(!resolved.env_overridden);
+}
+
+#[test]
+fn an_env_toggle_value_wins_over_the_stored_value_and_is_reported_as_overridden() {
+    let resolved = resolve_toggle(Some("false"), Some("true"), copy_on_select_enabled);
+    assert!(resolved.value);
+    assert!(resolved.env_overridden);
+}
+
+#[test]
+fn a_toggle_with_no_stored_or_env_value_takes_the_built_in_default() {
+    let resolved = resolve_toggle(None, None, copy_on_select_enabled);
+    assert!(resolved.value);
+    assert!(!resolved.env_overridden);
+}
+
+#[test]
+fn a_stored_toggle_read_through_the_config_store_key_resolves() {
+    let storage = SqliteStorage::open_in_memory().expect("in-memory SQLite must open");
+    storage
+        .set_config_value(COPY_ON_SELECT_KEY, "false")
+        .expect("the config value must persist");
+    let stored = storage
+        .config_value(COPY_ON_SELECT_KEY)
+        .expect("the config value must read back");
+    let resolved = resolve_toggle(stored.as_deref(), None, copy_on_select_enabled);
+    assert!(!resolved.value);
 }

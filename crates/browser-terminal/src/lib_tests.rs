@@ -11,9 +11,9 @@ use super::{
     action_refreshes_suggestions, advance_link_focus, cell_is_selected,
     clamped_document_coordinate, copied_message, decode_fragment, document_coordinate,
     handle_mouse_event, max_scroll_offset, parse_history_request, resolve_anchor_row,
-    retreat_link_focus, sanitize_fragment_for_display, CachedPage, CommandOutcome, HistoryRequest,
-    InputAction, LoadState, ScrollState, TerminalApp, TerminalSettings, TextSelection, UiState,
-    ViewState, ViewportBounds, BODY_AREA_TOP_ROW, CONTENT_PADDING,
+    retreat_link_focus, sanitize_fragment_for_display, CachedPage, CommandOutcome, EnvOverrides,
+    HistoryRequest, InputAction, LoadState, ScrollState, TerminalApp, TerminalSettings,
+    TextSelection, UiState, ViewState, ViewportBounds, BODY_AREA_TOP_ROW, CONTENT_PADDING,
 };
 use browser_core::{
     CookiePolicyPair, HistoryMode, HistorySettings, HistoryStore, NavigationController,
@@ -68,6 +68,7 @@ fn terminal_app_with_search(search_enabled: bool) -> TerminalApp {
             force_osc52: false,
             search_enabled,
             unwrap_tracking: true,
+            env_overridden: EnvOverrides::default(),
         },
     )
 }
@@ -81,6 +82,7 @@ fn terminal_app_with_unwrap_tracking(unwrap_tracking: bool) -> TerminalApp {
             force_osc52: false,
             search_enabled: true,
             unwrap_tracking,
+            env_overridden: EnvOverrides::default(),
         },
     )
 }
@@ -711,6 +713,7 @@ fn test_settings() -> TerminalSettings {
         force_osc52: false,
         search_enabled: true,
         unwrap_tracking: true,
+        env_overridden: EnvOverrides::default(),
     }
 }
 

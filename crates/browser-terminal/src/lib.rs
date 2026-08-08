@@ -158,8 +158,24 @@ pub struct TerminalApp {
 /// from the palette and rejected on dispatch.
 /// `unwrap_tracking` gates tracking-redirect unwrapping: when it is true a navigation to a
 /// known tracker wrapper goes straight to the decoded destination instead of the wrapper.
+/// `env_overridden` records which toggles a `PUMA_*` environment variable currently fixes
+/// for the session, so the settings panel can render those rows read-only.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalSettings {
+    pub copy_on_select: bool,
+    pub force_osc52: bool,
+    pub search_enabled: bool,
+    pub unwrap_tracking: bool,
+    pub env_overridden: EnvOverrides,
+}
+
+/// Which toggle settings an environment variable currently overrides for the session.
+///
+/// A `true` field means a `PUMA_*` variable is set for that toggle, so its live value is
+/// fixed for the run and the settings panel shows the row read-only rather than editable.
+/// The default is all-false: with no variables set, every toggle is editable.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnvOverrides {
     pub copy_on_select: bool,
     pub force_osc52: bool,
     pub search_enabled: bool,
@@ -231,6 +247,7 @@ impl TerminalApp {
             force_osc52,
             search_enabled,
             unwrap_tracking: _,
+            env_overridden: _,
         } = self.settings;
         let mut scroll = ScrollState::new();
         let mut selection = TextSelection::new();

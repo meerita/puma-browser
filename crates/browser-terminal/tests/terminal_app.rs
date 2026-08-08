@@ -4,7 +4,7 @@
 // @created meerita <meerita@icloud.com>
 
 use browser_core::NavigationController;
-use browser_terminal::{TerminalApp, TerminalSettings, ViewState};
+use browser_terminal::{EnvOverrides, TerminalApp, TerminalSettings, ViewState};
 
 fn settings() -> TerminalSettings {
     TerminalSettings {
@@ -12,6 +12,7 @@ fn settings() -> TerminalSettings {
         force_osc52: false,
         search_enabled: true,
         unwrap_tracking: true,
+        env_overridden: EnvOverrides::default(),
     }
 }
 
