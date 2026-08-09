@@ -15,6 +15,7 @@ mod history_view;
 mod input;
 mod palette_menu;
 mod selection;
+mod settings_view;
 mod title_bar;
 mod ui_state;
 mod view_state;
@@ -29,7 +30,7 @@ use std::time::Instant;
 
 use browser_core::{
     BrowserUrl, CookiePolicy, CoreError, HistoryEntryId, NavigationController, NavigationSource,
-    NavigationTarget, SearchEngine,
+    NavigationTarget,
 };
 use browser_css::{Color, Emphasis};
 use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkSpan};
@@ -69,9 +70,14 @@ use history_view::{
 use input::{map_key_event, quit_armed_after, refresh_armed_after, InputAction};
 use palette_menu::{compose_palette_menu, PaletteMenu, MENU_MAX_ROWS};
 use selection::TextSelection;
+use settings_view::{
+    build_settings_model, checkbox_config_key, cookie_scope, CycleDirection, RadioOption,
+    SettingId, SettingsControl, SettingsModel, SettingsRow,
+};
 use title_bar::compose_title_bar;
-use ui_state::UiState;
+use ui_state::{SettingsEscOutcome, SettingsTextSave, UiState};
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use viewport::{max_scroll_offset, scroll_percentage, ScrollState, ViewportBounds};
 
 /// Rows consumed by the five fixed chrome zones (title + sep + cmd + sep + hints).
@@ -123,6 +129,40 @@ enum HistoryRequest {
     ClearSite(String),
 }
 
+/// A settings-panel change the user asked for with a key while a row is focused: toggle the
+/// focused checkbox, or move the focused radio group's selection one option in a direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsMutation {
+    Toggle,
+    CyclePrev,
+    CycleNext,
+}
+
+/// The settings mutation a key action requests, or `None` when it is not a settings mutation.
+/// Mirrors the palette and suggestion key maps: a small pure classifier the event loop reads.
+fn settings_mutation_for(action: InputAction) -> Option<SettingsMutation> {
+    match action {
+        InputAction::SettingsToggle => Some(SettingsMutation::Toggle),
+        InputAction::SettingsCyclePrev => Some(SettingsMutation::CyclePrev),
+        InputAction::SettingsCycleNext => Some(SettingsMutation::CycleNext),
+        _ => None,
+    }
+}
+
+/// The message shown when the user tries to change a row a `PUMA_*` environment variable fixes
+/// for the session.
+const SETTINGS_ENV_LOCKED: &str = "This setting is fixed by an environment variable";
+
+/// The message shown when a setting changed for the running session but could not be saved.
+const SETTINGS_SAVE_FAILED: &str = "Setting changed for this session but could not be saved";
+
+/// The confirmation shown briefly after a settings text field saves.
+const SETTINGS_TEXT_SAVED: &str = "Setting saved";
+
+/// The inline note shown on a settings text row when its value was rejected and not saved. The
+/// message names no internals, only that the value is invalid.
+const SETTINGS_TEXT_INVALID: &str = "invalid value, not saved";
+
 /// The number of address-bar suggestions requested from the index on each edit.
 const ADDRESS_SUGGESTION_LIMIT: usize = 8;
 
@@ -158,8 +198,24 @@ pub struct TerminalApp {
 /// from the palette and rejected on dispatch.
 /// `unwrap_tracking` gates tracking-redirect unwrapping: when it is true a navigation to a
 /// known tracker wrapper goes straight to the decoded destination instead of the wrapper.
+/// `env_overridden` records which toggles a `PUMA_*` environment variable currently fixes
+/// for the session, so the settings panel can render those rows read-only.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalSettings {
+    pub copy_on_select: bool,
+    pub force_osc52: bool,
+    pub search_enabled: bool,
+    pub unwrap_tracking: bool,
+    pub env_overridden: EnvOverrides,
+}
+
+/// Which toggle settings an environment variable currently overrides for the session.
+///
+/// A `true` field means a `PUMA_*` variable is set for that toggle, so its live value is
+/// fixed for the run and the settings panel shows the row read-only rather than editable.
+/// The default is all-false: with no variables set, every toggle is editable.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnvOverrides {
     pub copy_on_select: bool,
     pub force_osc52: bool,
     pub search_enabled: bool,
@@ -226,12 +282,10 @@ impl TerminalApp {
     }
 
     async fn drive(&mut self, terminal: &mut AppTerminal) -> Result<(), TerminalError> {
-        let TerminalSettings {
-            copy_on_select,
-            force_osc52,
-            search_enabled,
-            unwrap_tracking: _,
-        } = self.settings;
+        // Only the initial search-enabled value is read here to seed the palette filter; the
+        // copy-on-select and force-osc52 settings are read live from `self.settings` at each
+        // mouse release so a panel toggle changes clipboard behavior at once.
+        let TerminalSettings { search_enabled, .. } = self.settings;
         let mut scroll = ScrollState::new();
         let mut selection = TextSelection::new();
         let mut ui_state = UiState::new(search_enabled);
@@ -314,6 +368,7 @@ impl TerminalApp {
             let mut reload_url: Option<BrowserUrl> = None;
             let mut navigate_to_url: Option<String> = None;
             let mut history_key_action: Option<InputAction> = None;
+            let mut settings_mutation: Option<SettingsMutation> = None;
 
             if let LoadState::Active {
                 ref mut handle,
@@ -352,6 +407,9 @@ impl TerminalApp {
                                 let address_suggestions_active = ui_state.has_address_suggestions();
                                 let in_history = ui_state.is_in_history_mode();
                                 let in_cookies = ui_state.is_in_cookies_mode();
+                                let in_settings = ui_state.is_in_settings_mode();
+                                let settings_text_field_focused =
+                                    ui_state.is_settings_text_field_focused();
                                 let action = map_key_event(
                                     key,
                                     ui_state.quit_armed,
@@ -362,6 +420,8 @@ impl TerminalApp {
                                     address_suggestions_active,
                                     in_history,
                                     in_cookies,
+                                    in_settings,
+                                    settings_text_field_focused,
                                 );
                                 if matches!(action, InputAction::Quit) {
                                     return Ok(());
@@ -376,6 +436,7 @@ impl TerminalApp {
                                 } else {
                                     apply_command_action(action, &mut ui_state);
                                 }
+                                apply_settings_text_action(action, &mut ui_state, now);
                                 if action_refreshes_suggestions(action) {
                                     self.refresh_address_suggestions(&mut ui_state);
                                 }
@@ -389,6 +450,7 @@ impl TerminalApp {
                                 ) {
                                     history_key_action = Some(action);
                                 }
+                                settings_mutation = settings_mutation_for(action);
                                 if let Some(link_url) = handle_navigation_action(
                                     action,
                                     &mut self.controller,
@@ -421,8 +483,8 @@ impl TerminalApp {
                                     &mut navigate_to_url,
                                     &mut ui_state,
                                     now,
-                                    copy_on_select,
-                                    force_osc52,
+                                    self.settings.copy_on_select,
+                                    self.settings.force_osc52,
                                 );
                             }
                             _ => {}
@@ -497,6 +559,18 @@ impl TerminalApp {
                 }
             }
 
+            // Apply a settings-panel mutation: flip a checkbox or cycle a radio, applying the
+            // change to the running session and persisting it through the controller.
+            if let Some(mutation) = settings_mutation {
+                self.apply_settings_mutation(mutation, &mut ui_state, now);
+            }
+
+            // Reconcile the text-field draft with the focused row (seed on entry, commit on
+            // leave) and run the debounced auto-save. Both run every iteration so the 80ms tick
+            // drives the debounce even when no key was pressed.
+            self.reconcile_settings_text_field(&mut ui_state, now);
+            self.maybe_autosave_settings_text(&mut ui_state, now);
+
             // Apply page refresh — re-fetch the current URL using the same load pipeline.
             if let Some(url) = reload_url {
                 load_state = self.start_load(url);
@@ -545,6 +619,181 @@ impl TerminalApp {
             ),
             _ => None,
         }
+    }
+
+    /// Applies a settings-panel mutation to the focused row: a checkbox toggle or a radio
+    /// cycle. The change takes effect on the running session at once and is persisted through
+    /// the controller. A row a `PUMA_*` environment variable fixes refuses the change and
+    /// explains why, leaving both the live value and the rendered row unchanged.
+    fn apply_settings_mutation(
+        &mut self,
+        mutation: SettingsMutation,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) {
+        let env_overridden = match ui_state.focused_settings_row() {
+            Some(row) => row.env_overridden,
+            None => return,
+        };
+        if env_overridden {
+            ui_state.set_transient_message(SETTINGS_ENV_LOCKED.to_string(), now);
+            return;
+        }
+        match mutation {
+            SettingsMutation::Toggle => self.apply_settings_toggle(ui_state, now),
+            SettingsMutation::CyclePrev => {
+                self.apply_settings_cycle(ui_state, CycleDirection::Prev, now)
+            }
+            SettingsMutation::CycleNext => {
+                self.apply_settings_cycle(ui_state, CycleDirection::Next, now)
+            }
+        }
+    }
+
+    /// Toggles the focused checkbox: flips its live setting, updates the rendered row, and
+    /// persists the new value under its config key. A no-op when the focused row is not a
+    /// checkbox, so a toggle key on a radio or text row does nothing.
+    fn apply_settings_toggle(&mut self, ui_state: &mut UiState, now: Instant) {
+        let Some((id, checked)) = ui_state.toggle_focused_checkbox() else {
+            return;
+        };
+        self.apply_checkbox_setting(id, checked, ui_state);
+        let Some(key) = checkbox_config_key(id) else {
+            return;
+        };
+        let encoded = if checked { "true" } else { "false" };
+        if self.controller.persist_setting(key, encoded).is_err() {
+            ui_state.set_transient_message(SETTINGS_SAVE_FAILED.to_string(), now);
+        }
+    }
+
+    /// Writes a checkbox's new value into the matching live setting. The search-enabled flag is
+    /// mirrored into the UI state so the palette filter drops or restores `/search` at once.
+    fn apply_checkbox_setting(&mut self, id: SettingId, checked: bool, ui_state: &mut UiState) {
+        match id {
+            SettingId::CopyOnSelect => self.settings.copy_on_select = checked,
+            SettingId::ForceOsc52 => self.settings.force_osc52 = checked,
+            SettingId::SearchEnabled => {
+                self.settings.search_enabled = checked;
+                ui_state.set_search_enabled(checked);
+            }
+            SettingId::UnwrapTracking => self.settings.unwrap_tracking = checked,
+            SettingId::CookiesFirstParty
+            | SettingId::CookiesThirdParty
+            | SettingId::SearchBaseUrl
+            | SettingId::SearchQueryParameter => {}
+        }
+    }
+
+    /// Cycles the focused radio group's selection, applying the chosen cookie policy to the
+    /// running session and persisting it. The controller prunes the jar when the first-party
+    /// default tightens to reject. A no-op when the focused row is not a cookie radio.
+    fn apply_settings_cycle(
+        &mut self,
+        ui_state: &mut UiState,
+        direction: CycleDirection,
+        now: Instant,
+    ) {
+        let Some((id, policy)) = ui_state.cycle_focused_radio(direction) else {
+            return;
+        };
+        let Some(scope) = cookie_scope(id) else {
+            return;
+        };
+        if self
+            .controller
+            .set_global_cookie_policy(scope, policy)
+            .is_err()
+        {
+            ui_state.set_transient_message(SETTINGS_SAVE_FAILED.to_string(), now);
+        }
+    }
+
+    /// Keeps the active text-field draft in step with the focused row. Focusing a text field
+    /// seeds its draft from the shown value; leaving a text field, or moving straight to another
+    /// one, commits the field being left before the new one is seeded. Anything outside a text
+    /// row (a control row or a closed panel) leaves no draft behind.
+    fn reconcile_settings_text_field(&mut self, ui_state: &mut UiState, now: Instant) {
+        if !ui_state.is_in_settings_mode() {
+            ui_state.clear_settings_text_edit();
+            return;
+        }
+        let focused = ui_state.focused_settings_text_id();
+        let editing = ui_state.settings_text_edit_id();
+        match (focused, editing) {
+            (Some(focused_id), Some(editing_id)) if focused_id == editing_id => {}
+            (Some(focused_id), Some(_)) => {
+                self.commit_settings_text_field(ui_state, now);
+                ui_state.begin_settings_text_edit(focused_id, now);
+            }
+            (Some(focused_id), None) => ui_state.begin_settings_text_edit(focused_id, now),
+            (None, Some(_)) => self.commit_settings_text_field(ui_state, now),
+            (None, None) => {}
+        }
+    }
+
+    /// Saves the field being left when its draft is dirty, then drops the draft. A rejected save
+    /// leaves the stored value untouched, so dropping the draft reverts the row to the last saved
+    /// value rather than keeping an invalid edit that focus has already moved away from.
+    fn commit_settings_text_field(&mut self, ui_state: &mut UiState, now: Instant) {
+        if let Some(save) = ui_state.settings_text_pending_save() {
+            self.persist_settings_text(save, ui_state, now);
+        }
+        ui_state.clear_settings_text_edit();
+    }
+
+    /// Runs the debounced auto-save: when the focused field has been idle long enough, its draft
+    /// is validated, applied, and persisted. The draft stays in place so editing continues.
+    fn maybe_autosave_settings_text(&mut self, ui_state: &mut UiState, now: Instant) {
+        let Some(save) = ui_state.settings_text_due_save(now) else {
+            return;
+        };
+        self.persist_settings_text(save, ui_state, now);
+    }
+
+    /// Validates and persists a settings text field through the controller. The search engine is
+    /// validated by [`NavigationController::set_search_engine`], which rejects a `file://` or
+    /// otherwise malformed base URL, so an invalid value is never applied or stored. On success
+    /// the stored values are reflected back onto the rows and the field is marked clean; on
+    /// rejection the field keeps its draft and shows an inline note.
+    fn persist_settings_text(
+        &mut self,
+        save: SettingsTextSave,
+        ui_state: &mut UiState,
+        now: Instant,
+    ) {
+        let (base_url, query_parameter) = match save.id {
+            SettingId::SearchBaseUrl => (
+                save.value,
+                self.controller
+                    .search_engine()
+                    .query_parameter()
+                    .to_string(),
+            ),
+            SettingId::SearchQueryParameter => (
+                self.controller.search_engine().base_url().to_string(),
+                save.value,
+            ),
+            SettingId::CookiesFirstParty
+            | SettingId::CookiesThirdParty
+            | SettingId::CopyOnSelect
+            | SettingId::ForceOsc52
+            | SettingId::SearchEnabled
+            | SettingId::UnwrapTracking => return,
+        };
+        if self
+            .controller
+            .set_search_engine(base_url, query_parameter)
+            .is_err()
+        {
+            ui_state.mark_settings_text_save_failed(SETTINGS_TEXT_INVALID.to_string());
+            return;
+        }
+        let engine = self.controller.search_engine();
+        let saved_base_url = engine.base_url().to_string();
+        let saved_query_parameter = engine.query_parameter().to_string();
+        ui_state.mark_settings_text_saved(&saved_base_url, &saved_query_parameter);
+        ui_state.set_transient_message(SETTINGS_TEXT_SAVED.to_string(), now);
     }
 
     /// Routes a submitted command-bar buffer. A buffer whose trimmed text starts with `/`
@@ -739,7 +988,12 @@ impl TerminalApp {
                 CommandOutcome::None
             }
             CommandKind::Settings => {
-                ui_state.set_transient_message("Settings panel coming soon".to_string(), now);
+                let model = build_settings_model(
+                    &self.settings,
+                    self.controller.cookie_policy(),
+                    self.controller.search_engine(),
+                );
+                ui_state.enter_settings_mode(model);
                 CommandOutcome::None
             }
         }
@@ -792,7 +1046,7 @@ impl TerminalApp {
             ui_state.set_transient_message("usage: /search <query>".to_string(), now);
             return CommandOutcome::None;
         }
-        match SearchEngine::default().result_url(query) {
+        match self.controller.search_engine().result_url(query) {
             Ok(url) => CommandOutcome::Load(self.start_load(url)),
             Err(_) => {
                 ui_state.set_transient_message("could not build search URL".to_string(), now);
@@ -1277,20 +1531,23 @@ fn draw_frame(
         focused_url,
         ui_state,
     };
-    draw_body(
-        frame,
-        view,
-        page,
-        chunks[0],
-        scroll_offset,
-        &link_context,
-        selection_range,
-    );
-
-    draw_palette_popup(frame, chunks[0], ui_state);
-    draw_address_suggestions_popup(frame, chunks[0], ui_state);
-    draw_history_popup(frame, chunks[0], ui_state);
-    draw_cookies_popup(frame, chunks[0], ui_state);
+    if ui_state.is_in_settings_mode() {
+        draw_settings(frame, chunks[0], ui_state);
+    } else {
+        draw_body(
+            frame,
+            view,
+            page,
+            chunks[0],
+            scroll_offset,
+            &link_context,
+            selection_range,
+        );
+        draw_palette_popup(frame, chunks[0], ui_state);
+        draw_address_suggestions_popup(frame, chunks[0], ui_state);
+        draw_history_popup(frame, chunks[0], ui_state);
+        draw_cookies_popup(frame, chunks[0], ui_state);
+    }
 
     draw_separator(frame, chunks[1]);
 
@@ -1732,6 +1989,190 @@ fn draw_message(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(paragraph, area);
 }
 
+/// The panel's top heading.
+const SETTINGS_HEADING: &str = "Settings";
+
+/// The controls legend shown at the foot of the panel, covering every row type: moving the
+/// focus, toggling a checkbox, cycling a radio, editing a text field, and leaving.
+const SETTINGS_CONTROLS_HINT: &str =
+    "↑↓ move · Space toggle · ←→ cycle · type to edit · Esc revert/close";
+
+/// The suffix marking a row whose value an environment variable fixes for the session.
+const ENV_OVERRIDE_NOTE: &str = " (set by environment)";
+
+/// The marker shown before a settings text row's inline error after a rejected save.
+const SETTINGS_ERROR_MARKER: &str = "⚠";
+
+/// Renders the full-screen settings panel into `area`, listing every section and row with its
+/// current value. The focused row is reverse-highlighted and environment-fixed rows are dimmed
+/// and marked. Every string is a local, browser-owned value composed here, so no remote content
+/// or escape sequence reaches the terminal through this view.
+fn draw_settings(frame: &mut Frame, area: Rect, ui_state: &UiState) {
+    let Some(model) = ui_state.settings_model() else {
+        return;
+    };
+    let padded = Rect {
+        x: area.x.saturating_add(CONTENT_PADDING),
+        y: area.y,
+        width: area.width.saturating_sub(CONTENT_PADDING * 2),
+        height: area.height,
+    };
+    frame.render_widget(Clear, area);
+    let focus = ui_state.settings_focus();
+    let draft = ui_state.settings_text_draft();
+    let error = ui_state.settings_text_error();
+    let lines = settings_lines(model, focus, draft, error);
+    frame.render_widget(Paragraph::new(lines), padded);
+    // Place the terminal cursor in the focused text field's draft, the same way the command
+    // bar shows its cursor. Only an active text edit yields a position, so control rows never
+    // display a cursor.
+    if let Some((buffer, cursor_byte_offset)) = ui_state.settings_text_cursor() {
+        if let Some((cursor_x, cursor_y)) =
+            settings_text_cursor_position(model, focus, buffer, cursor_byte_offset, padded)
+        {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
+}
+
+/// The terminal cursor position for the focused text field's draft, or `None` when the focused
+/// row is not a text input. The column is the width of the row's label prefix plus the width of
+/// the draft up to the cursor; the row is the screen line the focused row renders on.
+fn settings_text_cursor_position(
+    model: &SettingsModel,
+    focus: usize,
+    buffer: &str,
+    cursor_byte_offset: usize,
+    area: Rect,
+) -> Option<(u16, u16)> {
+    let row = model.row_at(focus)?;
+    let SettingsControl::TextInput { .. } = &row.control else {
+        return None;
+    };
+    let line_index = focused_row_line_index(model, focus)?;
+    let prefix = format!("  {}:  ", row.label);
+    let prefix_cols = UnicodeWidthStr::width(prefix.as_str());
+    let before_cursor = buffer.get(..cursor_byte_offset).unwrap_or(buffer);
+    let cursor_cols = UnicodeWidthStr::width(before_cursor);
+    let cursor_x = area.x.saturating_add((prefix_cols + cursor_cols) as u16);
+    let cursor_y = area.y.saturating_add(line_index as u16);
+    Some((cursor_x, cursor_y))
+}
+
+/// The screen line index the focused row renders on, matching the line order [`settings_lines`]
+/// builds: a heading line, then for each section a blank line, a title line, and one line per
+/// row. `None` when `focus` is past the last row.
+fn focused_row_line_index(model: &SettingsModel, focus: usize) -> Option<usize> {
+    let mut line_index = 1;
+    let mut row_index = 0;
+    for section in &model.sections {
+        line_index += 2;
+        for _ in &section.rows {
+            if row_index == focus {
+                return Some(line_index);
+            }
+            line_index += 1;
+            row_index += 1;
+        }
+    }
+    None
+}
+
+/// Builds the panel's styled lines: a heading, then each section's title and rows, then a
+/// controls hint. Rows are numbered in a flat sequence so the focused index highlights the
+/// right one regardless of how the sections split them.
+fn settings_lines(
+    model: &SettingsModel,
+    focus: usize,
+    draft: Option<&str>,
+    error: Option<&str>,
+) -> Vec<Line<'static>> {
+    let heading_style = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'static>> =
+        vec![Line::styled(SETTINGS_HEADING.to_string(), heading_style)];
+    let mut row_index = 0;
+    for section in &model.sections {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::styled(section.title.clone(), heading_style));
+        for row in &section.rows {
+            let is_focused = row_index == focus;
+            // The draft and inline error belong to the focused text field only; every other row
+            // shows its stored value with no error.
+            let row_draft = if is_focused { draft } else { None };
+            let row_error = if is_focused { error } else { None };
+            lines.push(settings_row_line(row, is_focused, row_draft, row_error));
+            row_index += 1;
+        }
+    }
+    lines.push(Line::from(String::new()));
+    let hint_style = Style::default().fg(TerminalColor::DarkGray);
+    lines.push(Line::styled(SETTINGS_CONTROLS_HINT.to_string(), hint_style));
+    lines
+}
+
+/// Composes one row's line: an indented label and control state, the draft value when the row
+/// is the focused text field, an environment note when the row is fixed, an inline error after a
+/// rejected save, and the focus or environment style.
+fn settings_row_line(
+    row: &SettingsRow,
+    is_focused: bool,
+    draft: Option<&str>,
+    error: Option<&str>,
+) -> Line<'static> {
+    let mut text = format!("  {}", compose_settings_row_text(row, draft));
+    if row.env_overridden {
+        text.push_str(ENV_OVERRIDE_NOTE);
+    }
+    if let Some(message) = error {
+        text.push_str(&format!("  {SETTINGS_ERROR_MARKER} {message}"));
+    }
+    Line::styled(text, settings_row_style(row, is_focused))
+}
+
+/// The style for a settings row: focus reverses it, an environment-fixed row is dimmed, and
+/// every other row is plain. Focus wins over the environment dim so the highlight stays visible.
+fn settings_row_style(row: &SettingsRow, is_focused: bool) -> Style {
+    if is_focused {
+        return Style::default().add_modifier(Modifier::REVERSED);
+    }
+    if row.env_overridden {
+        return Style::default().fg(TerminalColor::DarkGray);
+    }
+    Style::default()
+}
+
+/// The label-and-value text for a row, without indentation or styling. Text-input values are
+/// control-stripped at this render boundary as a defensive measure, even though a configured
+/// URL or token carries no control bytes.
+fn compose_settings_row_text(row: &SettingsRow, draft: Option<&str>) -> String {
+    match &row.control {
+        SettingsControl::Checkbox { checked } => {
+            let marker = if *checked { "[x]" } else { "[ ]" };
+            format!("{marker} {}", row.label)
+        }
+        SettingsControl::Radio { options } => {
+            format!("{}:  {}", row.label, compose_radio_options(options))
+        }
+        SettingsControl::TextInput { value } => {
+            let shown = draft.unwrap_or(value);
+            format!("{}:  {}", row.label, strip_control(shown))
+        }
+    }
+}
+
+/// Joins a radio control's options into one line, marking the selected option with a filled
+/// bullet and the rest with an empty one.
+fn compose_radio_options(options: &[RadioOption]) -> String {
+    options
+        .iter()
+        .map(|option| {
+            let marker = if option.selected { "(•)" } else { "( )" };
+            format!("{marker} {}", option.label)
+        })
+        .collect::<Vec<String>>()
+        .join("  ")
+}
+
 fn apply_scroll(
     action: InputAction,
     scroll: &mut ScrollState,
@@ -1771,10 +2212,44 @@ fn apply_scroll(
         | InputAction::CookiesSelectPrev
         | InputAction::CookiesSelectNext
         | InputAction::CookiesClose
+        | InputAction::SettingsSelectPrev
+        | InputAction::SettingsSelectNext
+        | InputAction::SettingsToggle
+        | InputAction::SettingsCyclePrev
+        | InputAction::SettingsCycleNext
+        | InputAction::SettingsClose
+        | InputAction::SettingsTextInput(_)
+        | InputAction::SettingsTextDeleteBack
+        | InputAction::SettingsTextMoveCursorLeft
+        | InputAction::SettingsTextMoveCursorRight
+        | InputAction::SettingsTextCancel
         | InputAction::FocusNextLink
         | InputAction::FocusPreviousLink
         | InputAction::ActivateFocusedLink
         | InputAction::NavigateBack => {}
+    }
+}
+
+/// Applies a settings text-field editing action to the focused field's draft. Character and
+/// cursor keys edit the draft; `Esc` reverts an unsaved draft or, when there is nothing to
+/// revert, closes the panel. Every other action is ignored here. The debounced save, the
+/// focus-leave commit, and the seed of a newly focused field run in the owning app, which holds
+/// the controller; this only touches UI state, so it can run inside the event borrow.
+fn apply_settings_text_action(action: InputAction, ui_state: &mut UiState, now: Instant) {
+    match action {
+        InputAction::SettingsTextInput(character) => ui_state.settings_text_input(character, now),
+        InputAction::SettingsTextDeleteBack => ui_state.settings_text_delete_back(now),
+        InputAction::SettingsTextMoveCursorLeft => ui_state.settings_text_move_left(),
+        InputAction::SettingsTextMoveCursorRight => ui_state.settings_text_move_right(),
+        InputAction::SettingsTextCancel => {
+            if matches!(
+                ui_state.settings_text_cancel(),
+                SettingsEscOutcome::ClosePanel
+            ) {
+                ui_state.exit_settings_mode();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1798,7 +2273,22 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         InputAction::CookiesSelectPrev => ui_state.cookie_select_prev(),
         InputAction::CookiesSelectNext => ui_state.cookie_select_next(),
         InputAction::CookiesClose => ui_state.exit_cookies_mode(),
-        InputAction::ScrollLineDown
+        InputAction::SettingsSelectPrev => ui_state.settings_focus_prev(),
+        InputAction::SettingsSelectNext => ui_state.settings_focus_next(),
+        InputAction::SettingsClose => ui_state.exit_settings_mode(),
+        // The settings mutation actions need the controller and live settings, so they are
+        // applied by the owning app after the event borrow ends, not here. The settings
+        // text-edit actions are applied by `apply_settings_text_action`, which has the keystroke
+        // time the debounce needs.
+        InputAction::SettingsToggle
+        | InputAction::SettingsCyclePrev
+        | InputAction::SettingsCycleNext
+        | InputAction::SettingsTextInput(_)
+        | InputAction::SettingsTextDeleteBack
+        | InputAction::SettingsTextMoveCursorLeft
+        | InputAction::SettingsTextMoveCursorRight
+        | InputAction::SettingsTextCancel
+        | InputAction::ScrollLineDown
         | InputAction::ScrollLineUp
         | InputAction::ScrollPageDown
         | InputAction::ScrollPageUp
@@ -1955,7 +2445,18 @@ fn handle_navigation_action(
         | InputAction::HistoryClose
         | InputAction::CookiesSelectPrev
         | InputAction::CookiesSelectNext
-        | InputAction::CookiesClose => None,
+        | InputAction::CookiesClose
+        | InputAction::SettingsSelectPrev
+        | InputAction::SettingsSelectNext
+        | InputAction::SettingsToggle
+        | InputAction::SettingsCyclePrev
+        | InputAction::SettingsCycleNext
+        | InputAction::SettingsClose
+        | InputAction::SettingsTextInput(_)
+        | InputAction::SettingsTextDeleteBack
+        | InputAction::SettingsTextMoveCursorLeft
+        | InputAction::SettingsTextMoveCursorRight
+        | InputAction::SettingsTextCancel => None,
     }
 }
 

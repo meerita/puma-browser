@@ -22,6 +22,8 @@ fn reading(code: KeyCode, quit_armed: bool, refresh_armed: bool) -> InputAction 
         false,
         false,
         false,
+        false,
+        false,
     )
 }
 
@@ -33,6 +35,8 @@ fn command_mode(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
+        false,
         false,
         false,
         false,
@@ -53,6 +57,8 @@ fn palette_mode(code: KeyCode) -> InputAction {
         false,
         false,
         false,
+        false,
+        false,
     )
 }
 
@@ -66,6 +72,8 @@ fn suggestion_mode(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
+        false,
         false,
         false,
     )
@@ -83,6 +91,8 @@ fn history_mode(code: KeyCode) -> InputAction {
         false,
         true,
         false,
+        false,
+        false,
     )
 }
 
@@ -98,6 +108,42 @@ fn cookies_mode(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
+        false,
+    )
+}
+
+/// Maps a key while the settings panel is open with a control (non-text) row focused.
+fn settings_mode(code: KeyCode) -> InputAction {
+    map_key_event(
+        key(code),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+    )
+}
+
+/// Maps a key while the settings panel is open with a text-input row focused.
+fn settings_text_mode(code: KeyCode) -> InputAction {
+    map_key_event(
+        key(code),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
     )
 }
 
@@ -109,6 +155,8 @@ fn link_navigation(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
+        false,
         false,
         false,
         false,
@@ -130,7 +178,7 @@ fn esc_from_armed_yields_the_quit_action() {
 fn ctrl_c_yields_the_quit_action() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, false, false),
+        map_key_event(event, false, false, false, false, false, false, false, false, false, false,),
         InputAction::Quit
     );
 }
@@ -232,7 +280,7 @@ fn unbound_printable_char_with_upper_case_in_reading_mode_enters_command_mode() 
 fn ctrl_c_in_command_mode_yields_quit() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, true, false, false, false, false, false),
+        map_key_event(event, false, false, true, false, false, false, false, false, false, false,),
         InputAction::Quit
     );
 }
@@ -411,7 +459,7 @@ fn esc_in_the_history_list_closes_it() {
 fn ctrl_c_still_quits_from_the_history_list() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, true, false),
+        map_key_event(event, false, false, false, false, false, false, true, false, false, false,),
         InputAction::Quit
     );
 }
@@ -473,7 +521,149 @@ fn a_stray_key_in_the_cookies_popup_is_ignored() {
 fn ctrl_c_still_quits_from_the_cookies_popup() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, false, true),
+        map_key_event(event, false, false, false, false, false, false, false, true, false, false,),
+        InputAction::Quit
+    );
+}
+
+#[test]
+fn arrows_in_the_settings_panel_move_the_focus() {
+    assert_eq!(
+        settings_mode(KeyCode::Down),
+        InputAction::SettingsSelectNext
+    );
+    assert_eq!(settings_mode(KeyCode::Up), InputAction::SettingsSelectPrev);
+}
+
+#[test]
+fn vim_keys_in_the_settings_panel_move_the_focus() {
+    assert_eq!(
+        settings_mode(KeyCode::Char('j')),
+        InputAction::SettingsSelectNext
+    );
+    assert_eq!(
+        settings_mode(KeyCode::Char('k')),
+        InputAction::SettingsSelectPrev
+    );
+}
+
+#[test]
+fn esc_in_the_settings_panel_closes_it() {
+    assert_eq!(settings_mode(KeyCode::Esc), InputAction::SettingsClose);
+}
+
+#[test]
+fn space_and_enter_in_the_settings_panel_toggle_the_focused_row() {
+    assert_eq!(
+        settings_mode(KeyCode::Char(' ')),
+        InputAction::SettingsToggle
+    );
+    assert_eq!(settings_mode(KeyCode::Enter), InputAction::SettingsToggle);
+}
+
+#[test]
+fn left_and_right_in_the_settings_panel_cycle_the_focused_radio() {
+    assert_eq!(settings_mode(KeyCode::Left), InputAction::SettingsCyclePrev);
+    assert_eq!(
+        settings_mode(KeyCode::Char('h')),
+        InputAction::SettingsCyclePrev
+    );
+    assert_eq!(
+        settings_mode(KeyCode::Right),
+        InputAction::SettingsCycleNext
+    );
+    assert_eq!(
+        settings_mode(KeyCode::Char('l')),
+        InputAction::SettingsCycleNext
+    );
+}
+
+#[test]
+fn a_stray_key_in_the_settings_panel_is_ignored() {
+    assert_eq!(settings_mode(KeyCode::Tab), InputAction::Disarm);
+}
+
+#[test]
+fn a_printable_key_on_a_settings_text_field_edits_the_draft() {
+    assert_eq!(
+        settings_text_mode(KeyCode::Char('a')),
+        InputAction::SettingsTextInput('a')
+    );
+}
+
+#[test]
+fn a_space_on_a_settings_text_field_is_a_character_not_a_toggle() {
+    assert_eq!(
+        settings_text_mode(KeyCode::Char(' ')),
+        InputAction::SettingsTextInput(' ')
+    );
+}
+
+#[test]
+fn vim_keys_on_a_settings_text_field_are_characters_not_navigation() {
+    assert_eq!(
+        settings_text_mode(KeyCode::Char('j')),
+        InputAction::SettingsTextInput('j')
+    );
+    assert_eq!(
+        settings_text_mode(KeyCode::Char('k')),
+        InputAction::SettingsTextInput('k')
+    );
+}
+
+#[test]
+fn horizontal_arrows_on_a_settings_text_field_move_the_cursor() {
+    assert_eq!(
+        settings_text_mode(KeyCode::Left),
+        InputAction::SettingsTextMoveCursorLeft
+    );
+    assert_eq!(
+        settings_text_mode(KeyCode::Right),
+        InputAction::SettingsTextMoveCursorRight
+    );
+}
+
+#[test]
+fn vertical_arrows_on_a_settings_text_field_still_move_the_focus() {
+    assert_eq!(
+        settings_text_mode(KeyCode::Up),
+        InputAction::SettingsSelectPrev
+    );
+    assert_eq!(
+        settings_text_mode(KeyCode::Down),
+        InputAction::SettingsSelectNext
+    );
+}
+
+#[test]
+fn enter_on_a_settings_text_field_moves_to_the_next_row() {
+    assert_eq!(
+        settings_text_mode(KeyCode::Enter),
+        InputAction::SettingsSelectNext
+    );
+}
+
+#[test]
+fn backspace_on_a_settings_text_field_deletes_a_character() {
+    assert_eq!(
+        settings_text_mode(KeyCode::Backspace),
+        InputAction::SettingsTextDeleteBack
+    );
+}
+
+#[test]
+fn esc_on_a_settings_text_field_requests_a_cancel() {
+    assert_eq!(
+        settings_text_mode(KeyCode::Esc),
+        InputAction::SettingsTextCancel
+    );
+}
+
+#[test]
+fn ctrl_c_still_quits_from_the_settings_panel() {
+    let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(
+        map_key_event(event, false, false, false, false, false, false, false, false, true, false,),
         InputAction::Quit
     );
 }

@@ -1,5 +1,5 @@
 // @file crates/browser-storage/src/stores.rs
-// @description Capability trait surface for the storage layer; signatures only until v0.4.
+// @description Capability trait surface for the storage layer.
 // @layer storage
 // @created meerita <meerita@icloud.com>
 
@@ -8,9 +8,9 @@ use crate::history_records::{HistoryEntry, NewVisit, SuggestionEntry};
 
 /// Reads and writes persisted configuration values keyed by name.
 ///
-/// Implementations land in a later milestone; this defines the capability surface the
-/// storage backend must satisfy. A deliberately narrow trait, not a generic key-value
-/// store, so each capability the application needs stays explicit at its call sites.
+/// A deliberately narrow trait, not a generic key-value store, so each capability the
+/// application needs stays explicit at its call sites. Values are opaque strings the
+/// store never interprets; parsing lives in the core and privacy crates.
 pub trait ConfigStore {
     /// Returns the stored value for `key`, or `None` when no value is set.
     fn config_value(&self, key: &str) -> Result<Option<String>, StorageError>;

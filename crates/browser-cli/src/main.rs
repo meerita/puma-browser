@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use browser_core::{
-    history_mode_from_str, parse_policy, CookiePolicy, CookiePolicyPair, HistoryMode,
-    HistorySettings, NavigationController, NavigationSource, SitePolicyStore,
+    history_mode_from_str, parse_policy, ConfigStore, CookiePolicy, CookiePolicyPair, HistoryMode,
+    HistorySettings, NavigationController, NavigationSource, SearchEngine, SitePolicyStore,
 };
 use browser_mcp::McpServer;
 use browser_network::BrowserUrl;
@@ -18,7 +18,7 @@ use browser_storage::{
     default_config_path, history_database_path, load_config, BrowserConfig, HistoryStore,
     SqliteStorage, StorageError, SuggestionEntry,
 };
-use browser_terminal::{TerminalApp, TerminalError, TerminalSettings, ViewState};
+use browser_terminal::{EnvOverrides, TerminalApp, TerminalError, TerminalSettings, ViewState};
 
 /// Seconds in one day, used to turn the retention window in days into a prune cutoff.
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -46,6 +46,30 @@ const HISTORY_MODE_ENV: &str = "PUMA_HISTORY_MODE";
 
 /// The mode keyword that selects the terminal adapter; kept for symmetry with `mcp`.
 const TERMINAL_MODE_KEYWORD: &str = "terminal";
+
+/// `ConfigStore` key for the global first-party cookie policy word.
+const COOKIES_FIRST_PARTY_KEY: &str = "cookies.first_party";
+
+/// `ConfigStore` key for the global third-party cookie policy word.
+const COOKIES_THIRD_PARTY_KEY: &str = "cookies.third_party";
+
+/// `ConfigStore` key for the copy-on-select toggle.
+const COPY_ON_SELECT_KEY: &str = "ui.copy_on_select";
+
+/// `ConfigStore` key for the force-OSC-52 toggle.
+const FORCE_OSC52_KEY: &str = "ui.force_osc52";
+
+/// `ConfigStore` key for the `/search` command toggle.
+const SEARCH_ENABLED_KEY: &str = "search.enabled";
+
+/// `ConfigStore` key for the tracking-redirect unwrapping toggle.
+const UNWRAP_TRACKING_KEY: &str = "network.unwrap_tracking";
+
+/// `ConfigStore` key for the search-engine results base URL.
+const SEARCH_BASE_URL_KEY: &str = "search.base_url";
+
+/// `ConfigStore` key for the search-engine query parameter name.
+const SEARCH_QUERY_PARAMETER_KEY: &str = "search.query_parameter";
 
 /// A one-line reminder of how the binary is invoked, shown when an argument is rejected.
 const USAGE_HINT: &str = "usage: puma [mcp | <url> | <path>]";
@@ -131,57 +155,118 @@ async fn run(resolved: ResolvedMode) -> Result<()> {
     match resolved {
         ResolvedMode::Mcp => run_mcp().await,
         ResolvedMode::TerminalBlank => {
-            let controller = build_terminal_controller(&config, history_settings).await;
-            run_terminal_app(controller, ViewState::Blank, None).await
+            let (controller, settings) = build_terminal_controller(&config, history_settings).await;
+            run_terminal_app(controller, settings, ViewState::Blank, None).await
         }
         ResolvedMode::TerminalUrl(url) => {
-            let controller = build_terminal_controller(&config, history_settings).await;
-            run_terminal_with_url(controller, url).await
+            let (controller, settings) = build_terminal_controller(&config, history_settings).await;
+            run_terminal_with_url(controller, settings, url).await
         }
         ResolvedMode::UsageError(message) => Err(anyhow!(message)),
     }
 }
 
-/// Builds the terminal controller, wiring the history store, the cookie default, and the
-/// per-site exception store.
+/// Builds the terminal controller and the resolved terminal settings, wiring the history
+/// store, the cookie default, the search engine, the config store, and the per-site
+/// exception store.
 ///
-/// The history store follows the resolved history mode. The cookie default comes from the
-/// `[cookies]` config, and the per-site exception store opens on disk whenever a database
-/// path resolves, independent of the history mode, so exceptions persist even when history
-/// is in-memory or disabled. A failure to open either store degrades to no store rather
-/// than blocking startup, so browsing always works.
+/// The history store follows the resolved history mode. The per-site exception store and
+/// the config store share one on-disk database, opened whenever a database path resolves
+/// independent of the history mode, so both persist even when history is in-memory or
+/// disabled. Every panel-controlled setting is resolved with the precedence built-in
+/// default, then TOML, then the config store, then env/CLI, and the resolved values seed
+/// both the controller and the [`TerminalSettings`]. A failure to open any store degrades
+/// to no store and the lower precedence layers rather than blocking startup, so browsing
+/// always works.
 async fn build_terminal_controller(
     config: &BrowserConfig,
     history_settings: HistorySettings,
-) -> NavigationController {
+) -> (NavigationController, TerminalSettings) {
     let (history, initial_suggestions) = open_history(history_settings, config.data_dir()).await;
-    let (site_policies, initial_exceptions) = open_site_policy_store(config.data_dir()).await;
-    let default_cookie_policy = resolve_cookie_policy(config);
-    NavigationController::with_history(history, history_settings, initial_suggestions).with_cookies(
-        default_cookie_policy,
-        site_policies,
-        initial_exceptions,
-    )
+    let (storage, initial_exceptions) = open_config_and_site_policies(config.data_dir()).await;
+    let default_cookie_policy = resolve_cookie_policy(config, storage.as_ref());
+    let search_engine = resolve_search_engine(storage.as_ref());
+    let terminal_settings = resolve_terminal_settings(storage.as_ref());
+    let site_policies = as_site_policy_store(storage.as_ref());
+    let controller =
+        NavigationController::with_history(history, history_settings, initial_suggestions)
+            .with_cookies(default_cookie_policy, site_policies, initial_exceptions)
+            .with_search_engine(search_engine);
+    let controller = seed_config_store(controller, storage);
+    (controller, terminal_settings)
 }
 
-/// Resolves the default cookie policy pair from the `[cookies]` config section.
+/// Wires the shared storage into the controller as its config store when one opened.
 ///
-/// Each scope word is mapped independently; an unrecognized value resolves to reject and
-/// logs a warning. With no `[cookies]` section both scopes default to reject, so the
-/// browser accepts no cookie until the user opts a scope or a site in.
-fn resolve_cookie_policy(config: &BrowserConfig) -> CookiePolicyPair {
+/// The same handle already backs the per-site policy store; cloning shares the single
+/// SQLite connection. With no storage, the controller keeps no config store: typed setters
+/// then apply live for the session without persisting, which is the correct degraded mode.
+fn seed_config_store(
+    controller: NavigationController,
+    storage: Option<SqliteStorage>,
+) -> NavigationController {
+    let Some(storage) = storage else {
+        return controller;
+    };
+    let store: Arc<dyn ConfigStore + Send + Sync> = Arc::new(storage);
+    controller.with_config_store(store)
+}
+
+/// Wraps the shared storage as a per-site policy trait object for the controller.
+///
+/// Cloning shares the one SQLite connection, so this handle and the config-store handle
+/// read and write the same database.
+fn as_site_policy_store(
+    storage: Option<&SqliteStorage>,
+) -> Option<Arc<dyn SitePolicyStore + Send + Sync>> {
+    storage.map(|storage| into_site_policy_store(storage.clone()))
+}
+
+/// Resolves the default cookie policy pair with precedence default -> TOML -> config store.
+///
+/// Each scope is resolved independently: the `[cookies]` word is the TOML layer, the stored
+/// `cookies.*` value overrides it when present, and the built-in default is reject. With no
+/// TOML section and no stored value both scopes stay reject, so the browser accepts no
+/// cookie until the user opts a scope or a site in. There is no env layer for cookies today.
+fn resolve_cookie_policy(
+    config: &BrowserConfig,
+    config_store: Option<&SqliteStorage>,
+) -> CookiePolicyPair {
     CookiePolicyPair {
-        first_party: resolve_scope_policy(config.cookie_first_party(), "cookies.first_party"),
-        third_party: resolve_scope_policy(config.cookie_third_party(), "cookies.third_party"),
+        first_party: resolve_scope_policy(
+            config.cookie_first_party(),
+            COOKIES_FIRST_PARTY_KEY,
+            config_store,
+        ),
+        third_party: resolve_scope_policy(
+            config.cookie_third_party(),
+            COOKIES_THIRD_PARTY_KEY,
+            config_store,
+        ),
     }
 }
 
-/// Maps one scope's policy word to a [`CookiePolicy`], warning when it is unrecognized.
+/// Resolves one scope's policy with precedence default -> TOML -> config store.
 ///
-/// A recognized word maps through `parse_policy`. Any other value resolves to `Reject`, the
-/// private default, and logs a warning naming the config key. The key is a fixed field name,
-/// never the value, so nothing a user typed reaches the log.
-fn resolve_scope_policy(word: &str, config_key: &str) -> CookiePolicy {
+/// The TOML word maps through `parse_policy`, warning when it is unrecognized; the stored
+/// value, written only by validated setters, overrides it when present. Both parse fail-safe
+/// to `Reject`, so a bad value can only ever be more private. The warning names the fixed
+/// config key, never the value, so nothing a user typed reaches the log.
+fn resolve_scope_policy(
+    toml_word: &str,
+    config_key: &str,
+    config_store: Option<&SqliteStorage>,
+) -> CookiePolicy {
+    let toml_policy = parse_toml_scope_policy(toml_word, config_key);
+    let stored_policy = read_config_value(config_store, config_key).map(|word| parse_policy(&word));
+    resolve_setting(CookiePolicy::Reject, Some(toml_policy), stored_policy, None)
+}
+
+/// Maps a TOML scope word to a [`CookiePolicy`], warning when it is unrecognized.
+///
+/// A recognized word maps through `parse_policy`; any other value resolves to `Reject` and
+/// logs a warning naming the fixed config key, never the value.
+fn parse_toml_scope_policy(word: &str, config_key: &str) -> CookiePolicy {
     let policy = parse_policy(word);
     if policy_word_is_unrecognized(word, policy) {
         tracing::warn!(
@@ -190,6 +275,110 @@ fn resolve_scope_policy(word: &str, config_key: &str) -> CookiePolicy {
         );
     }
     policy
+}
+
+/// Layers a setting through the precedence built-in default, then TOML, then the config
+/// store, then env/CLI: the last layer that carries a value wins, and the built-in default
+/// applies only when every other layer is absent.
+///
+/// Pure and generic so each setting's precedence is resolved and tested the same way,
+/// independent of the value type.
+fn resolve_setting<T>(default: T, toml: Option<T>, config_store: Option<T>, env: Option<T>) -> T {
+    env.or(config_store).or(toml).unwrap_or(default)
+}
+
+/// Reads one key from the config store, treating any read failure as absent.
+///
+/// An unreadable or missing config store falls back to the lower precedence layers rather
+/// than blocking startup, so a corrupt database never prevents the browser from opening.
+fn read_config_value(config_store: Option<&SqliteStorage>, key: &str) -> Option<String> {
+    config_store?.config_value(key).ok().flatten()
+}
+
+/// Resolves the search engine with precedence default DuckDuckGo -> config store.
+///
+/// A stored base URL or query parameter overrides the matching default; a missing one keeps
+/// the default. With neither stored the built-in default engine is used unchanged. A stored
+/// base URL that fails validation (a non-http(s) or malformed URL) falls back to the default
+/// engine rather than blocking startup, so a bad stored value can never break `/search`.
+fn resolve_search_engine(config_store: Option<&SqliteStorage>) -> SearchEngine {
+    let base_url = read_config_value(config_store, SEARCH_BASE_URL_KEY);
+    let query_parameter = read_config_value(config_store, SEARCH_QUERY_PARAMETER_KEY);
+    if base_url.is_none() && query_parameter.is_none() {
+        return SearchEngine::default();
+    }
+    let default = SearchEngine::default();
+    let base_url = base_url.unwrap_or_else(|| default.base_url().to_string());
+    let query_parameter = query_parameter.unwrap_or_else(|| default.query_parameter().to_string());
+    SearchEngine::new(base_url, query_parameter).unwrap_or_default()
+}
+
+/// Resolves the terminal toggle settings with precedence default -> config store -> env, and
+/// records which toggles an environment variable currently overrides.
+///
+/// Each toggle uses its own fail-safe parser so a malformed stored or env value can only
+/// ever choose the safe default. The env layer wins for the session and, when present, marks
+/// the toggle overridden so the panel renders that row read-only. Env parsing semantics are
+/// unchanged; this only records whether the variable was present.
+fn resolve_terminal_settings(config_store: Option<&SqliteStorage>) -> TerminalSettings {
+    let copy_on_select = resolve_toggle(
+        read_config_value(config_store, COPY_ON_SELECT_KEY).as_deref(),
+        std::env::var(COPY_ON_SELECT_ENV).ok().as_deref(),
+        copy_on_select_enabled,
+    );
+    let force_osc52 = resolve_toggle(
+        read_config_value(config_store, FORCE_OSC52_KEY).as_deref(),
+        std::env::var(CLIPBOARD_OSC52_ENV).ok().as_deref(),
+        force_osc52_enabled,
+    );
+    let search_enabled = resolve_toggle(
+        read_config_value(config_store, SEARCH_ENABLED_KEY).as_deref(),
+        std::env::var(SEARCH_ENV).ok().as_deref(),
+        search_enabled,
+    );
+    let unwrap_tracking = resolve_toggle(
+        read_config_value(config_store, UNWRAP_TRACKING_KEY).as_deref(),
+        std::env::var(UNWRAP_TRACKING_ENV).ok().as_deref(),
+        unwrap_tracking_enabled,
+    );
+    TerminalSettings {
+        copy_on_select: copy_on_select.value,
+        force_osc52: force_osc52.value,
+        search_enabled: search_enabled.value,
+        unwrap_tracking: unwrap_tracking.value,
+        env_overridden: EnvOverrides {
+            copy_on_select: copy_on_select.env_overridden,
+            force_osc52: force_osc52.env_overridden,
+            search_enabled: search_enabled.env_overridden,
+            unwrap_tracking: unwrap_tracking.env_overridden,
+        },
+    }
+}
+
+/// One toggle's resolved value paired with whether an env var currently overrides it.
+struct ResolvedToggle {
+    value: bool,
+    env_overridden: bool,
+}
+
+/// Resolves one boolean toggle with precedence default -> config store -> env.
+///
+/// The built-in default is what `parse(None)` yields, matching today's env semantics. A
+/// stored or env value is parsed through the same fail-safe `parse`, so a malformed value
+/// can only choose the safe default. The env layer wins when present and is reported as an
+/// override. Pure in its inputs so precedence and override reporting are unit-tested without
+/// touching the real environment or a database.
+fn resolve_toggle(
+    stored: Option<&str>,
+    env: Option<&str>,
+    parse: fn(Option<&str>) -> bool,
+) -> ResolvedToggle {
+    let stored_value = stored.map(|raw| parse(Some(raw)));
+    let env_value = env.map(|raw| parse(Some(raw)));
+    ResolvedToggle {
+        value: resolve_setting(parse(None), None, stored_value, env_value),
+        env_overridden: env.is_some(),
+    }
 }
 
 /// Whether `word` was an unrecognized policy value that `parse_policy` fell back to reject.
@@ -260,21 +449,20 @@ fn into_history_store(storage: SqliteStorage) -> Arc<dyn HistoryStore + Send + S
 /// Per-site cookie policy exceptions as domain-and-policy pairs, as loaded from the store.
 type SiteExceptions = Vec<(String, CookiePolicy)>;
 
-/// A shared per-site policy store paired with the exceptions loaded from it, as the
-/// composition root hands them to the controller.
-type SitePolicyStoreWithExceptions = (
-    Option<Arc<dyn SitePolicyStore + Send + Sync>>,
-    SiteExceptions,
-);
+/// The shared on-disk (or in-memory) storage paired with the site-policy exceptions loaded
+/// from it. The same handle backs both the per-site policy store and the config store, so
+/// both read and write one SQLite database.
+type StorageWithExceptions = (Option<SqliteStorage>, SiteExceptions);
 
-/// Opens the per-site cookie policy exception store and loads the exceptions already saved.
+/// Opens the shared storage and loads the per-site cookie policy exceptions already saved.
 ///
-/// The store opens on disk whenever a database path resolves, independent of the history
-/// mode, because exceptions persist across runs even when history is in-memory or disabled.
-/// When no on-disk path resolves, an in-memory store keeps exceptions for the run only. A
-/// failure to open degrades to no store rather than blocking startup. Only domain-plus-policy
-/// rows are ever read or written here; no cookie value is stored.
-async fn open_site_policy_store(data_dir: Option<&Path>) -> SitePolicyStoreWithExceptions {
+/// The database opens on disk whenever a path resolves, independent of the history mode,
+/// because exceptions and config persist across runs even when history is in-memory or
+/// disabled. When no on-disk path resolves, an in-memory database keeps both for the run
+/// only. A failure to open degrades to no storage rather than blocking startup. Only
+/// domain-plus-policy rows and config key-values are ever read or written; no cookie value
+/// is stored.
+async fn open_config_and_site_policies(data_dir: Option<&Path>) -> StorageWithExceptions {
     match history_database_path(data_dir) {
         Ok(path) => open_persistent_site_policies(path).await,
         Err(_) => open_in_memory_site_policies(),
@@ -284,22 +472,22 @@ async fn open_site_policy_store(data_dir: Option<&Path>) -> SitePolicyStoreWithE
 /// Opens the on-disk database and loads the saved exceptions into policy pairs.
 ///
 /// The blocking SQLite work runs on a blocking thread. A failure at any step degrades to no
-/// store and no exceptions rather than blocking startup.
-async fn open_persistent_site_policies(path: PathBuf) -> SitePolicyStoreWithExceptions {
+/// storage and no exceptions rather than blocking startup.
+async fn open_persistent_site_policies(path: PathBuf) -> StorageWithExceptions {
     let prepared = tokio::task::spawn_blocking(move || open_and_load_site_policies(&path)).await;
     match prepared {
-        Ok(Ok((storage, exceptions))) => (Some(into_site_policy_store(storage)), exceptions),
+        Ok(Ok((storage, exceptions))) => (Some(storage), exceptions),
         _ => (None, Vec::new()),
     }
 }
 
-/// Opens an ephemeral in-memory database for exceptions that do not persist across runs.
+/// Opens an ephemeral in-memory database for exceptions and config that do not persist.
 ///
-/// The database is discarded on exit, so exceptions set this run are not saved. A failure
-/// to open degrades to no store.
-fn open_in_memory_site_policies() -> SitePolicyStoreWithExceptions {
+/// The database is discarded on exit, so exceptions and settings changed this run are not
+/// saved. A failure to open degrades to no storage.
+fn open_in_memory_site_policies() -> StorageWithExceptions {
     match SqliteStorage::open_in_memory() {
-        Ok(storage) => (Some(into_site_policy_store(storage)), Vec::new()),
+        Ok(storage) => (Some(storage), Vec::new()),
         Err(_) => (None, Vec::new()),
     }
 }
@@ -360,12 +548,13 @@ fn now_unix_seconds() -> i64 {
 /// quits with `Esc Esc`; it is never a hard exit.
 async fn run_terminal_with_url(
     mut controller: NavigationController,
+    settings: TerminalSettings,
     url: BrowserUrl,
 ) -> Result<()> {
     let fragment = url.fragment().map(str::to_string);
     let base = url.without_fragment();
     let view_state = load_initial_view(&mut controller, base).await;
-    run_terminal_app(controller, view_state, fragment).await
+    run_terminal_app(controller, settings, view_state, fragment).await
 }
 
 /// Resolves a load into the initial view the terminal opens on.
@@ -381,35 +570,16 @@ async fn load_initial_view(controller: &mut NavigationController, url: BrowserUr
 
 async fn run_terminal_app(
     controller: NavigationController,
+    settings: TerminalSettings,
     view_state: ViewState,
     initial_fragment: Option<String>,
 ) -> Result<()> {
-    let settings = terminal_settings_from_env();
     let mut app =
         TerminalApp::new(controller, view_state, settings).with_initial_fragment(initial_fragment);
     // Surface only the adapter's safe status message, never raw error detail.
     app.run()
         .await
         .map_err(|error| anyhow!(error.user_message()))
-}
-
-/// Reads the terminal settings from the environment once, at terminal startup.
-///
-/// Only the two documented variables are consulted; nothing here can enable a
-/// remote-triggered behavior, and a disabled `copy_on_select` fully suppresses the
-/// clipboard write in the adapter.
-fn terminal_settings_from_env() -> TerminalSettings {
-    let copy_on_select = copy_on_select_enabled(std::env::var(COPY_ON_SELECT_ENV).ok().as_deref());
-    let force_osc52 = force_osc52_enabled(std::env::var(CLIPBOARD_OSC52_ENV).ok().as_deref());
-    let search_enabled = search_enabled(std::env::var(SEARCH_ENV).ok().as_deref());
-    let unwrap_tracking =
-        unwrap_tracking_enabled(std::env::var(UNWRAP_TRACKING_ENV).ok().as_deref());
-    TerminalSettings {
-        copy_on_select,
-        force_osc52,
-        search_enabled,
-        unwrap_tracking,
-    }
 }
 
 /// Whether copy-on-select is enabled given the raw value of `PUMA_COPY_ON_SELECT`.

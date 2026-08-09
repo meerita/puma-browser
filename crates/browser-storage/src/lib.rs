@@ -4,6 +4,7 @@
 //! @created meerita <meerita@icloud.com>
 
 mod config;
+mod config_store;
 mod database;
 mod error;
 mod history_records;

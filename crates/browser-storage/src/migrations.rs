@@ -53,6 +53,16 @@ const MIGRATIONS: &[Migration] = &[
         );
     ",
     },
+    Migration {
+        target_version: 3,
+        sql: "
+        CREATE TABLE config (
+          key        TEXT    NOT NULL PRIMARY KEY,
+          value      TEXT    NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+    ",
+    },
 ];
 
 /// Applies every migration whose target version is greater than the database's current

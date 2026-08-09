@@ -23,8 +23,10 @@ pub use address_resolver::resolve_address;
 pub use browser_html::{Document, DocumentTitle};
 pub use browser_layout::CellBuffer;
 pub use browser_network::BrowserUrl;
-pub use browser_privacy::{CookiePolicy, RejectionReason, SameSite};
-pub use browser_storage::{HistoryEntry, HistoryStore, SitePolicyStore, SuggestionEntry};
+pub use browser_privacy::{CookiePolicy, CookieScope, RejectionReason, SameSite};
+pub use browser_storage::{
+    ConfigStore, HistoryEntry, HistoryStore, SitePolicyStore, StorageError, SuggestionEntry,
+};
 pub use cookie_record::CookieRecord;
 pub use cookie_settings::{parse_policy, CookiePolicyPair};
 pub use error::CoreError;
@@ -47,9 +49,9 @@ use browser_network::{
     fetch_once, resolve_redirect, FetchedDocument, HopOutcome, NetworkError, MAX_REDIRECT_COUNT,
 };
 use browser_privacy::{
-    classify, decide, registrable_domain, CookieContext, CookieDecision, CookieScope, ParsedCookie,
+    classify, decide, registrable_domain, CookieContext, CookieDecision, ParsedCookie,
 };
-use browser_storage::{NewVisit, StorageError};
+use browser_storage::NewVisit;
 
 use cookie_jar::{CookieJar, StoredCookie};
 use current_page::CurrentPage;
@@ -72,6 +74,8 @@ pub struct NavigationController {
     site_policies: Option<Arc<dyn SitePolicyStore + Send + Sync>>,
     site_exceptions: HashMap<String, CookiePolicy>,
     cookie_records: Vec<CookieRecord>,
+    search_engine: SearchEngine,
+    config_store: Option<Arc<dyn ConfigStore + Send + Sync>>,
 }
 
 impl fmt::Debug for NavigationController {
@@ -92,6 +96,8 @@ impl fmt::Debug for NavigationController {
             .field("has_site_policy_store", &self.site_policies.is_some())
             .field("site_exceptions", &self.site_exceptions)
             .field("cookie_records", &self.cookie_records)
+            .field("search_engine", &self.search_engine)
+            .field("has_config_store", &self.config_store.is_some())
             .finish()
     }
 }
@@ -141,6 +147,8 @@ impl NavigationController {
             site_policies: None,
             site_exceptions: HashMap::new(),
             cookie_records: Vec::new(),
+            search_engine: SearchEngine::default(),
+            config_store: None,
         }
     }
 
@@ -161,6 +169,57 @@ impl NavigationController {
         self.site_policies = store;
         self.site_exceptions = initial_exceptions.into_iter().collect();
         self
+    }
+
+    /// Seeds the search engine `/search` sends queries to.
+    ///
+    /// A consuming builder mirroring [`with_cookies`](Self::with_cookies) so startup can
+    /// override the DuckDuckGo lite default without reshuffling the other constructors. A
+    /// caller that never calls this keeps [`SearchEngine::default`].
+    pub fn with_search_engine(mut self, search_engine: SearchEngine) -> Self {
+        self.search_engine = search_engine;
+        self
+    }
+
+    /// The search engine `/search` sends queries to, for the caller to read live.
+    pub fn search_engine(&self) -> &SearchEngine {
+        &self.search_engine
+    }
+
+    /// The global default cookie policy for both scopes, for the caller to read live.
+    ///
+    /// Returns a copy of the pair the resolver consults when no per-site exception applies,
+    /// so an adapter can show the current first- and third-party defaults without reaching
+    /// into controller internals.
+    pub fn cookie_policy(&self) -> CookiePolicyPair {
+        self.default_cookie_policy
+    }
+
+    /// Wires a configuration store so setting changes both apply live and persist.
+    ///
+    /// A consuming builder mirroring [`with_cookies`](Self::with_cookies) and
+    /// [`with_search_engine`](Self::with_search_engine). When no store is wired the typed
+    /// setters and [`persist_setting`](Self::persist_setting) still apply live and return
+    /// `Ok`, so the MCP path and tests without persistence keep working.
+    pub fn with_config_store(mut self, store: Arc<dyn ConfigStore + Send + Sync>) -> Self {
+        self.config_store = Some(store);
+        self
+    }
+
+    /// Persists a single configuration key and value through the wired store.
+    ///
+    /// The write path for terminal-only toggles whose live state lives in the terminal
+    /// adapter: the adapter applies the change and calls this to record it. A no-op when no
+    /// store is wired, so a toggle set in memory does not require persistence to take effect
+    /// for the run. A store failure maps to [`CoreError::Storage`] by `?`, so no raw storage
+    /// error crosses the core boundary. Only the caller's whitelisted keys reach the store;
+    /// this never receives a cookie value, token, or password.
+    pub fn persist_setting(&self, key: &str, value: &str) -> Result<(), CoreError> {
+        let Some(store) = self.config_store.clone() else {
+            return Ok(());
+        };
+        store.set_config_value(key, value)?;
+        Ok(())
     }
 
     /// Fetch and parse the document at `url`, then hold it as the current page.
@@ -662,6 +721,73 @@ impl NavigationController {
         Ok(())
     }
 
+    /// Sets the global default cookie policy for one scope and applies it to the running
+    /// session at once.
+    ///
+    /// The default governs every site with no per-site exception. Tightening the first-party
+    /// default to [`CookiePolicy::Reject`] also drops the cookies the jar could still send:
+    /// the jar only ever sends cookies first-party, so a held cookie for a domain no
+    /// exception permits is now forbidden and is removed immediately, not merely on the next
+    /// decision. Relaxing a scope, or changing the third-party default, leaves held cookies
+    /// in place. The built-in default pair stays `Reject`/`Reject`; this changes the running
+    /// value, not that default.
+    ///
+    /// The change is applied live first, then persisted through the wired
+    /// [`ConfigStore`], mirroring [`set_site_cookie_policy`](Self::set_site_cookie_policy):
+    /// a persistence failure surfaces as [`CoreError`] without leaving the live value unset.
+    /// With no store wired, the change applies live and returns `Ok`.
+    pub fn set_global_cookie_policy(
+        &mut self,
+        scope: CookieScope,
+        policy: CookiePolicy,
+    ) -> Result<(), CoreError> {
+        self.assign_scope_policy(scope, policy);
+        if first_party_tightened_to_reject(scope, policy) {
+            self.drop_cookies_without_permitting_exception();
+        }
+        self.persist_setting(config_key_for_scope(scope), policy_word(policy))
+    }
+
+    /// Replaces the search engine `/search` uses, applying it live and persisting it.
+    ///
+    /// The engine is validated through [`SearchEngine::new`], so a `file://` or otherwise
+    /// malformed base URL returns [`CoreError`] and nothing is applied or persisted. On
+    /// success the held engine is replaced first, then `search.base_url` and
+    /// `search.query_parameter` are written through the wired [`ConfigStore`]. With no store
+    /// wired, the engine is replaced and `Ok` is returned.
+    pub fn set_search_engine(
+        &mut self,
+        base_url: String,
+        query_parameter: String,
+    ) -> Result<(), CoreError> {
+        self.search_engine = SearchEngine::new(base_url, query_parameter)?;
+        self.persist_setting("search.base_url", self.search_engine.base_url())?;
+        self.persist_setting(
+            "search.query_parameter",
+            self.search_engine.query_parameter(),
+        )
+    }
+
+    /// Writes `policy` into the matching scope field of the default policy pair.
+    fn assign_scope_policy(&mut self, scope: CookieScope, policy: CookiePolicy) {
+        match scope {
+            CookieScope::FirstParty => self.default_cookie_policy.first_party = policy,
+            CookieScope::ThirdParty => self.default_cookie_policy.third_party = policy,
+        }
+    }
+
+    /// Drops every jar cookie whose domain relies on the global default, keeping only those a
+    /// per-site exception still permits.
+    ///
+    /// Called when the first-party default tightens to reject. A domain with its own
+    /// permitting exception is governed by that exception, not the global default, so its
+    /// cookies survive; every other held cookie is now forbidden and is removed.
+    fn drop_cookies_without_permitting_exception(&mut self) {
+        let site_exceptions = &self.site_exceptions;
+        self.cookie_jar
+            .retain_domains(|domain| domain_has_permitting_exception(site_exceptions, domain));
+    }
+
     /// Closes the tab with the given identifier.
     ///
     /// Not implemented in this milestone; returns [`CoreError::TabNotFound`].
@@ -682,6 +808,30 @@ fn flatten_storage_result<T>(
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(CoreError::Storage(error)),
         Err(_) => Err(CoreError::Storage(StorageError::QueryFailed)),
+    }
+}
+
+/// Whether a global cookie change tightens the first-party default to reject.
+///
+/// Only this case drops cookies already held: the jar sends cookies first-party only, so a
+/// first-party reject forbids every held cookie no exception still permits. Relaxing, or any
+/// change to the third-party default, leaves the jar untouched.
+fn first_party_tightened_to_reject(scope: CookieScope, policy: CookiePolicy) -> bool {
+    matches!(scope, CookieScope::FirstParty) && matches!(policy, CookiePolicy::Reject)
+}
+
+/// Whether a domain keeps its cookies when the global first-party default tightens to reject.
+///
+/// A per-site exception that is not reject governs that domain in place of the global
+/// default, so its cookies survive the tightening. A domain with no exception follows the
+/// default and loses them.
+fn domain_has_permitting_exception(
+    site_exceptions: &HashMap<String, CookiePolicy>,
+    domain: &str,
+) -> bool {
+    match site_exceptions.get(domain) {
+        Some(policy) => !matches!(policy, CookiePolicy::Reject),
+        None => false,
     }
 }
 
@@ -709,6 +859,17 @@ fn policy_word(policy: CookiePolicy) -> &'static str {
         CookiePolicy::Session => "session",
         CookiePolicy::Ask => "ask",
         CookiePolicy::Reject => "reject",
+    }
+}
+
+/// The `ConfigStore` key the global default policy for `scope` is persisted under.
+///
+/// The two scopes map to the two fixed config keys the panel and startup read back, so a
+/// global cookie change round-trips to the same field it came from.
+fn config_key_for_scope(scope: CookieScope) -> &'static str {
+    match scope {
+        CookieScope::FirstParty => "cookies.first_party",
+        CookieScope::ThirdParty => "cookies.third_party",
     }
 }
 
