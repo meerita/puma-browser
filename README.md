@@ -101,6 +101,8 @@ None of these are implemented yet. They describe where the project is headed.
   spaces.
 - **Privacy dashboard and private browsing.** Cookie, storage, and cache summary with
   an isolated temporary session mode.
+- **Proxy support.** HTTP, HTTPS, and SOCKS proxying, the last remaining item in the
+  networking milestone.
 
 ## Install
 
@@ -164,6 +166,7 @@ See [docs/process/README.md](docs/process/README.md) for the full development wo
 - [Documentation index](docs/README.md)
 - [Architecture](docs/architecture/README.md)
 - [Architecture overview](docs/architecture/overview.md)
+- [Network layer](docs/architecture/network.md)
 - [Development workflow](docs/process/README.md)
 
 ## Contributing
