@@ -1,6 +1,6 @@
 <div align="center">
 
-# Puma
+# Puma, The Browser
 
 **A native, text-first web browser for the terminal.**
 
@@ -42,10 +42,11 @@ MCP server, so agents can read the web without a browser engine.
 
 ## Status
 
-Early development. A single page renders end to end. `puma <url>` fetches one HTTP or
-HTTPS page, parses it into the semantic document model, lays it out as text, and shows
-it in a scrollable read-only viewport. Two `Esc` presses quit. The [roadmap](#roadmap)
-lists what is still ahead.
+Active development. `puma <url>` fetches one HTTP or HTTPS page, parses it into a full
+semantic document tree with a real CSS cascade, and renders it as scrollable terminal
+text. The browser persists history with URL autocomplete, enforces a first-party and
+third-party cookie policy, and exposes a full-screen settings panel. The
+[roadmap](#roadmap) lists what is still ahead.
 
 ```
 $ puma example.com   # fetch, render, and scroll the page; Esc Esc quits
@@ -55,11 +56,24 @@ $ puma mcp           # MCP stdio server
 
 ### What works today
 
-- **Fetch one page.** One `http://` or `https://` URL over real TLS, following
-  redirects up to a limit, with a maximum response size and lossy UTF-8 decoding.
-- **Text rendering.** HTML5 parsed into the semantic document model and laid out as
-  terminal text: headings, bullet list items, verbatim code, indented quotes, and
-  word-wrapped paragraphs. `<script>` content is suppressed and counted.
+- **Document pipeline.** HTML5 parsed into a semantic tree with a real CSS cascade:
+  headings, nested lists, tables, inline styled runs, code blocks, quotes, `<hr>`, and
+  `<q>` citation links with hover-previewable `cite` targets. `<script>` content is
+  suppressed and counted, never executed.
+- **Persistent history.** SQLite-backed visit history with URL autocomplete, search,
+  and per-site or full clearing, viewable through `/history`.
+- **Cookie policy.** First-party and third-party classification by registrable domain,
+  an `allow`/`session`/`ask`/`reject` policy (default `reject`), a session jar, and
+  `/cookies` inspection with persisted per-site exceptions.
+- **Settings panel.** `/settings` (alias `/config`) is a full-screen view over a real
+  SQLite-backed config store: toggles and radios apply instantly, text inputs auto-save
+  after a short idle.
+- **Unified command bar.** A slash-command palette with fuzzy autocomplete for
+  `/open`, `/search`, `/reload`, `/back`, `/history`, `/cookies`, `/settings`, and
+  `/help`. `/search` runs a no-JavaScript web search.
+- **Link navigation and copy-on-select.** Tab cycles link focus and keeps the focused
+  link in view, click and Enter follow it, Backspace goes back, and anchors jump within
+  the page. Mouse-driven text selection copies to the clipboard with visual feedback.
 - **Scrollable viewport.** Arrows and PageUp/PageDown scroll. A status line shows the
   page label and scroll position. `Esc Esc` quits and `Ctrl+C` exits immediately.
 - **MCP server.** Read-only stdio tools for opening a URL, reading its text, and
@@ -72,17 +86,17 @@ same viewport and quit the same way.
 
 None of these are implemented yet. They describe where the project is headed.
 
-- **Rich text rendering.** Full heading hierarchy, tables, nested lists, and code
-  blocks with proper wrapping.
 - **Tabs.** Multiple tabs with independent state per tab.
-- **Unified command bar.** Slash commands for navigation, search, favorites, and
-  browser actions with fuzzy autocomplete.
+- **Bookmarks, forms, and downloads.** Favorites organized into folders, form
+  submission, and streamed downloads.
+- **`<dialog>` element support.** Scriptless dialogs rendered as a non-modal
+  auto-popover.
 - **Find in page.** Search the rendered document with match highlighting and counts.
-- **Favorites and history.** Bookmarks organized into folders and configurable history
-  modes, backed by SQLite persistence.
 - **Themeable.** Data-driven themes: dark, light, amber, phosphor.
-- **Unicode.** Full grapheme cluster support: CJK, bidirectional text, emoji-safe
-  layout.
+- **Full Unicode.** Bidirectional text reordering and CJK line-breaking without
+  spaces.
+- **Privacy dashboard and private browsing.** Cookie, storage, and cache summary with
+  an isolated temporary session mode.
 
 ## Install
 
