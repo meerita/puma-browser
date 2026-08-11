@@ -29,6 +29,52 @@ use browser_layout::{render_document, AnchorSpan, CellBuffer, CellPosition, Widt
 use browser_storage::{ConfigStore, HistoryEntry, NewVisit, StorageError};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+fn citation_run(text: &str, cite_url: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis::none(),
+        link: None,
+        citation: Some(cite_url.to_string()),
+        anchors: Vec::new(),
+    }
+}
+
+fn link_run(text: &str, url: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis::none(),
+        link: Some(url.to_string()),
+        citation: None,
+        anchors: Vec::new(),
+    }
+}
+
+fn link_and_citation_run(text: &str, url: &str, cite_url: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis::none(),
+        link: Some(url.to_string()),
+        citation: Some(cite_url.to_string()),
+        anchors: Vec::new(),
+    }
+}
+
+/// A one-row cached page holding a single run, laid out at width 40 so the run starts at
+/// column 0, row 0.
+fn cache_with_run(run: InlineRun) -> CachedPage {
+    let document = Document::new(
+        vec![SemanticNode::Paragraph {
+            runs: vec![run],
+            inline_style: None,
+        }],
+        None,
+        0,
+    );
+    let buffer = render_document(&document, 40, &WidthConfig::default())
+        .expect("a single-run paragraph must lay out for the citation test");
+    CachedPage { width: 40, buffer }
+}
+
 fn anchor(name: &str, row: u16) -> AnchorSpan {
     AnchorSpan {
         name: name.to_string(),
@@ -48,6 +94,7 @@ fn cache_with_anchor(anchor_name: &str) -> CachedPage {
             text: "Target paragraph".to_string(),
             emphasis: InlineEmphasis::none(),
             link: None,
+            citation: None,
             anchors: vec![anchor_name.to_string()],
         }],
         inline_style: None,
@@ -523,6 +570,7 @@ fn cache_with_links(link_count: usize) -> CachedPage {
                 text: format!("Link {number}"),
                 emphasis: InlineEmphasis::none(),
                 link: Some(format!("https://example.com/{number}")),
+                citation: None,
                 anchors: Vec::new(),
             }],
             inline_style: None,
@@ -1488,4 +1536,207 @@ fn a_dirty_field_does_not_save_before_the_debounce_elapses() {
         .writes()
         .iter()
         .any(|(key, _)| key == "search.base_url"));
+}
+
+#[test]
+fn tab_focusing_a_citation_span_sets_the_preview_and_a_hyperlink_leaves_it_unset() {
+    let citation_cache = cache_with_run(citation_run("Quote", "https://example.com/source"));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let bounds = ViewportBounds {
+        height: 4,
+        max_offset: 0,
+    };
+
+    advance_link_focus(
+        &mut ui_state,
+        Some(&citation_cache.buffer),
+        &mut scroll,
+        bounds,
+    );
+
+    assert_eq!(
+        ui_state.citation_preview(),
+        Some("https://example.com/source")
+    );
+
+    let link_cache = cache_with_run(link_run("Link", "https://example.com/article"));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+
+    advance_link_focus(&mut ui_state, Some(&link_cache.buffer), &mut scroll, bounds);
+
+    assert_eq!(ui_state.citation_preview(), None);
+}
+
+#[test]
+fn exiting_link_navigation_clears_the_citation_preview() {
+    let cache = cache_with_run(citation_run("Quote", "https://example.com/source"));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let bounds = ViewportBounds {
+        height: 4,
+        max_offset: 0,
+    };
+    advance_link_focus(&mut ui_state, Some(&cache.buffer), &mut scroll, bounds);
+    assert!(ui_state.citation_preview().is_some());
+
+    ui_state.exit_link_navigation();
+
+    assert_eq!(ui_state.citation_preview(), None);
+}
+
+#[test]
+fn hovering_a_citation_span_sets_the_preview_and_moving_off_clears_it() {
+    let cache = cache_with_run(citation_run("Quote", "https://example.com/source"));
+    let mut selection = TextSelection::new();
+    let mut navigate_to_url = None;
+    let mut ui_state = UiState::new(true);
+
+    handle_mouse_event(
+        mouse(MouseEventKind::Moved, CONTENT_PADDING, BODY_AREA_TOP_ROW),
+        Some(&cache.buffer),
+        0,
+        BODY_AREA_TOP_ROW,
+        &mut selection,
+        &mut navigate_to_url,
+        &mut ui_state,
+        Instant::now(),
+        true,
+        false,
+    );
+    assert_eq!(
+        ui_state.citation_preview(),
+        Some("https://example.com/source")
+    );
+
+    handle_mouse_event(
+        mouse(
+            MouseEventKind::Moved,
+            CONTENT_PADDING + 20,
+            BODY_AREA_TOP_ROW,
+        ),
+        Some(&cache.buffer),
+        0,
+        BODY_AREA_TOP_ROW,
+        &mut selection,
+        &mut navigate_to_url,
+        &mut ui_state,
+        Instant::now(),
+        true,
+        false,
+    );
+    assert_eq!(ui_state.citation_preview(), None);
+}
+
+#[test]
+fn hovering_a_plain_hyperlink_span_never_sets_the_citation_preview() {
+    let cache = cache_with_run(link_run("Link", "https://example.com/article"));
+    let mut selection = TextSelection::new();
+    let mut navigate_to_url = None;
+    let mut ui_state = UiState::new(true);
+
+    handle_mouse_event(
+        mouse(MouseEventKind::Moved, CONTENT_PADDING, BODY_AREA_TOP_ROW),
+        Some(&cache.buffer),
+        0,
+        BODY_AREA_TOP_ROW,
+        &mut selection,
+        &mut navigate_to_url,
+        &mut ui_state,
+        Instant::now(),
+        true,
+        false,
+    );
+
+    assert_eq!(ui_state.citation_preview(), None);
+}
+
+#[test]
+fn clicking_a_citation_span_navigates_to_the_cite_url_exactly_like_a_plain_link() {
+    let cache = cache_with_run(citation_run("Quote", "https://example.com/source"));
+    let mut selection = TextSelection::new();
+    let mut navigate_to_url = None;
+    let mut ui_state = UiState::new(true);
+    let steps = [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ];
+    for kind in steps {
+        handle_mouse_event(
+            mouse(kind, CONTENT_PADDING, BODY_AREA_TOP_ROW),
+            Some(&cache.buffer),
+            0,
+            BODY_AREA_TOP_ROW,
+            &mut selection,
+            &mut navigate_to_url,
+            &mut ui_state,
+            Instant::now(),
+            true,
+            false,
+        );
+    }
+
+    assert_eq!(
+        navigate_to_url,
+        Some("https://example.com/source".to_string())
+    );
+}
+
+#[test]
+fn a_quote_nested_inside_an_anchor_never_previews_and_activates_the_anchor_url() {
+    let cache = cache_with_run(link_and_citation_run(
+        "Quote",
+        "https://example.com/article",
+        "https://example.com/source",
+    ));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let bounds = ViewportBounds {
+        height: 4,
+        max_offset: 0,
+    };
+
+    advance_link_focus(&mut ui_state, Some(&cache.buffer), &mut scroll, bounds);
+    assert_eq!(ui_state.citation_preview(), None);
+
+    let mut selection = TextSelection::new();
+    let mut navigate_to_url = None;
+    let mut hover_state = UiState::new(true);
+    handle_mouse_event(
+        mouse(MouseEventKind::Moved, CONTENT_PADDING, BODY_AREA_TOP_ROW),
+        Some(&cache.buffer),
+        0,
+        BODY_AREA_TOP_ROW,
+        &mut selection,
+        &mut navigate_to_url,
+        &mut hover_state,
+        Instant::now(),
+        true,
+        false,
+    );
+    assert_eq!(hover_state.citation_preview(), None);
+
+    let steps = [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ];
+    for kind in steps {
+        handle_mouse_event(
+            mouse(kind, CONTENT_PADDING, BODY_AREA_TOP_ROW),
+            Some(&cache.buffer),
+            0,
+            BODY_AREA_TOP_ROW,
+            &mut selection,
+            &mut navigate_to_url,
+            &mut hover_state,
+            Instant::now(),
+            true,
+            false,
+        );
+    }
+    assert_eq!(
+        navigate_to_url,
+        Some("https://example.com/article".to_string())
+    );
 }

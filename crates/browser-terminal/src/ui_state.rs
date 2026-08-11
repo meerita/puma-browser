@@ -184,6 +184,7 @@ pub(crate) struct UiState {
     palette_selected_index: usize,
     address_suggestions: Vec<String>,
     suggestion_selected: Option<usize>,
+    citation_preview: Option<String>,
     history_entries: Vec<HistoryEntry>,
     history_selected_index: usize,
     cookie_lines: Vec<String>,
@@ -213,6 +214,7 @@ impl UiState {
             palette_selected_index: 0,
             address_suggestions: Vec::new(),
             suggestion_selected: None,
+            citation_preview: None,
             history_entries: Vec::new(),
             history_selected_index: 0,
             cookie_lines: Vec::new(),
@@ -285,6 +287,34 @@ impl UiState {
     /// Whether any address-bar suggestion is currently offered.
     pub(crate) fn has_address_suggestions(&self) -> bool {
         !self.address_suggestions.is_empty()
+    }
+
+    /// Shows the citation preview popup with the given `cite` URL.
+    pub(crate) fn set_citation_preview(&mut self, url: String) {
+        self.citation_preview = Some(url);
+    }
+
+    /// Dismisses the citation preview popup.
+    pub(crate) fn clear_citation_preview(&mut self) {
+        self.citation_preview = None;
+    }
+
+    /// The URL shown in the citation preview popup, or `None` when it is not shown.
+    pub(crate) fn citation_preview(&self) -> Option<&str> {
+        self.citation_preview.as_deref()
+    }
+
+    /// Whether the citation preview popup should currently draw: a URL is set, and no
+    /// higher-precedence overlay (address suggestions, history, cookies, settings, or
+    /// command mode) is active. Reading and link-navigation are the only modes the
+    /// citation popup may show under.
+    pub(crate) fn citation_preview_visible(&self) -> bool {
+        self.citation_preview.is_some()
+            && !self.has_address_suggestions()
+            && !self.is_in_command_mode()
+            && !self.is_in_history_mode()
+            && !self.is_in_cookies_mode()
+            && !self.is_in_settings_mode()
     }
 
     /// The index of the highlighted suggestion, or `None` when none is highlighted and
@@ -729,10 +759,11 @@ impl UiState {
         self.focused_link_index = Some(index);
     }
 
-    /// Exits link navigation mode and clears the focused link.
+    /// Exits link navigation mode and clears the focused link and citation preview.
     pub(crate) fn exit_link_navigation(&mut self) {
         self.interaction_mode = InteractionMode::Reading;
         self.focused_link_index = None;
+        self.clear_citation_preview();
     }
 
     /// Advances focus to the next link, wrapping at the end.
