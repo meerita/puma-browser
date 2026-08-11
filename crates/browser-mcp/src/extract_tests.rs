@@ -138,7 +138,7 @@ fn a_citation_run_produces_a_citation_kind_entry_with_the_wire_value_citation() 
     assert_eq!(links[0].url, "https://example.com/source");
     assert_eq!(links[0].kind, LinkKind::Citation);
     assert_eq!(
-        serde_json::to_value(&links[0].kind).expect("LinkKind must serialize"),
+        serde_json::to_value(links[0].kind).expect("LinkKind must serialize"),
         serde_json::json!("citation")
     );
 }
