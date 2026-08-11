@@ -4,7 +4,7 @@
 // @created meerita <meerita@icloud.com>
 
 use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
-use browser_layout::{render_document, CellBuffer, WidthConfig};
+use browser_layout::{render_document, CellBuffer, LinkKind, WidthConfig};
 
 fn document_of(nodes: Vec<SemanticNode>) -> Document {
     Document::new(nodes, None, 0)
@@ -15,6 +15,27 @@ fn link_run(text: &str, url: &str) -> InlineRun {
         text: text.to_string(),
         emphasis: InlineEmphasis::none(),
         link: Some(url.to_string()),
+        citation: None,
+        anchors: Vec::new(),
+    }
+}
+
+fn citation_run(text: &str, cite_url: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis::none(),
+        link: None,
+        citation: Some(cite_url.to_string()),
+        anchors: Vec::new(),
+    }
+}
+
+fn link_and_citation_run(text: &str, url: &str, cite_url: &str) -> InlineRun {
+    InlineRun {
+        text: text.to_string(),
+        emphasis: InlineEmphasis::none(),
+        link: Some(url.to_string()),
+        citation: Some(cite_url.to_string()),
         anchors: Vec::new(),
     }
 }
@@ -101,6 +122,51 @@ fn link_url_not_exposed_on_cell() {
     // The public Cell surface is grapheme/foreground/background/emphasis/underline only.
     // There is no public accessor for the link URL, so remote-sourced URLs never leak
     // through the cell API; the link is observable only as a LinkSpan on the buffer.
+    let _ = cell.grapheme();
+    let _ = cell.foreground();
+    let _ = cell.background();
+    let _ = cell.emphasis();
+    let _ = cell.underline();
+    assert_eq!(cell.grapheme(), "X");
+}
+
+#[test]
+fn citation_only_run_produces_a_citation_kind_span() {
+    let buffer = render(vec![paragraph_of(vec![citation_run(
+        "X",
+        "https://a.test/source",
+    )])]);
+
+    assert_eq!(buffer.links().len(), 1);
+    let span = &buffer.links()[0];
+    assert_eq!(span.url, "https://a.test/source");
+    assert_eq!(span.kind, LinkKind::Citation);
+}
+
+#[test]
+fn a_run_with_both_link_and_citation_produces_a_hyperlink_kind_span_using_the_link_url() {
+    let buffer = render(vec![paragraph_of(vec![link_and_citation_run(
+        "X",
+        "https://a.test/article",
+        "https://a.test/source",
+    )])]);
+
+    assert_eq!(buffer.links().len(), 1);
+    let span = &buffer.links()[0];
+    assert_eq!(span.url, "https://a.test/article");
+    assert_eq!(span.kind, LinkKind::Hyperlink);
+}
+
+#[test]
+fn citation_url_not_exposed_on_cell() {
+    let buffer = render(vec![paragraph_of(vec![citation_run(
+        "X",
+        "https://a.test/source",
+    )])]);
+    let cell = buffer.cell_at(0, 0).expect("the first cell must exist");
+
+    // Mirrors link_url_not_exposed_on_cell: the citation URL is observable only as a
+    // LinkSpan on the buffer, never through the public Cell surface.
     let _ = cell.grapheme();
     let _ = cell.foreground();
     let _ = cell.background();
