@@ -65,6 +65,10 @@ $ puma mcp           # MCP stdio server
 - **Cookie policy.** First-party and third-party classification by registrable domain,
   an `allow`/`session`/`ask`/`reject` policy (default `reject`), a session jar, and
   `/cookies` inspection with persisted per-site exceptions.
+- **Network hardening.** HTTP/2 and zstd/gzip/brotli decompression, a 32 KiB response
+  header size cap enforced on every redirect hop, and an honest outbound request
+  identity (`User-Agent`, `Accept-Language`, `DNT`, `Sec-GPC`) built from the app
+  version and detected OS/arch/locale.
 - **Settings panel.** `/settings` (alias `/config`) is a full-screen view over a real
   SQLite-backed config store: toggles and radios apply instantly, text inputs auto-save
   after a short idle.
