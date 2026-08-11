@@ -68,6 +68,7 @@ impl From<NetworkError> for CoreError {
             | NetworkError::Timeout
             | NetworkError::TooManyRedirects
             | NetworkError::ResponseTooLarge
+            | NetworkError::ResponseHeadersTooLarge
             | NetworkError::RequestFailed
             | NetworkError::Decode => Self::Network(error),
         }

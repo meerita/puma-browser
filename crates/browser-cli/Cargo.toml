@@ -18,6 +18,8 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+os_info = "3.15.0"
+sys-locale = "0.3.2"
 
 [dev-dependencies]
 tempfile = "3"
