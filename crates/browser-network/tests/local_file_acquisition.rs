@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use browser_network::{fetch, BrowserUrl, NetworkError};
+use browser_network::{fetch, BrowserUrl, NetworkError, RequestHeaders};
 use tempfile::tempdir;
 
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
@@ -46,7 +46,7 @@ async fn html_file_is_read_as_text_html_with_no_charset() {
         .await
         .expect("temp file must be written");
 
-    let document = fetch(&file_url(&path))
+    let document = fetch(&file_url(&path), &RequestHeaders::default())
         .await
         .expect("an existing HTML file must be read");
 
@@ -63,7 +63,7 @@ async fn htm_and_xhtml_extensions_are_treated_as_html() {
         tokio::fs::write(&path, b"<html></html>")
             .await
             .expect("temp file must be written");
-        let document = fetch(&file_url(&path))
+        let document = fetch(&file_url(&path), &RequestHeaders::default())
             .await
             .expect("an existing HTML file must be read");
         assert_eq!(document.content_type(), "text/html");
@@ -78,7 +78,7 @@ async fn non_html_extension_is_read_as_text_plain() {
         .await
         .expect("temp file must be written");
 
-    let document = fetch(&file_url(&path))
+    let document = fetch(&file_url(&path), &RequestHeaders::default())
         .await
         .expect("an existing text file must be read");
 
@@ -93,7 +93,7 @@ async fn a_file_with_no_extension_is_read_as_text_plain() {
         .await
         .expect("temp file must be written");
 
-    let document = fetch(&file_url(&path))
+    let document = fetch(&file_url(&path), &RequestHeaders::default())
         .await
         .expect("an existing extensionless file must be read");
 
@@ -105,7 +105,7 @@ async fn a_missing_file_returns_file_not_found() {
     let directory = tempdir().expect("temp directory must be created");
     let path = directory.path().join("does-not-exist.html");
 
-    let outcome = fetch(&file_url(&path)).await;
+    let outcome = fetch(&file_url(&path), &RequestHeaders::default()).await;
 
     assert!(matches!(outcome, Err(NetworkError::FileNotFound)));
 }
@@ -114,7 +114,7 @@ async fn a_missing_file_returns_file_not_found() {
 async fn a_directory_returns_path_is_directory() {
     let directory = tempdir().expect("temp directory must be created");
 
-    let outcome = fetch(&file_url(directory.path())).await;
+    let outcome = fetch(&file_url(directory.path()), &RequestHeaders::default()).await;
 
     assert!(matches!(outcome, Err(NetworkError::PathIsDirectory)));
 }
@@ -128,7 +128,7 @@ async fn a_file_larger_than_the_limit_returns_file_too_large() {
         .await
         .expect("oversized temp file must be written");
 
-    let outcome = fetch(&file_url(&path)).await;
+    let outcome = fetch(&file_url(&path), &RequestHeaders::default()).await;
 
     assert!(matches!(outcome, Err(NetworkError::FileTooLarge)));
 }
