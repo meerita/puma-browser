@@ -39,7 +39,10 @@ impl RequestHeaders {
         builder
             .header(reqwest::header::USER_AGENT, self.user_agent.as_str())
             .header(reqwest::header::ACCEPT, ACCEPT)
-            .header(reqwest::header::ACCEPT_LANGUAGE, self.accept_language.as_str())
+            .header(
+                reqwest::header::ACCEPT_LANGUAGE,
+                self.accept_language.as_str(),
+            )
             .header(reqwest::header::HeaderName::from_static("dnt"), "1")
             .header(reqwest::header::HeaderName::from_static("sec-gpc"), "1")
     }
@@ -47,7 +50,13 @@ impl RequestHeaders {
 
 impl Default for RequestHeaders {
     fn default() -> Self {
-        Self::new(env!("CARGO_PKG_VERSION"), None, None, std::env::consts::ARCH, None)
+        Self::new(
+            env!("CARGO_PKG_VERSION"),
+            None,
+            None,
+            std::env::consts::ARCH,
+            None,
+        )
     }
 }
 
