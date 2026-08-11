@@ -13,7 +13,7 @@ use browser_core::{
     HistorySettings, NavigationController, NavigationSource, SearchEngine, SitePolicyStore,
 };
 use browser_mcp::McpServer;
-use browser_network::BrowserUrl;
+use browser_network::{BrowserUrl, RequestHeaders};
 use browser_storage::{
     default_config_path, history_database_path, load_config, BrowserConfig, HistoryStore,
     SqliteStorage, StorageError, SuggestionEntry,
@@ -191,9 +191,49 @@ async fn build_terminal_controller(
     let controller =
         NavigationController::with_history(history, history_settings, initial_suggestions)
             .with_cookies(default_cookie_policy, site_policies, initial_exceptions)
-            .with_search_engine(search_engine);
+            .with_search_engine(search_engine)
+            .with_request_headers(detect_request_headers());
     let controller = seed_config_store(controller, storage);
     (controller, terminal_settings)
+}
+
+/// Detects the outbound request identity for this run: the workspace version plus, when
+/// available, OS family, OS version, and locale.
+///
+/// Detection failures degrade gracefully: a missing OS or locale detail is omitted from
+/// the built [`RequestHeaders`] rather than guessed.
+fn detect_request_headers() -> RequestHeaders {
+    let info = os_info::get();
+    let os_family = std_os_family_label();
+    let os_version = os_version_label(&info);
+    let locale = sys_locale::get_locale();
+    RequestHeaders::new(
+        env!("CARGO_PKG_VERSION"),
+        Some(os_family),
+        os_version.as_deref(),
+        std::env::consts::ARCH,
+        locale.as_deref(),
+    )
+}
+
+/// Maps `std::env::consts::OS` to the conventional label used in a `User-Agent` string.
+fn std_os_family_label() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macOS",
+        "windows" => "Windows",
+        "linux" => "Linux",
+        other => other,
+    }
+}
+
+/// The detected OS version as a string, or `None` when `os_info` has nothing real to
+/// report for this platform.
+fn os_version_label(info: &os_info::Info) -> Option<String> {
+    let version = info.version().to_string();
+    if version == "Unknown" {
+        return None;
+    }
+    Some(version)
 }
 
 /// Wires the shared storage into the controller as its config store when one opened.

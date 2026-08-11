@@ -14,10 +14,16 @@ use url::Url;
 use crate::browser_url::BrowserUrl;
 use crate::error::NetworkError;
 use crate::fetched_document::FetchedDocument;
+use crate::request_headers::RequestHeaders;
 
 /// Largest response body accepted, in bytes. Enforced while streaming, not after
 /// buffering, so an oversized body is abandoned as soon as the cap is crossed.
 const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Largest combined size of response headers accepted, approximated as the sum of each
+/// header's name and value length plus 4 bytes for `": "` and `"\r\n"` per line.
+/// Enforced before any header value is trusted, on every redirect hop.
+const MAX_RESPONSE_HEADER_BYTES: usize = 32 * 1024;
 
 /// Largest number of redirects followed before the request is abandoned.
 ///
@@ -47,9 +53,12 @@ pub enum HopOutcome {
 /// A `file://` URL is read from disk; any other URL is fetched over HTTP or HTTPS.
 /// The public signature is identical for both paths so callers do not distinguish
 /// local from remote acquisition.
-pub async fn fetch(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
+pub async fn fetch(
+    url: &BrowserUrl,
+    headers: &RequestHeaders,
+) -> Result<FetchedDocument, NetworkError> {
     let (progress_tx, _) = watch::channel(0usize);
-    fetch_with_progress(url, progress_tx).await
+    fetch_with_progress(url, headers, progress_tx).await
 }
 
 /// Acquire `url` and stream byte-count updates to `progress` as chunks arrive.
@@ -63,12 +72,13 @@ pub async fn fetch(url: &BrowserUrl) -> Result<FetchedDocument, NetworkError> {
 /// so existing callers that do not manage cookies see unchanged behavior.
 pub async fn fetch_with_progress(
     url: &BrowserUrl,
+    headers: &RequestHeaders,
     progress: watch::Sender<usize>,
 ) -> Result<FetchedDocument, NetworkError> {
     let mut current = url.clone();
     let mut redirect_count: usize = 0;
     loop {
-        let location = match fetch_once(&current, None, progress.clone()).await? {
+        let location = match fetch_once(&current, None, headers, progress.clone()).await? {
             HopOutcome::Final(document) => return Ok(document),
             HopOutcome::Redirect { location, .. } => location,
         };
@@ -91,6 +101,7 @@ pub async fn fetch_with_progress(
 pub async fn fetch_once(
     url: &BrowserUrl,
     cookie_header: Option<&str>,
+    headers: &RequestHeaders,
     progress: watch::Sender<usize>,
 ) -> Result<HopOutcome, NetworkError> {
     if url.scheme() == "file" {
@@ -98,20 +109,25 @@ pub async fn fetch_once(
         let _ = progress.send(document.body_bytes().len());
         return Ok(HopOutcome::Final(document));
     }
-    fetch_once_over_http(url, cookie_header, &progress).await
+    fetch_once_over_http(url, cookie_header, headers, &progress).await
 }
 
 async fn fetch_once_over_http(
     url: &BrowserUrl,
     cookie_header: Option<&str>,
+    headers: &RequestHeaders,
     progress: &watch::Sender<usize>,
 ) -> Result<HopOutcome, NetworkError> {
     let client = build_client()?;
     let mut request = client.get(url.as_str());
+    request = headers.apply(request);
     if let Some(cookie_header) = cookie_header {
         request = request.header(COOKIE, cookie_header);
     }
     let response = request.send().await.map_err(map_send_error)?;
+    if response_header_bytes(&response) > MAX_RESPONSE_HEADER_BYTES {
+        return Err(NetworkError::ResponseHeadersTooLarge);
+    }
     let status = response.status();
     let set_cookie_lines = collect_set_cookie_lines(&response);
     if let Some((status, location)) = redirect_target(status, &response) {
@@ -124,6 +140,19 @@ async fn fetch_once_over_http(
     let document =
         collect_document_reporting_progress(response, set_cookie_lines, progress).await?;
     Ok(HopOutcome::Final(document))
+}
+
+/// Approximate wire size of a response's headers, in bytes.
+///
+/// A parsed `HeaderMap` has no exact wire byte count, so each header line is
+/// approximated as its name length plus its value length plus 4 (for `": "` and
+/// `"\r\n"`), summed over every header.
+fn response_header_bytes(response: &reqwest::Response) -> usize {
+    response
+        .headers()
+        .iter()
+        .map(|(name, value)| name.as_str().len() + value.len() + 4)
+        .sum()
 }
 
 /// The redirect target of a response: `Some((status, location))` only when the status

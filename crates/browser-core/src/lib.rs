@@ -22,7 +22,7 @@ mod tab_state;
 pub use address_resolver::resolve_address;
 pub use browser_html::{Document, DocumentTitle};
 pub use browser_layout::CellBuffer;
-pub use browser_network::BrowserUrl;
+pub use browser_network::{BrowserUrl, RequestHeaders};
 pub use browser_privacy::{CookiePolicy, CookieScope, RejectionReason, SameSite};
 pub use browser_storage::{
     ConfigStore, HistoryEntry, HistoryStore, SitePolicyStore, StorageError, SuggestionEntry,
@@ -76,6 +76,7 @@ pub struct NavigationController {
     cookie_records: Vec<CookieRecord>,
     search_engine: SearchEngine,
     config_store: Option<Arc<dyn ConfigStore + Send + Sync>>,
+    request_headers: RequestHeaders,
 }
 
 impl fmt::Debug for NavigationController {
@@ -98,6 +99,7 @@ impl fmt::Debug for NavigationController {
             .field("cookie_records", &self.cookie_records)
             .field("search_engine", &self.search_engine)
             .field("has_config_store", &self.config_store.is_some())
+            .field("request_headers", &self.request_headers)
             .finish()
     }
 }
@@ -149,6 +151,7 @@ impl NavigationController {
             cookie_records: Vec::new(),
             search_engine: SearchEngine::default(),
             config_store: None,
+            request_headers: RequestHeaders::default(),
         }
     }
 
@@ -178,6 +181,17 @@ impl NavigationController {
     /// caller that never calls this keeps [`SearchEngine::default`].
     pub fn with_search_engine(mut self, search_engine: SearchEngine) -> Self {
         self.search_engine = search_engine;
+        self
+    }
+
+    /// Seeds the outbound request identity (`User-Agent`, `Accept-Language`) every fetch
+    /// carries.
+    ///
+    /// A consuming builder mirroring [`with_search_engine`](Self::with_search_engine) so
+    /// startup can override the degraded [`RequestHeaders::default`] with OS/locale
+    /// detail without reshuffling the other constructors.
+    pub fn with_request_headers(mut self, headers: RequestHeaders) -> Self {
+        self.request_headers = headers;
         self
     }
 
@@ -260,8 +274,13 @@ impl NavigationController {
         let mut tally = CookieTally::default();
         let fetched = loop {
             let cookie_header = self.cookie_jar.cookie_header_for(&current_url);
-            let outcome =
-                fetch_once(&current_url, cookie_header.as_deref(), progress.clone()).await?;
+            let outcome = fetch_once(
+                &current_url,
+                cookie_header.as_deref(),
+                &self.request_headers,
+                progress.clone(),
+            )
+            .await?;
             match outcome {
                 HopOutcome::Final(document) => {
                     self.process_set_cookies(

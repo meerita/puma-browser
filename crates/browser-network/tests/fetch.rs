@@ -3,7 +3,7 @@
 // @layer network
 // @created meerita <meerita@icloud.com>
 
-use browser_network::{fetch, BrowserUrl, NetworkError};
+use browser_network::{fetch, BrowserUrl, NetworkError, RequestHeaders};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -25,7 +25,7 @@ async fn successful_response_returns_body_and_content_type() {
         .mount(&server)
         .await;
 
-    let document = fetch(&url_for(&server, "/"))
+    let document = fetch(&url_for(&server, "/"), &RequestHeaders::default())
         .await
         .expect("successful fetch must return a document");
 
@@ -45,7 +45,7 @@ async fn content_type_charset_is_exposed_as_a_hint() {
         .mount(&server)
         .await;
 
-    let document = fetch(&url_for(&server, "/"))
+    let document = fetch(&url_for(&server, "/"), &RequestHeaders::default())
         .await
         .expect("successful fetch must return a document");
 
@@ -61,7 +61,7 @@ async fn a_response_without_a_charset_exposes_no_hint() {
         .mount(&server)
         .await;
 
-    let document = fetch(&url_for(&server, "/"))
+    let document = fetch(&url_for(&server, "/"), &RequestHeaders::default())
         .await
         .expect("successful fetch must return a document");
 
@@ -82,7 +82,7 @@ async fn redirect_within_limit_resolves_to_final_url_and_body() {
         .mount(&server)
         .await;
 
-    let document = fetch(&url_for(&server, "/start"))
+    let document = fetch(&url_for(&server, "/start"), &RequestHeaders::default())
         .await
         .expect("redirect within limit must resolve");
 
@@ -109,7 +109,7 @@ async fn two_hop_redirect_chain_lands_on_the_final_document() {
         .mount(&server)
         .await;
 
-    let document = fetch(&url_for(&server, "/a"))
+    let document = fetch(&url_for(&server, "/a"), &RequestHeaders::default())
         .await
         .expect("a two-hop redirect chain must resolve to the final document");
 
@@ -126,7 +126,7 @@ async fn redirect_beyond_limit_returns_too_many_redirects_error() {
         .mount(&server)
         .await;
 
-    let outcome = fetch(&url_for(&server, "/loop")).await;
+    let outcome = fetch(&url_for(&server, "/loop"), &RequestHeaders::default()).await;
 
     assert!(matches!(outcome, Err(NetworkError::TooManyRedirects)));
 }
@@ -141,7 +141,7 @@ async fn body_larger_than_limit_returns_response_too_large_error() {
         .mount(&server)
         .await;
 
-    let outcome = fetch(&url_for(&server, "/big")).await;
+    let outcome = fetch(&url_for(&server, "/big"), &RequestHeaders::default()).await;
 
     assert!(matches!(outcome, Err(NetworkError::ResponseTooLarge)));
 }
@@ -156,7 +156,7 @@ async fn non_utf8_body_is_returned_as_raw_bytes_without_decoding() {
         .mount(&server)
         .await;
 
-    let document = fetch(&url_for(&server, "/binary"))
+    let document = fetch(&url_for(&server, "/binary"), &RequestHeaders::default())
         .await
         .expect("a non-UTF-8 body must fetch without error");
 

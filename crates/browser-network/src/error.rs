@@ -33,6 +33,9 @@ pub enum NetworkError {
     #[error("response too large")]
     ResponseTooLarge,
 
+    #[error("response headers too large")]
+    ResponseHeadersTooLarge,
+
     #[error("request failed")]
     RequestFailed,
 

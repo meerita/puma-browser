@@ -65,6 +65,10 @@ $ puma mcp           # MCP stdio server
 - **Cookie policy.** First-party and third-party classification by registrable domain,
   an `allow`/`session`/`ask`/`reject` policy (default `reject`), a session jar, and
   `/cookies` inspection with persisted per-site exceptions.
+- **Network hardening.** HTTP/2 and zstd/gzip/brotli decompression, a 32 KiB response
+  header size cap enforced on every redirect hop, and an honest outbound request
+  identity (`User-Agent`, `Accept-Language`, `DNT`, `Sec-GPC`) built from the app
+  version and detected OS/arch/locale.
 - **Settings panel.** `/settings` (alias `/config`) is a full-screen view over a real
   SQLite-backed config store: toggles and radios apply instantly, text inputs auto-save
   after a short idle.
@@ -97,6 +101,8 @@ None of these are implemented yet. They describe where the project is headed.
   spaces.
 - **Privacy dashboard and private browsing.** Cookie, storage, and cache summary with
   an isolated temporary session mode.
+- **Proxy support.** HTTP, HTTPS, and SOCKS proxying, the last remaining item in the
+  networking milestone.
 
 ## Install
 
@@ -160,6 +166,7 @@ See [docs/process/README.md](docs/process/README.md) for the full development wo
 - [Documentation index](docs/README.md)
 - [Architecture](docs/architecture/README.md)
 - [Architecture overview](docs/architecture/overview.md)
+- [Network layer](docs/architecture/network.md)
 - [Development workflow](docs/process/README.md)
 
 ## Contributing

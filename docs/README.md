@@ -6,6 +6,7 @@
 | -------- | ----------- |
 | [architecture/README.md](architecture/README.md) | Crate map, rendering pipeline, and key design decisions |
 | [architecture/overview.md](architecture/overview.md) | The two structural patterns and how they meet at `browser-core` |
+| [architecture/network.md](architecture/network.md) | HTTP transport, resource limits, redirect safety, and outbound request identity |
 | [process/README.md](process/README.md) | Branch model, quality gates, commit style, and release flow |
 
 ## Project layout

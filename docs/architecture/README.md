@@ -48,7 +48,7 @@ keyboard input. MCP uses the browser API directly.
 | Crate | Responsibility |
 | ----- | -------------- |
 | `browser-core` | Navigation controller, tab state, browsing history, bookmarks, forms, downloads |
-| `browser-network` | HTTP/HTTPS client, TLS (rustls), redirects, proxy, cookie jar, HTTP cache, request filtering |
+| `browser-network` | HTTP/HTTPS client, TLS (rustls), redirects, proxy, cookie jar, HTTP cache, request filtering. See [network.md](network.md) for transport, resource limits, and outbound request identity. |
 | `browser-html` | HTML5 parser (html5ever), semantic document tree builder |
 | `browser-css` | Reduced CSS cascade: visibility, display, text decoration, color, generated content |
 | `browser-layout` | Text layout engine: word wrap, Unicode grapheme clusters, tables, terminal cell renderer |

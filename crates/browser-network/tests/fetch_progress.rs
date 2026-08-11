@@ -3,7 +3,7 @@
 // @layer network
 // @created meerita <meerita@icloud.com>
 
-use browser_network::{fetch_with_progress, BrowserUrl};
+use browser_network::{fetch_with_progress, BrowserUrl, RequestHeaders};
 use tokio::sync::watch;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -36,7 +36,7 @@ async fn progress_channel_receives_increasing_byte_counts() {
         samples
     });
 
-    fetch_with_progress(&url, progress_tx)
+    fetch_with_progress(&url, &RequestHeaders::default(), progress_tx)
         .await
         .expect("fetch must succeed");
 
@@ -71,7 +71,7 @@ async fn fetch_with_no_receivers_does_not_panic() {
     let (progress_tx, progress_rx) = watch::channel(0usize);
     drop(progress_rx);
 
-    fetch_with_progress(&url, progress_tx)
+    fetch_with_progress(&url, &RequestHeaders::default(), progress_tx)
         .await
         .expect("fetch must succeed even when the receiver is dropped before the call");
 }
