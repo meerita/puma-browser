@@ -31,7 +31,8 @@ impl InlineEmphasis {
 /// `text` is sanitized by the parser before the run is constructed, exactly as block
 /// text was sanitized before. `link`, when present, is a reference resolved against the
 /// document's base URL; it is a plain `String` because URL validation belongs to the
-/// network layer, not here.
+/// network layer, not here. `citation` is resolved the same way, from a `<q>` element's
+/// `cite` attribute.
 ///
 /// `anchors` names the fragment targets that land on this run: the `id` of an element and
 /// the `name` of an `<a>` are captured and attached to the next run so a link to
@@ -43,16 +44,18 @@ pub struct InlineRun {
     pub text: String,
     pub emphasis: InlineEmphasis,
     pub link: Option<String>,
+    pub citation: Option<String>,
     pub anchors: Vec<String>,
 }
 
 impl InlineRun {
-    /// Build a run of plain text with no emphasis, link, or anchor.
+    /// Build a run of plain text with no emphasis, link, citation, or anchor.
     pub fn plain(text: String) -> InlineRun {
         InlineRun {
             text,
             emphasis: InlineEmphasis::none(),
             link: None,
+            citation: None,
             anchors: Vec::new(),
         }
     }

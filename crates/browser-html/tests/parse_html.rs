@@ -76,6 +76,7 @@ fn paragraph_with_inline_anchor_splits_the_link_into_its_own_run() {
                     text: "the docs".to_string(),
                     emphasis: InlineEmphasis::none(),
                     link: Some("/docs".to_string()),
+                    citation: None,
                     anchors: Vec::new(),
                 },
                 InlineRun::plain(" for details".to_string()),

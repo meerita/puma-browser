@@ -15,6 +15,7 @@ fn anchored_run(text: &str, names: &[&str]) -> InlineRun {
         text: text.to_string(),
         emphasis: InlineEmphasis::none(),
         link: None,
+        citation: None,
         anchors: names.iter().map(|name| name.to_string()).collect(),
     }
 }

@@ -5,13 +5,26 @@
 
 use browser_css::{Color, Emphasis, TextStyle};
 
-/// The terminal-row extent of a single hyperlink span in the laid-out buffer.
+/// Whether a link span comes from an author-intended hyperlink (`<a href>`) or a
+/// citation (`<q cite>`).
+///
+/// A `<q cite>` nested inside an `<a href>` always resolves to `Hyperlink` for that
+/// cell's span, since the enclosing anchor is the author's explicit navigation target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    Hyperlink,
+    Citation,
+}
+
+/// The terminal-row extent of a single hyperlink or citation span in the laid-out
+/// buffer.
 ///
 /// A link that wraps across multiple lines produces one `LinkSpan` per row. `col_end`
 /// is the inclusive last column of the span on that row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkSpan {
     pub url: String,
+    pub kind: LinkKind,
     pub row: u16,
     pub col_start: u16,
     pub col_end: u16,
@@ -43,6 +56,7 @@ pub struct Cell {
     emphasis: Emphasis,
     underline: bool,
     link_url: Option<String>,
+    citation_url: Option<String>,
     anchor_names: Vec<String>,
 }
 
@@ -57,6 +71,7 @@ impl Cell {
             emphasis: style.emphasis,
             underline: style.underline,
             link_url: None,
+            citation_url: None,
             anchor_names: Vec::new(),
         }
     }
@@ -70,6 +85,7 @@ impl Cell {
             emphasis: Emphasis::None,
             underline: false,
             link_url: None,
+            citation_url: None,
             anchor_names: Vec::new(),
         }
     }
@@ -95,6 +111,20 @@ impl Cell {
     /// link. Crate-private so remote-sourced URLs never leak through the public cell API.
     pub(crate) fn link_url(&self) -> Option<&str> {
         self.link_url.as_deref()
+    }
+
+    /// Records the citation URL (`<q cite>`) this cell belongs to, used only by layout to
+    /// extract link spans. The URL is never rendered from here; it is not part of the
+    /// public API.
+    pub(crate) fn set_citation_url(&mut self, url: String) {
+        self.citation_url = Some(url);
+    }
+
+    /// The citation URL this cell belongs to, or `None` when the cell is not part of a
+    /// `<q cite>`. Crate-private so remote-sourced URLs never leak through the public
+    /// cell API.
+    pub(crate) fn citation_url(&self) -> Option<&str> {
+        self.citation_url.as_deref()
     }
 
     /// Records the anchor names whose run begins at this cell, used only by layout to

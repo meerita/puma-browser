@@ -5,10 +5,20 @@
 
 use browser_html::{InlineRun, SemanticNode};
 
+/// Whether an MCP link entry comes from an author-intended hyperlink (`<a href>`) or a
+/// citation (`<q cite>`), so a client can tell the two apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum LinkKind {
+    Hyperlink,
+    Citation,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct LinkEntry {
     pub text: String,
     pub url: String,
+    pub kind: LinkKind,
 }
 
 pub(crate) fn extract_text(nodes: &[SemanticNode]) -> String {
@@ -137,6 +147,16 @@ fn collect_links_from_runs(runs: &[InlineRun], output: &mut Vec<LinkEntry>) {
                 output.push(LinkEntry {
                     text: run.text.clone(),
                     url: url.clone(),
+                    kind: LinkKind::Hyperlink,
+                });
+            }
+        }
+        if let Some(url) = &run.citation {
+            if !url.is_empty() {
+                output.push(LinkEntry {
+                    text: run.text.clone(),
+                    url: url.clone(),
+                    kind: LinkKind::Citation,
                 });
             }
         }

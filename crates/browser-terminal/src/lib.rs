@@ -33,7 +33,7 @@ use browser_core::{
     NavigationTarget,
 };
 use browser_css::{Color, Emphasis};
-use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkSpan};
+use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkKind, LinkSpan};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1547,6 +1547,7 @@ fn draw_frame(
         draw_address_suggestions_popup(frame, chunks[0], ui_state);
         draw_history_popup(frame, chunks[0], ui_state);
         draw_cookies_popup(frame, chunks[0], ui_state);
+        draw_citation_preview_popup(frame, chunks[0], ui_state);
     }
 
     draw_separator(frame, chunks[1]);
@@ -1690,6 +1691,24 @@ fn draw_cookies_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState)
         return;
     }
     render_bottom_popup(frame, content_area, list_popup_lines(&menu));
+}
+
+/// Draws the citation preview popup showing the literal `cite` URL of the currently
+/// focused or hovered `<q cite>` span. Renders nothing when no citation is previewed or
+/// when a higher-precedence overlay is active. The URL is the already-resolved,
+/// already-sanitized `citation_url` string; this never issues a network request.
+fn draw_citation_preview_popup(frame: &mut Frame, content_area: Rect, ui_state: &UiState) {
+    if !ui_state.citation_preview_visible() {
+        return;
+    }
+    let Some(url) = ui_state.citation_preview() else {
+        return;
+    };
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let line = Line::raw(strip_control(url));
+    render_bottom_popup(frame, content_area, vec![line]);
 }
 
 /// Renders `lines` as a popup anchored to the bottom of `content_area`, clearing the region
@@ -2481,6 +2500,7 @@ fn advance_link_focus(
         ui_state.focus_next_link(count);
     }
     reveal_focused_link(ui_state, buffer, scroll, bounds);
+    update_citation_preview(ui_state, Some(buffer));
 }
 
 /// Moves focus to the previous link, entering link navigation at the first visible link
@@ -2504,6 +2524,7 @@ fn retreat_link_focus(
         ui_state.focus_previous_link(count);
     }
     reveal_focused_link(ui_state, buffer, scroll, bounds);
+    update_citation_preview(ui_state, Some(buffer));
 }
 
 /// The URL of the currently focused link, if link navigation is active and the focused
@@ -2512,6 +2533,31 @@ fn focused_link_url(ui_state: &UiState, buffer: Option<&CellBuffer>) -> Option<S
     let index = ui_state.focused_link_index?;
     let buffer = buffer?;
     unique_links(buffer).get(index).map(|url| url.to_string())
+}
+
+/// The kind of the currently focused link's span: the first span in the buffer whose URL
+/// matches the focused entry from [`unique_links`]. `None` when nothing is focused or the
+/// focused index no longer points at a link in the buffer.
+fn focused_link_kind(ui_state: &UiState, buffer: Option<&CellBuffer>) -> Option<LinkKind> {
+    let index = ui_state.focused_link_index?;
+    let buffer = buffer?;
+    let url = *unique_links(buffer).get(index)?;
+    buffer
+        .links()
+        .iter()
+        .find(|span| span.url == url)
+        .map(|span| span.kind)
+}
+
+/// Shows the citation preview popup when the focused link is a citation, or dismisses it
+/// otherwise. Called after every change to link focus so the popup always tracks it.
+fn update_citation_preview(ui_state: &mut UiState, buffer: Option<&CellBuffer>) {
+    if focused_link_kind(ui_state, buffer) == Some(LinkKind::Citation) {
+        let url = focused_link_url(ui_state, buffer).expect("citation kind implies a focused url");
+        ui_state.set_citation_preview(url);
+        return;
+    }
+    ui_state.clear_citation_preview();
 }
 
 /// Restores the previous page from history and resets the viewport, clearing any focused
@@ -2585,6 +2631,15 @@ fn handle_mouse_event(
                 navigate_to_url,
             );
             selection.clear();
+        }
+        MouseEventKind::Moved => {
+            update_citation_preview_for_pointer(
+                &mouse,
+                buffer,
+                scroll_offset,
+                body_area_top_row,
+                ui_state,
+            );
         }
         _ => {}
     }
@@ -2685,6 +2740,28 @@ fn activate_link_under_pointer(
         .find(|&span| span_contains(span, pointer.row, pointer.column));
     if let Some(span) = clicked {
         *navigate_to_url = Some(span.url.clone());
+    }
+}
+
+/// Shows the citation preview when the pointer rests on a citation span, or clears it
+/// otherwise. Leaves the preview untouched when the pointer resolves outside the document
+/// area, mirroring how `activate_link_under_pointer` silently no-ops there.
+fn update_citation_preview_for_pointer(
+    mouse: &MouseEvent,
+    buffer: &CellBuffer,
+    scroll_offset: u16,
+    body_area_top_row: u16,
+    ui_state: &mut UiState,
+) {
+    let Some(pointer) = document_coordinate(mouse, scroll_offset, body_area_top_row) else {
+        return;
+    };
+    let hovered = buffer.links().iter().find(|span| {
+        span_contains(span, pointer.row, pointer.column) && span.kind == LinkKind::Citation
+    });
+    match hovered {
+        Some(span) => ui_state.set_citation_preview(span.url.clone()),
+        None => ui_state.clear_citation_preview(),
     }
 }
 

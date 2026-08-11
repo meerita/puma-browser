@@ -856,8 +856,42 @@ impl<'a> TreeExtractor<'a> {
         if tag == "style" {
             return;
         }
+        if tag == "q" {
+            self.gather_quote_segments(element, context, segments);
+            return;
+        }
         let child_context = self.child_context(element, &tag, context);
         self.gather_children_segments(element, &child_context, segments);
+    }
+
+    /// Bracket a `<q>` element's children with depth-selected quote-mark segments,
+    /// carrying the element's resolved `cite` (or the surrounding citation, when nested
+    /// inside another `<q>`) so the marks themselves are part of the activatable span.
+    fn gather_quote_segments(
+        &mut self,
+        element: usize,
+        context: &InlineContext,
+        segments: &mut Vec<Segment>,
+    ) {
+        let mut child = context.clone();
+        child.quote_depth = context.quote_depth.saturating_add(1);
+        child.citation = self
+            .quote_citation(element)
+            .or_else(|| context.citation.clone());
+        let (open_mark, close_mark) = quote_marks(child.quote_depth);
+        segments.push(Segment::mark(open_mark, &child));
+        self.gather_children_segments(element, &child, segments);
+        segments.push(Segment::mark(close_mark, &child));
+    }
+
+    /// The resolved citation target of a `<q>` element's `cite` attribute, or `None` when
+    /// it has no usable `cite`, mirroring `anchor_link`'s resolution of `href`.
+    fn quote_citation(&self, element: usize) -> Option<String> {
+        let reference = sanitize_reference(self.attribute(element, "cite")?);
+        if reference.is_empty() {
+            return None;
+        }
+        Some(resolve_reference(&reference, self.base_url.as_ref()))
     }
 
     fn gather_children_segments(
@@ -1150,11 +1184,14 @@ impl<'a> TreeExtractor<'a> {
     }
 }
 
-/// The emphasis and link in force at a point during a block's inline walk.
+/// The emphasis, link, quote depth, and citation in force at a point during a block's
+/// inline walk.
 #[derive(Clone)]
 struct InlineContext {
     emphasis: InlineEmphasis,
     link: Option<String>,
+    quote_depth: u8,
+    citation: Option<String>,
 }
 
 impl InlineContext {
@@ -1162,16 +1199,19 @@ impl InlineContext {
         InlineContext {
             emphasis: InlineEmphasis::none(),
             link: None,
+            quote_depth: 0,
+            citation: None,
         }
     }
 }
 
-/// A contiguous span of a block's text sharing one emphasis and link, before whitespace
-/// is collapsed across the whole block.
+/// A contiguous span of a block's text sharing one emphasis, link, and citation, before
+/// whitespace is collapsed across the whole block.
 struct Segment {
     text: String,
     emphasis: InlineEmphasis,
     link: Option<String>,
+    citation: Option<String>,
     anchors: Vec<String>,
 }
 
@@ -1182,6 +1222,7 @@ impl Segment {
             text: strip_control_characters_preserving_layout(raw),
             emphasis: context.emphasis.clone(),
             link: context.link.clone(),
+            citation: context.citation.clone(),
             anchors,
         }
     }
@@ -1193,7 +1234,21 @@ impl Segment {
             text: String::new(),
             emphasis: InlineEmphasis::none(),
             link: None,
+            citation: None,
             anchors,
+        }
+    }
+
+    /// A synthetic, anchor-less segment carrying a literal marker (a quote-mark
+    /// character), styled with the given context so it renders as part of the span it
+    /// brackets, including any citation link that span carries.
+    fn mark(text: &'static str, context: &InlineContext) -> Segment {
+        Segment {
+            text: text.to_string(),
+            emphasis: context.emphasis.clone(),
+            link: context.link.clone(),
+            citation: context.citation.clone(),
+            anchors: Vec::new(),
         }
     }
 }
@@ -1209,6 +1264,19 @@ fn collapse_segments(segments: Vec<Segment>) -> Vec<InlineRun> {
         builder.push_segment(segment);
     }
     builder.finish()
+}
+
+/// The opening and closing quote-mark characters for a `<q>` nested at the given depth.
+///
+/// Depth 1 (an outermost `<q>`) uses curly double quotes; depth 2 and deeper reuses curly
+/// single quotes, matching the CSS UA-stylesheet default's own two-level alternation with
+/// no further nesting distinction. `depth` is never `0` here: it is only reached from
+/// `gather_quote_segments`, which always increments before calling this function.
+fn quote_marks(depth: u8) -> (&'static str, &'static str) {
+    if depth % 2 == 1 {
+        return ("\u{201C}", "\u{201D}");
+    }
+    ("\u{2018}", "\u{2019}")
 }
 
 /// Builds inline runs from a block's segments, collapsing whitespace as it goes.
@@ -1233,7 +1301,12 @@ impl RunBuilder {
     fn push_segment(&mut self, segment: &Segment) {
         push_unique_anchors(&mut self.pending_anchors, &segment.anchors);
         for character in segment.text.chars() {
-            self.push_character(character, &segment.emphasis, &segment.link);
+            self.push_character(
+                character,
+                &segment.emphasis,
+                &segment.link,
+                &segment.citation,
+            );
         }
     }
 
@@ -1242,16 +1315,23 @@ impl RunBuilder {
         character: char,
         emphasis: &InlineEmphasis,
         link: &Option<String>,
+        citation: &Option<String>,
     ) {
         if character.is_whitespace() {
-            self.push_space(emphasis, link);
+            self.push_space(emphasis, link, citation);
             return;
         }
-        self.push_visible(character, emphasis, link);
+        self.push_visible(character, emphasis, link, citation);
     }
 
-    fn push_visible(&mut self, character: char, emphasis: &InlineEmphasis, link: &Option<String>) {
-        self.open_run(emphasis, link);
+    fn push_visible(
+        &mut self,
+        character: char,
+        emphasis: &InlineEmphasis,
+        link: &Option<String>,
+        citation: &Option<String>,
+    ) {
+        self.open_run(emphasis, link, citation);
         self.absorb_pending_anchors();
         if let Some(run) = self.current.as_mut() {
             run.text.push(character);
@@ -1273,21 +1353,31 @@ impl RunBuilder {
         push_unique_anchors(&mut run.anchors, &names);
     }
 
-    fn push_space(&mut self, emphasis: &InlineEmphasis, link: &Option<String>) {
+    fn push_space(
+        &mut self,
+        emphasis: &InlineEmphasis,
+        link: &Option<String>,
+        citation: &Option<String>,
+    ) {
         if self.last_was_space {
             return;
         }
-        self.open_run(emphasis, link);
+        self.open_run(emphasis, link, citation);
         if let Some(run) = self.current.as_mut() {
             run.text.push(' ');
         }
         self.last_was_space = true;
     }
 
-    /// Ensure the current run carries the given emphasis and link, flushing it and
-    /// starting a fresh run when either differs.
-    fn open_run(&mut self, emphasis: &InlineEmphasis, link: &Option<String>) {
-        if self.run_matches(emphasis, link) {
+    /// Ensure the current run carries the given emphasis, link, and citation, flushing it
+    /// and starting a fresh run when any of the three differs.
+    fn open_run(
+        &mut self,
+        emphasis: &InlineEmphasis,
+        link: &Option<String>,
+        citation: &Option<String>,
+    ) {
+        if self.run_matches(emphasis, link, citation) {
             return;
         }
         self.flush_current();
@@ -1295,13 +1385,21 @@ impl RunBuilder {
             text: String::new(),
             emphasis: emphasis.clone(),
             link: link.clone(),
+            citation: citation.clone(),
             anchors: Vec::new(),
         });
     }
 
-    fn run_matches(&self, emphasis: &InlineEmphasis, link: &Option<String>) -> bool {
+    fn run_matches(
+        &self,
+        emphasis: &InlineEmphasis,
+        link: &Option<String>,
+        citation: &Option<String>,
+    ) -> bool {
         match &self.current {
-            Some(run) => &run.emphasis == emphasis && &run.link == link,
+            Some(run) => {
+                &run.emphasis == emphasis && &run.link == link && &run.citation == citation
+            }
             None => false,
         }
     }
@@ -1339,6 +1437,7 @@ impl RunBuilder {
             text: String::new(),
             emphasis: InlineEmphasis::none(),
             link: None,
+            citation: None,
             anchors: names,
         });
     }

@@ -9,7 +9,7 @@ use browser_css::{cascade, computed_run_style, Color, DisplayMode, TextStyle, Te
 use browser_html::{Document, InlineRun, SemanticNode};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::cell::{AnchorSpan, Cell, CellBuffer, LinkSpan};
+use crate::cell::{AnchorSpan, Cell, CellBuffer, LinkKind, LinkSpan};
 use crate::error::LayoutError;
 use crate::table::render_table;
 use crate::width::{emoji_replacement, grapheme_columns, WidthConfig};
@@ -218,6 +218,11 @@ pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
         if let Some(url) = &run.link {
             for cell in &mut cells[start..] {
                 cell.set_link_url(url.clone());
+            }
+        }
+        if let Some(url) = &run.citation {
+            for cell in &mut cells[start..] {
+                cell.set_citation_url(url.clone());
             }
         }
         if !run.anchors.is_empty() {
@@ -646,10 +651,21 @@ fn extract_anchor_spans(rows: &[Vec<Cell>]) -> Vec<AnchorSpan> {
     spans
 }
 
+/// The effective link a cell contributes to focus/activation, and which kind it is.
+///
+/// A cell's author-intended hyperlink always wins over an enclosing `<q cite>` on the
+/// same cell, since the anchor is the explicit navigation target.
+fn effective_link(cell: &Cell) -> Option<(&str, LinkKind)> {
+    cell.link_url()
+        .map(|url| (url, LinkKind::Hyperlink))
+        .or_else(|| cell.citation_url().map(|url| (url, LinkKind::Citation)))
+}
+
 /// Scan the laid-out rows and record one [`LinkSpan`] per contiguous run of cells that
-/// share a link URL on a row. A link that wraps across rows yields one span per row, and
-/// two adjacent links with different URLs yield two spans. Columns are measured with the
-/// same width config used for layout so hit-testing and rendering agree on positions.
+/// share an effective link URL and kind on a row. A link that wraps across rows yields
+/// one span per row, and two adjacent links with different URLs or kinds yield two
+/// spans. Columns are measured with the same width config used for layout so
+/// hit-testing and rendering agree on positions.
 fn extract_link_spans(rows: &[Vec<Cell>], width_config: &WidthConfig) -> Vec<LinkSpan> {
     let mut spans: Vec<LinkSpan> = Vec::new();
     for (row_index, row) in rows.iter().enumerate() {
@@ -657,26 +673,30 @@ fn extract_link_spans(rows: &[Vec<Cell>], width_config: &WidthConfig) -> Vec<Lin
             continue;
         };
         let mut col: u16 = 0;
-        let mut open: Option<(u16, String)> = None; // (col_start, url)
+        let mut open: Option<(u16, String, LinkKind)> = None; // (col_start, url, kind)
         for cell in row {
             let advance =
                 u16::try_from(grapheme_columns(cell.grapheme(), width_config)).unwrap_or(1);
-            match (&open, cell.link_url()) {
-                (None, Some(url)) => {
-                    open = Some((col, url.to_string()));
+            match (&open, effective_link(cell)) {
+                (None, Some((url, kind))) => {
+                    open = Some((col, url.to_string(), kind));
                 }
-                (Some((start, previous_url)), Some(url)) if url != previous_url => {
+                (Some((start, previous_url, previous_kind)), Some((url, kind)))
+                    if url != previous_url || kind != *previous_kind =>
+                {
                     spans.push(LinkSpan {
                         url: previous_url.clone(),
+                        kind: *previous_kind,
                         row: row_u16,
                         col_start: *start,
                         col_end: col.saturating_sub(1),
                     });
-                    open = Some((col, url.to_string()));
+                    open = Some((col, url.to_string(), kind));
                 }
-                (Some((start, previous_url)), None) => {
+                (Some((start, previous_url, previous_kind)), None) => {
                     spans.push(LinkSpan {
                         url: previous_url.clone(),
+                        kind: *previous_kind,
                         row: row_u16,
                         col_start: *start,
                         col_end: col.saturating_sub(1),
@@ -687,9 +707,10 @@ fn extract_link_spans(rows: &[Vec<Cell>], width_config: &WidthConfig) -> Vec<Lin
             }
             col = col.saturating_add(advance);
         }
-        if let Some((start, url)) = open {
+        if let Some((start, url, kind)) = open {
             spans.push(LinkSpan {
                 url,
+                kind,
                 row: row_u16,
                 col_start: start,
                 col_end: col.saturating_sub(1),
