@@ -3,8 +3,11 @@
 // @layer layout
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{Document, InlineRun, InputKind, LandmarkRole, SemanticNode};
-use browser_layout::{render_document, CellBuffer, WidthConfig};
+use browser_html::{
+    ButtonElement, ButtonKind, Document, InlineRun, InputElement, InputKind, LandmarkRole, NodeId,
+    SelectElement, SelectOption, SemanticNode, TextareaElement,
+};
+use browser_layout::{render_document, CellBuffer, FieldSpanKind, WidthConfig};
 
 fn document_of(nodes: Vec<SemanticNode>) -> Document {
     Document::new(nodes, None, 0)
@@ -31,13 +34,25 @@ fn buffer_text(buffer: &CellBuffer) -> String {
         .join("\n")
 }
 
+fn select_option(label: &str, selected: bool) -> SelectOption {
+    SelectOption {
+        value: label.to_string(),
+        label: label.to_string(),
+        selected,
+    }
+}
+
 #[test]
 fn text_input_renders_a_labelled_blank_field() {
-    let input = SemanticNode::Input {
+    let input = SemanticNode::Input(InputElement {
+        id: NodeId::new(0),
         kind: InputKind::Text,
+        name: None,
+        value: String::new(),
+        checked: false,
         label: Some("Name".to_string()),
         sensitive: false,
-    };
+    });
     let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
         .expect("input must lay out");
     assert!(buffer_text(&buffer).contains("[Name: ____]"));
@@ -45,11 +60,15 @@ fn text_input_renders_a_labelled_blank_field() {
 
 #[test]
 fn password_input_is_masked_and_never_shows_a_value() {
-    let input = SemanticNode::Input {
+    let input = SemanticNode::Input(InputElement {
+        id: NodeId::new(0),
         kind: InputKind::Password,
+        name: None,
+        value: String::new(),
+        checked: false,
         label: Some("Password".to_string()),
         sensitive: true,
-    };
+    });
     let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
         .expect("input must lay out");
     let text = buffer_text(&buffer);
@@ -61,25 +80,96 @@ fn password_input_is_masked_and_never_shows_a_value() {
 }
 
 #[test]
-fn select_renders_its_first_option_and_a_dropdown_marker() {
-    let select = SemanticNode::Select {
+fn hidden_input_produces_no_row_and_no_field_span() {
+    let input = SemanticNode::Input(InputElement {
+        id: NodeId::new(0),
+        kind: InputKind::Hidden,
+        name: Some("csrf".to_string()),
+        value: "token".to_string(),
+        checked: false,
+        label: None,
+        sensitive: false,
+    });
+    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
+        .expect("hidden input must not error during layout");
+    assert_eq!(buffer.height(), 0, "a hidden input produces no rows");
+    assert!(
+        buffer.field_spans().is_empty(),
+        "a hidden input produces no field span"
+    );
+}
+
+#[test]
+fn text_input_produces_exactly_one_field_span_carrying_its_node_id() {
+    let input = SemanticNode::Input(InputElement {
+        id: NodeId::new(7),
+        kind: InputKind::Text,
+        name: None,
+        value: String::new(),
+        checked: false,
+        label: Some("Name".to_string()),
+        sensitive: false,
+    });
+    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
+        .expect("input must lay out");
+    let spans = buffer.field_spans();
+    assert_eq!(spans.len(), 1, "one span per row the control occupies");
+    assert_eq!(spans[0].node_id, NodeId::new(7));
+    assert_eq!(spans[0].kind, FieldSpanKind::Input);
+}
+
+#[test]
+fn select_renders_its_selected_option_and_a_dropdown_marker() {
+    let select = SemanticNode::Select(SelectElement {
+        id: NodeId::new(0),
+        name: None,
         label: Some("Country".to_string()),
-        options: vec!["Spain".to_string(), "France".to_string()],
-    };
+        multiple: false,
+        options: vec![
+            select_option("Spain", false),
+            select_option("France", false),
+        ],
+    });
     let buffer = render_document(&document_of(vec![select]), 40, &WidthConfig::default())
         .expect("select must lay out");
     assert!(buffer_text(&buffer).contains("[Country: Spain ▾]"));
+    let spans = buffer.field_spans();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].kind, FieldSpanKind::Select);
 }
 
 #[test]
 fn button_renders_its_label_in_brackets() {
-    let button = SemanticNode::Button {
+    let button = SemanticNode::Button(ButtonElement {
+        id: NodeId::new(0),
+        kind: ButtonKind::Button,
+        name: None,
+        value: None,
         runs: vec![InlineRun::plain("Submit".to_string())],
         inline_style: None,
-    };
+    });
     let buffer = render_document(&document_of(vec![button]), 40, &WidthConfig::default())
         .expect("button must lay out");
     assert!(buffer_text(&buffer).contains("[ Submit ]"));
+    let spans = buffer.field_spans();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].kind, FieldSpanKind::Button);
+}
+
+#[test]
+fn textarea_renders_a_labelled_blank_field_with_a_field_span() {
+    let textarea = SemanticNode::Textarea(TextareaElement {
+        id: NodeId::new(0),
+        name: None,
+        value: "ignored for the static placeholder".to_string(),
+        label: Some("Bio".to_string()),
+    });
+    let buffer = render_document(&document_of(vec![textarea]), 40, &WidthConfig::default())
+        .expect("textarea must lay out");
+    assert!(buffer_text(&buffer).contains("[Bio: ____]"));
+    let spans = buffer.field_spans();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].kind, FieldSpanKind::Textarea);
 }
 
 #[test]

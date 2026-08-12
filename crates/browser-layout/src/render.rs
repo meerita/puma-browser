@@ -6,11 +6,14 @@
 use std::borrow::Cow;
 
 use browser_css::{cascade, computed_run_style, Color, DisplayMode, TextStyle, TextTransform};
-use browser_html::{Document, InlineRun, SemanticNode};
+use browser_html::{
+    Document, InlineRun, InputElement, InputKind, NodeId, SelectOption, SemanticNode,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::cell::{AnchorSpan, Cell, CellBuffer, LinkKind, LinkSpan};
 use crate::error::LayoutError;
+use crate::field_span::{FieldSpan, FieldSpanKind};
 use crate::table::render_table;
 use crate::width::{emoji_replacement, grapheme_columns, WidthConfig};
 
@@ -167,22 +170,33 @@ fn node_rows(
         SemanticNode::Landmark { children, .. } => {
             render_children(children, width, style, width_config)
         }
-        SemanticNode::Form { children } => render_children(children, width, style, width_config),
-        SemanticNode::Input {
-            label, sensitive, ..
-        } => single_row(clip_line(
-            &input_placeholder(label.as_deref(), *sensitive),
-            style,
-            width,
-            width_config,
-        )),
-        SemanticNode::Select { label, options } => single_row(clip_line(
-            &select_placeholder(label.as_deref(), options),
-            style,
-            width,
-            width_config,
-        )),
-        SemanticNode::Button { runs, .. } => render_button(runs, style, width, width_config),
+        SemanticNode::Form(form) => render_children(&form.children, width, style, width_config),
+        SemanticNode::Input(input) => render_input(input, style, width, width_config),
+        SemanticNode::Textarea(textarea) => mark_field(
+            single_row(clip_line(
+                &input_placeholder(textarea.label.as_deref(), false),
+                style,
+                width,
+                width_config,
+            )),
+            textarea.id,
+            FieldSpanKind::Textarea,
+        ),
+        SemanticNode::Select(select) => mark_field(
+            single_row(clip_line(
+                &select_placeholder(select.label.as_deref(), &select.options),
+                style,
+                width,
+                width_config,
+            )),
+            select.id,
+            FieldSpanKind::Select,
+        ),
+        SemanticNode::Button(button) => mark_field(
+            render_button(&button.runs, style, width, width_config),
+            button.id,
+            FieldSpanKind::Button,
+        ),
         SemanticNode::EmbeddedContent { label } => single_row(clip_line(
             &embedded_placeholder(label),
             style,
@@ -515,10 +529,34 @@ fn render_figure(
     rows
 }
 
-/// The bracketed placeholder for an inert input control.
+/// Render an `<input>` control: a hidden input contributes no row, matching the
+/// `ImagePlaceholder` convention that an invisible node renders as nothing; every other
+/// kind renders a single marked placeholder row.
+fn render_input(
+    input: &InputElement,
+    style: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+) -> Vec<Vec<Cell>> {
+    if input.kind == InputKind::Hidden {
+        return Vec::new();
+    }
+    mark_field(
+        single_row(clip_line(
+            &input_placeholder(input.label.as_deref(), input.sensitive),
+            style,
+            width,
+            width_config,
+        )),
+        input.id,
+        FieldSpanKind::Input,
+    )
+}
+
+/// The bracketed placeholder for an inert input or textarea control.
 ///
-/// A password input renders a fixed mask, never its value; every other input renders a
-/// blank field. The label, when known, precedes the field.
+/// A password input renders a fixed mask, never its value; every other control renders
+/// a blank field. The label, when known, precedes the field.
 fn input_placeholder(label: Option<&str>, sensitive: bool) -> String {
     let field = if sensitive { INPUT_MASK } else { INPUT_BLANK };
     match label {
@@ -527,13 +565,34 @@ fn input_placeholder(label: Option<&str>, sensitive: bool) -> String {
     }
 }
 
-/// The bracketed placeholder for an inert select control, showing its first option.
-fn select_placeholder(label: Option<&str>, options: &[String]) -> String {
-    let selected = options.first().map(String::as_str).unwrap_or("");
+/// The bracketed placeholder for an inert select control, showing its selected option
+/// or, when none is marked selected, its first option, matching the HTML default.
+fn select_placeholder(label: Option<&str>, options: &[SelectOption]) -> String {
+    let chosen = options
+        .iter()
+        .find(|option| option.selected)
+        .or_else(|| options.first())
+        .map(|option| option.label.as_str())
+        .unwrap_or("");
     match label {
-        Some(label) => format!("[{label}: {selected} {SELECT_MARKER}]"),
-        None => format!("[{selected} {SELECT_MARKER}]"),
+        Some(label) => format!("[{label}: {chosen} {SELECT_MARKER}]"),
+        None => format!("[{chosen} {SELECT_MARKER}]"),
     }
+}
+
+/// Mark every cell of every row with the given control's identity, so
+/// [`extract_field_spans`] can recover its geometry after layout.
+fn mark_field(rows: Vec<Vec<Cell>>, node_id: NodeId, kind: FieldSpanKind) -> Vec<Vec<Cell>> {
+    rows.into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|mut cell| {
+                    cell.set_field_marker(node_id, kind);
+                    cell
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Render a button as its label wrapped in brackets, keeping the label's inline styling.
@@ -618,6 +677,7 @@ fn build_buffer(
 ) -> Result<CellBuffer, LayoutError> {
     let links = extract_link_spans(&rows, width_config);
     let anchors = extract_anchor_spans(&rows);
+    let field_spans = extract_field_spans(&rows, width_config);
     let height = row_height(rows.len())?;
     let mut buffer = CellBuffer::new(width, height);
     for (row_index, row) in rows.into_iter().enumerate() {
@@ -625,6 +685,7 @@ fn build_buffer(
     }
     buffer.set_links(links);
     buffer.set_anchors(anchors);
+    buffer.set_field_spans(field_spans);
     Ok(buffer)
 }
 
@@ -710,6 +771,63 @@ fn extract_link_spans(rows: &[Vec<Cell>], width_config: &WidthConfig) -> Vec<Lin
         if let Some((start, url, kind)) = open {
             spans.push(LinkSpan {
                 url,
+                kind,
+                row: row_u16,
+                col_start: start,
+                col_end: col.saturating_sub(1),
+            });
+        }
+    }
+    spans
+}
+
+/// Scan the laid-out rows and record one [`FieldSpan`] per contiguous run of cells that
+/// share a field marker on a row, mirroring [`extract_link_spans`] exactly in shape. A
+/// control that wraps across rows yields one span per row.
+fn extract_field_spans(rows: &[Vec<Cell>], width_config: &WidthConfig) -> Vec<FieldSpan> {
+    let mut spans: Vec<FieldSpan> = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let Ok(row_u16) = u16::try_from(row_index) else {
+            continue;
+        };
+        let mut col: u16 = 0;
+        let mut open: Option<(u16, NodeId, FieldSpanKind)> = None; // (col_start, node_id, kind)
+        for cell in row {
+            let advance =
+                u16::try_from(grapheme_columns(cell.grapheme(), width_config)).unwrap_or(1);
+            match (&open, cell.field_marker()) {
+                (None, Some((node_id, kind))) => {
+                    open = Some((col, node_id, kind));
+                }
+                (Some((start, previous_node_id, previous_kind)), Some((node_id, kind)))
+                    if node_id != *previous_node_id || kind != *previous_kind =>
+                {
+                    spans.push(FieldSpan {
+                        node_id: *previous_node_id,
+                        kind: *previous_kind,
+                        row: row_u16,
+                        col_start: *start,
+                        col_end: col.saturating_sub(1),
+                    });
+                    open = Some((col, node_id, kind));
+                }
+                (Some((start, previous_node_id, previous_kind)), None) => {
+                    spans.push(FieldSpan {
+                        node_id: *previous_node_id,
+                        kind: *previous_kind,
+                        row: row_u16,
+                        col_start: *start,
+                        col_end: col.saturating_sub(1),
+                    });
+                    open = None;
+                }
+                _ => {}
+            }
+            col = col.saturating_add(advance);
+        }
+        if let Some((start, node_id, kind)) = open {
+            spans.push(FieldSpan {
+                node_id,
                 kind,
                 row: row_u16,
                 col_start: start,

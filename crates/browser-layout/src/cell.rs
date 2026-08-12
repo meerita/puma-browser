@@ -4,6 +4,9 @@
 // @created meerita <meerita@icloud.com>
 
 use browser_css::{Color, Emphasis, TextStyle};
+use browser_html::NodeId;
+
+use crate::field_span::{FieldSpan, FieldSpanKind};
 
 /// Whether a link span comes from an author-intended hyperlink (`<a href>`) or a
 /// citation (`<q cite>`).
@@ -58,6 +61,7 @@ pub struct Cell {
     link_url: Option<String>,
     citation_url: Option<String>,
     anchor_names: Vec<String>,
+    field_marker: Option<(NodeId, FieldSpanKind)>,
 }
 
 impl Cell {
@@ -73,6 +77,7 @@ impl Cell {
             link_url: None,
             citation_url: None,
             anchor_names: Vec::new(),
+            field_marker: None,
         }
     }
 
@@ -87,6 +92,7 @@ impl Cell {
             link_url: None,
             citation_url: None,
             anchor_names: Vec::new(),
+            field_marker: None,
         }
     }
 
@@ -139,6 +145,19 @@ impl Cell {
         &self.anchor_names
     }
 
+    /// Records the interactive form control this cell belongs to, used only by layout to
+    /// extract field spans. Not part of the public API: a control's identity reaches the
+    /// terminal only through the extracted [`FieldSpan`]s, never through the cell itself.
+    pub(crate) fn set_field_marker(&mut self, node_id: NodeId, kind: FieldSpanKind) {
+        self.field_marker = Some((node_id, kind));
+    }
+
+    /// The interactive form control this cell belongs to, or `None` when the cell is not
+    /// part of one. Crate-private for the same reason as [`Self::link_url`].
+    pub(crate) fn field_marker(&self) -> Option<(NodeId, FieldSpanKind)> {
+        self.field_marker
+    }
+
     pub fn grapheme(&self) -> &str {
         &self.grapheme
     }
@@ -184,6 +203,7 @@ pub struct CellBuffer {
     cells: Vec<Cell>,
     links: Vec<LinkSpan>,
     anchors: Vec<AnchorSpan>,
+    field_spans: Vec<FieldSpan>,
 }
 
 impl CellBuffer {
@@ -197,6 +217,7 @@ impl CellBuffer {
             cells,
             links: Vec::new(),
             anchors: Vec::new(),
+            field_spans: Vec::new(),
         }
     }
 
@@ -207,6 +228,15 @@ impl CellBuffer {
 
     pub(crate) fn set_links(&mut self, links: Vec<LinkSpan>) {
         self.links = links;
+    }
+
+    /// The interactive form-control spans recorded for this buffer, in row-major order.
+    pub fn field_spans(&self) -> &[FieldSpan] {
+        &self.field_spans
+    }
+
+    pub(crate) fn set_field_spans(&mut self, field_spans: Vec<FieldSpan>) {
+        self.field_spans = field_spans;
     }
 
     /// The anchor spans recorded for this buffer, in ascending row order.

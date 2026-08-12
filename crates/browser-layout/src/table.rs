@@ -81,7 +81,8 @@ fn is_block_node(node: &SemanticNode) -> bool {
         node,
         SemanticNode::Table { .. }
             | SemanticNode::Landmark { .. }
-            | SemanticNode::Form { .. }
+            | SemanticNode::Form(_)
+            | SemanticNode::Textarea(_)
             | SemanticNode::Details { .. }
             | SemanticNode::List { .. }
     )

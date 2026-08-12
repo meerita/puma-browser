@@ -3,11 +3,29 @@
 // @layer html
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{parse_html, InputKind, LandmarkRole, SemanticNode};
+use browser_html::{
+    parse_html, parse_html_with_base, ButtonKind, FormMethod, InputKind, LandmarkRole, SemanticNode,
+};
 
 fn first_matching(source: &str, wanted: impl Fn(&SemanticNode) -> bool) -> SemanticNode {
     let document = parse_html(source.as_bytes(), None).expect("well-formed HTML must parse");
     find_matching(document.children(), &wanted).expect("a matching node must be produced")
+}
+
+fn first_matching_with_base(source: &str, document_url: Option<&str>) -> SemanticNode {
+    let document = parse_html_with_base(source.as_bytes(), None, document_url)
+        .expect("well-formed HTML must parse");
+    find_matching(document.children(), &|node| {
+        matches!(node, SemanticNode::Form(_))
+    })
+    .expect("a form must be produced")
+}
+
+fn all_matching(source: &str, wanted: impl Fn(&SemanticNode) -> bool) -> Vec<SemanticNode> {
+    let document = parse_html(source.as_bytes(), None).expect("well-formed HTML must parse");
+    let mut matches = Vec::new();
+    collect_matching(document.children(), &wanted, &mut matches);
+    matches
 }
 
 fn find_matching(
@@ -25,12 +43,25 @@ fn find_matching(
     None
 }
 
+fn collect_matching(
+    nodes: &[SemanticNode],
+    wanted: &impl Fn(&SemanticNode) -> bool,
+    matches: &mut Vec<SemanticNode>,
+) {
+    for node in nodes {
+        if wanted(node) {
+            matches.push(node.clone());
+        }
+        collect_matching(children_of(node), wanted, matches);
+    }
+}
+
 fn children_of(node: &SemanticNode) -> &[SemanticNode] {
     match node {
-        SemanticNode::Form { children }
-        | SemanticNode::Landmark { children, .. }
+        SemanticNode::Landmark { children, .. }
         | SemanticNode::Details { children, .. }
         | SemanticNode::Figure { children, .. } => children,
+        SemanticNode::Form(form) => &form.children,
         _ => &[],
     }
 }
@@ -123,25 +154,22 @@ fn aria_role_attribute_overrides_the_element_landmark_role() {
 
 #[test]
 fn password_input_is_sensitive_and_carries_no_value() {
-    let input = first_matching(
+    let node = first_matching(
         r#"<form><input type="password" value="hunter2" aria-label="Password"></form>"#,
-        |node| matches!(node, SemanticNode::Input { .. }),
+        |node| matches!(node, SemanticNode::Input(_)),
     );
 
-    // The Input variant has no value field at all, so no typed or authored value can
-    // ever enter the tree; the debug form is the strongest available check.
-    let debug = format!("{input:?}");
-    let SemanticNode::Input {
-        kind,
-        label,
-        sensitive,
-    } = input
-    else {
+    // A password's value/checked attribute is never read, so the debug form is the
+    // strongest available check that no source value reaches the tree.
+    let debug = format!("{node:?}");
+    let SemanticNode::Input(input) = node else {
         panic!("expected an input");
     };
-    assert_eq!(kind, InputKind::Password);
-    assert!(sensitive, "a password input is sensitive");
-    assert_eq!(label.as_deref(), Some("Password"));
+    assert_eq!(input.kind, InputKind::Password);
+    assert!(input.sensitive, "a password input is sensitive");
+    assert_eq!(input.label.as_deref(), Some("Password"));
+    assert_eq!(input.value, "", "a password value never enters the tree");
+    assert!(!input.checked);
     assert!(
         !debug.contains("hunter2"),
         "no input value reaches the tree"
@@ -150,55 +178,292 @@ fn password_input_is_sensitive_and_carries_no_value() {
 
 #[test]
 fn text_input_defaults_to_text_kind_and_is_not_sensitive() {
-    let input = first_matching("<form><input></form>", |node| {
-        matches!(node, SemanticNode::Input { .. })
+    let node = first_matching("<form><input></form>", |node| {
+        matches!(node, SemanticNode::Input(_))
     });
-    assert!(matches!(
-        input,
-        SemanticNode::Input {
-            kind: InputKind::Text,
-            sensitive: false,
-            ..
-        }
-    ));
+    let SemanticNode::Input(input) = node else {
+        panic!("expected an input");
+    };
+    assert_eq!(input.kind, InputKind::Text);
+    assert!(!input.sensitive);
 }
 
 #[test]
 fn label_for_attribute_associates_a_control_label() {
-    let input = first_matching(
+    let node = first_matching(
         r#"<form><label for="e">Email</label><input id="e" type="email"></form>"#,
-        |node| matches!(node, SemanticNode::Input { .. }),
+        |node| matches!(node, SemanticNode::Input(_)),
     );
-    let SemanticNode::Input { label, .. } = input else {
+    let SemanticNode::Input(input) = node else {
         panic!("expected an input");
     };
-    assert_eq!(label.as_deref(), Some("Email"));
+    assert_eq!(input.label.as_deref(), Some("Email"));
 }
 
 #[test]
 fn select_options_are_captured_in_order() {
-    let select = first_matching(
+    let node = first_matching(
         "<form><select><option>Spain</option><option>France</option></select></form>",
-        |node| matches!(node, SemanticNode::Select { .. }),
+        |node| matches!(node, SemanticNode::Select(_)),
     );
-    let SemanticNode::Select { options, .. } = select else {
+    let SemanticNode::Select(select) = node else {
         panic!("expected a select");
     };
-    assert_eq!(options, vec!["Spain".to_string(), "France".to_string()]);
+    let labels: Vec<&str> = select
+        .options
+        .iter()
+        .map(|option| option.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["Spain", "France"]);
 }
 
 #[test]
 fn button_text_survives_as_inline_runs() {
-    let button = first_matching("<form><button>Send</button></form>", |node| {
-        matches!(node, SemanticNode::Button { .. })
+    let node = first_matching("<form><button>Send</button></form>", |node| {
+        matches!(node, SemanticNode::Button(_))
     });
-    let SemanticNode::Button { runs, .. } = button else {
+    let SemanticNode::Button(button) = node else {
         panic!("expected a button");
     };
+    assert_eq!(button.kind, ButtonKind::Button);
     assert_eq!(
-        runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+        button
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>(),
         "Send"
     );
+}
+
+#[test]
+fn node_ids_are_assigned_in_document_order_across_mixed_control_types() {
+    let node = first_matching(
+        r#"<form><input name="a"><select><option>One</option></select><input type="submit" value="Go"></form>"#,
+        |node| matches!(node, SemanticNode::Form(_)),
+    );
+    let SemanticNode::Form(form) = node else {
+        panic!("expected a form");
+    };
+    let ids: Vec<u32> = form
+        .children
+        .iter()
+        .map(|child| match child {
+            SemanticNode::Input(input) => input.id.value(),
+            SemanticNode::Select(select) => select.id.value(),
+            SemanticNode::Button(button) => button.id.value(),
+            other => panic!("unexpected node: {other:?}"),
+        })
+        .collect();
+    assert!(
+        ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "ids increase in document order: {ids:?}"
+    );
+    assert!(
+        form.id.value() < ids[0],
+        "the form's own id precedes its controls' ids"
+    );
+}
+
+#[test]
+fn submit_reset_and_button_inputs_normalize_to_button_not_input() {
+    let submit = first_matching(r#"<form><input type="submit" value="Go"></form>"#, |node| {
+        matches!(node, SemanticNode::Button(_))
+    });
+    let SemanticNode::Button(submit) = submit else {
+        panic!("expected a button");
+    };
+    assert_eq!(submit.kind, ButtonKind::Submit);
+    assert_eq!(
+        submit
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>(),
+        "Go"
+    );
+
+    let reset = first_matching(r#"<form><input type="reset"></form>"#, |node| {
+        matches!(node, SemanticNode::Button(_))
+    });
+    let SemanticNode::Button(reset) = reset else {
+        panic!("expected a button");
+    };
+    assert_eq!(reset.kind, ButtonKind::Reset);
+    assert_eq!(
+        reset
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>(),
+        "Reset"
+    );
+
+    let button = first_matching(r#"<form><input type="button" value="X"></form>"#, |node| {
+        matches!(node, SemanticNode::Button(_))
+    });
+    let SemanticNode::Button(button) = button else {
+        panic!("expected a button");
+    };
+    assert_eq!(button.kind, ButtonKind::Button);
+    assert_eq!(
+        button
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>(),
+        "X"
+    );
+
+    assert!(
+        all_matching(r#"<form><input type="submit" value="Go"></form>"#, |node| {
+            matches!(node, SemanticNode::Input(_))
+        })
+        .is_empty(),
+        "a normalized submit input never produces an Input node"
+    );
+}
+
+#[test]
+fn form_action_resolves_to_the_document_url_when_absent() {
+    let node = first_matching_with_base(
+        "<form><button>Go</button></form>",
+        Some("https://example.com/docs/index.html"),
+    );
+    let SemanticNode::Form(form) = node else {
+        panic!("expected a form");
+    };
+    assert_eq!(form.action, "https://example.com/docs/index.html");
+}
+
+#[test]
+fn form_action_resolves_a_relative_reference_against_the_base_url() {
+    let node = first_matching_with_base(
+        r#"<form action="submit.php"><button>Go</button></form>"#,
+        Some("https://example.com/docs/index.html"),
+    );
+    let SemanticNode::Form(form) = node else {
+        panic!("expected a form");
+    };
+    assert_eq!(form.action, "https://example.com/docs/submit.php");
+}
+
+#[test]
+fn form_method_post_and_uppercase_post_both_yield_post() {
+    for markup in [
+        r#"<form method="POST"><button>Go</button></form>"#,
+        r#"<form method="post"><button>Go</button></form>"#,
+    ] {
+        let node = first_matching(markup, |node| matches!(node, SemanticNode::Form(_)));
+        let SemanticNode::Form(form) = node else {
+            panic!("expected a form");
+        };
+        assert_eq!(form.method, FormMethod::Post);
+    }
+}
+
+#[test]
+fn form_method_defaults_to_get_when_absent_or_unrecognized() {
+    for markup in [
+        "<form><button>Go</button></form>",
+        r#"<form method="put"><button>Go</button></form>"#,
+    ] {
+        let node = first_matching(markup, |node| matches!(node, SemanticNode::Form(_)));
+        let SemanticNode::Form(form) = node else {
+            panic!("expected a form");
+        };
+        assert_eq!(form.method, FormMethod::Get);
+    }
+}
+
+#[test]
+fn multiple_select_keeps_every_selected_option() {
+    let node = first_matching(
+        r#"<form><select multiple><option selected>A</option><option selected>B</option><option>C</option></select></form>"#,
+        |node| matches!(node, SemanticNode::Select(_)),
+    );
+    let SemanticNode::Select(select) = node else {
+        panic!("expected a select");
+    };
+    let selected: Vec<&str> = select
+        .options
+        .iter()
+        .filter(|option| option.selected)
+        .map(|option| option.label.as_str())
+        .collect();
+    assert_eq!(selected, vec!["A", "B"]);
+}
+
+#[test]
+fn non_multiple_select_keeps_only_the_last_selected_option() {
+    let node = first_matching(
+        r#"<form><select><option selected>A</option><option selected>B</option></select></form>"#,
+        |node| matches!(node, SemanticNode::Select(_)),
+    );
+    let SemanticNode::Select(select) = node else {
+        panic!("expected a select");
+    };
+    let selected: Vec<&str> = select
+        .options
+        .iter()
+        .filter(|option| option.selected)
+        .map(|option| option.label.as_str())
+        .collect();
+    assert_eq!(selected, vec!["B"]);
+}
+
+#[test]
+fn select_with_more_than_the_option_limit_is_truncated_not_rejected() {
+    let options: String = (0..600)
+        .map(|index| format!("<option>{index}</option>"))
+        .collect();
+    let source = format!("<form><select>{options}</select></form>");
+    let node = first_matching(&source, |node| matches!(node, SemanticNode::Select(_)));
+    let SemanticNode::Select(select) = node else {
+        panic!("expected a select");
+    };
+    assert_eq!(select.options.len(), 500, "collection stops at the limit");
+}
+
+#[test]
+fn checkbox_input_captures_its_name_and_checked_state() {
+    let node = first_matching(
+        r#"<form><input type="checkbox" name="agree" checked value="yes"></form>"#,
+        |node| matches!(node, SemanticNode::Input(_)),
+    );
+    let SemanticNode::Input(input) = node else {
+        panic!("expected an input");
+    };
+    assert_eq!(input.kind, InputKind::Checkbox);
+    assert_eq!(input.name.as_deref(), Some("agree"));
+    assert!(input.checked);
+    assert_eq!(input.value, "yes");
+}
+
+#[test]
+fn textarea_value_comes_from_its_text_content_not_an_attribute() {
+    let node = first_matching(
+        r#"<form><textarea name="bio">Hello  world</textarea></form>"#,
+        |node| matches!(node, SemanticNode::Textarea(_)),
+    );
+    let SemanticNode::Textarea(textarea) = node else {
+        panic!("expected a textarea");
+    };
+    assert_eq!(textarea.name.as_deref(), Some("bio"));
+    assert_eq!(textarea.value, "Hello world");
+}
+
+#[test]
+fn button_captures_its_name_and_value_attributes() {
+    let node = first_matching(
+        r#"<form><button name="action" value="save">Save</button></form>"#,
+        |node| matches!(node, SemanticNode::Button(_)),
+    );
+    let SemanticNode::Button(button) = node else {
+        panic!("expected a button");
+    };
+    assert_eq!(button.name.as_deref(), Some("action"));
+    assert_eq!(button.value.as_deref(), Some("save"));
 }
 
 #[test]

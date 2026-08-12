@@ -3,23 +3,37 @@
 //! @layer html
 //! @created meerita <meerita@icloud.com>
 
+mod button_element;
+mod button_kind;
 mod document;
 mod encoding;
 mod error;
+mod form_element;
+mod form_method;
 mod inline_run;
+mod input_element;
 mod input_kind;
 mod landmark_role;
 mod node_id;
 mod parser;
 mod sanitize;
+mod select_element;
 mod semantic_node;
+mod textarea_element;
 
+pub use button_element::ButtonElement;
+pub use button_kind::ButtonKind;
 pub use document::{Document, DocumentTitle};
 pub use encoding::{DetectedEncoding, Encoding};
 pub use error::HtmlError;
+pub use form_element::FormElement;
+pub use form_method::FormMethod;
 pub use inline_run::{InlineEmphasis, InlineRun};
+pub use input_element::InputElement;
 pub use input_kind::InputKind;
 pub use landmark_role::LandmarkRole;
 pub use node_id::NodeId;
 pub use parser::{parse_html, parse_html_with_base};
+pub use select_element::{SelectElement, SelectOption};
 pub use semantic_node::SemanticNode;
+pub use textarea_element::TextareaElement;

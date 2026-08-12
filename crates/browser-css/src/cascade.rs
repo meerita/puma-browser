@@ -112,7 +112,7 @@ fn user_agent_declarations(node: &SemanticNode) -> Declarations {
         | SemanticNode::Figure { .. }
         | SemanticNode::Details { .. }
         | SemanticNode::Landmark { .. }
-        | SemanticNode::Form { .. } => block_declarations(),
+        | SemanticNode::Form(_) => block_declarations(),
         _ => Declarations::default(),
     }
 }
@@ -180,8 +180,8 @@ fn node_inline_style(node: &SemanticNode) -> Option<&str> {
         | SemanticNode::ListItem { inline_style, .. }
         | SemanticNode::TableCell { inline_style, .. }
         | SemanticNode::Quote { inline_style, .. }
-        | SemanticNode::Summary { inline_style, .. }
-        | SemanticNode::Button { inline_style, .. } => inline_style,
+        | SemanticNode::Summary { inline_style, .. } => inline_style,
+        SemanticNode::Button(button) => &button.inline_style,
         _ => return None,
     };
     inline_style.as_deref()

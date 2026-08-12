@@ -5,11 +5,13 @@
 
 mod cell;
 mod error;
+mod field_span;
 mod render;
 mod table;
 mod width;
 
 pub use cell::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkKind, LinkSpan};
 pub use error::LayoutError;
+pub use field_span::{FieldSpan, FieldSpanKind};
 pub use render::render_document;
 pub use width::{AmbiguousWidth, EmojiWidth, WidthConfig};

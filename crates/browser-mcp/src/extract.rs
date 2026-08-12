@@ -53,12 +53,12 @@ fn node_to_text(node: &SemanticNode) -> String {
         SemanticNode::List { children, .. }
         | SemanticNode::ListItem { children, .. }
         | SemanticNode::Quote { children, .. }
-        | SemanticNode::Form { children }
         | SemanticNode::Landmark { children, .. }
         | SemanticNode::Details { children, .. }
         | SemanticNode::Table { children }
         | SemanticNode::TableRow { children }
         | SemanticNode::TableCell { children, .. } => extract_text(children),
+        SemanticNode::Form(form) => extract_text(&form.children),
         SemanticNode::Figure { children, caption } => {
             let mut parts = extract_text(children);
             if let Some(caption_runs) = caption {
@@ -80,14 +80,14 @@ fn node_to_text(node: &SemanticNode) -> String {
                 format!("[Image: {}]", alt)
             }
         }
-        SemanticNode::Button { runs, .. } | SemanticNode::Summary { runs, .. } => {
-            runs_to_text(runs)
-        }
+        SemanticNode::Summary { runs, .. } => runs_to_text(runs),
+        SemanticNode::Button(button) => runs_to_text(&button.runs),
         SemanticNode::Separator => "---".to_string(),
         SemanticNode::EmbeddedContent { label } => format!("[Embedded: {}]", label),
         SemanticNode::Warning { message } => format!("[Warning: {}]", message),
-        SemanticNode::Input { label, .. } => label.as_deref().unwrap_or("").to_string(),
-        SemanticNode::Select { label, .. } => label.as_deref().unwrap_or("").to_string(),
+        SemanticNode::Input(input) => input.label.as_deref().unwrap_or("").to_string(),
+        SemanticNode::Select(select) => select.label.as_deref().unwrap_or("").to_string(),
+        SemanticNode::Textarea(textarea) => textarea.label.as_deref().unwrap_or("").to_string(),
     }
 }
 
@@ -104,20 +104,24 @@ fn collect_links(node: &SemanticNode, output: &mut Vec<LinkEntry>) {
     match node {
         SemanticNode::Heading { runs, .. }
         | SemanticNode::Paragraph { runs, .. }
-        | SemanticNode::Button { runs, .. }
         | SemanticNode::Summary { runs, .. } => {
             collect_links_from_runs(runs, output);
         }
+        SemanticNode::Button(button) => collect_links_from_runs(&button.runs, output),
         SemanticNode::List { children, .. }
         | SemanticNode::ListItem { children, .. }
         | SemanticNode::Quote { children, .. }
-        | SemanticNode::Form { children }
         | SemanticNode::Landmark { children, .. }
         | SemanticNode::Details { children, .. }
         | SemanticNode::Table { children }
         | SemanticNode::TableRow { children }
         | SemanticNode::TableCell { children, .. } => {
             for child in children {
+                collect_links(child, output);
+            }
+        }
+        SemanticNode::Form(form) => {
+            for child in &form.children {
                 collect_links(child, output);
             }
         }
@@ -135,8 +139,9 @@ fn collect_links(node: &SemanticNode, output: &mut Vec<LinkEntry>) {
         | SemanticNode::Separator
         | SemanticNode::EmbeddedContent { .. }
         | SemanticNode::Warning { .. }
-        | SemanticNode::Input { .. }
-        | SemanticNode::Select { .. } => {}
+        | SemanticNode::Input(_)
+        | SemanticNode::Select(_)
+        | SemanticNode::Textarea(_) => {}
     }
 }
 

@@ -12,16 +12,24 @@ use html5ever::{parse_document, Attribute, LocalName, Namespace, ParseOpts, Qual
 use percent_encoding::percent_decode_str;
 use url::Url;
 
+use crate::button_element::ButtonElement;
+use crate::button_kind::ButtonKind;
 use crate::document::{Document, DocumentTitle};
 use crate::encoding::{decode, detect_encoding, DetectedEncoding};
 use crate::error::HtmlError;
+use crate::form_element::FormElement;
+use crate::form_method::FormMethod;
 use crate::inline_run::{InlineEmphasis, InlineRun};
+use crate::input_element::InputElement;
 use crate::input_kind::InputKind;
 use crate::landmark_role::LandmarkRole;
+use crate::node_id::NodeId;
 use crate::sanitize::{
     collapse_whitespace, strip_control_characters, strip_control_characters_preserving_layout,
 };
+use crate::select_element::{SelectElement, SelectOption};
 use crate::semantic_node::SemanticNode;
+use crate::textarea_element::TextareaElement;
 
 /// Upper bound on the number of DOM nodes retained during a parse.
 ///
@@ -46,6 +54,13 @@ const MAX_TABLE_ROWS: usize = 1_000;
 /// A row far wider than the terminal cannot render as columns and only inflates the node
 /// count, so each row is truncated to this many cells and a warning is emitted.
 const MAX_TABLE_COLUMNS: usize = 64;
+
+/// Upper bound on the number of options retained from a single `<select>`.
+///
+/// A pathological `<select>` with far more options than any terminal could usefully
+/// present is a memory hazard from untrusted markup, so collection stops once this many
+/// options have been gathered.
+const MAX_SELECT_OPTIONS: usize = 500;
 
 /// Parse HTML document bytes into a recursive [`Document`] tree.
 ///
@@ -440,6 +455,12 @@ struct TreeExtractor<'a> {
     /// built and absorbs it. The buffer persists across the block boundary so an `id` on a
     /// container reaches the first run of the block nested inside it.
     pending_anchors: Vec<String>,
+    /// The next value [`allocate_node_id`](Self::allocate_node_id) hands out.
+    ///
+    /// Ids are assigned in document order as forms and controls are visited; they are not
+    /// required to be stable across reparses, since a page's live field state is rebuilt
+    /// fresh on every load.
+    next_node_id: u32,
 }
 
 impl<'a> TreeExtractor<'a> {
@@ -449,7 +470,15 @@ impl<'a> TreeExtractor<'a> {
             script_count: 0,
             base_url,
             pending_anchors: Vec::new(),
+            next_node_id: 0,
         }
+    }
+
+    /// Allocate the next [`NodeId`], in document order.
+    fn allocate_node_id(&mut self) -> NodeId {
+        let id = NodeId::new(self.next_node_id);
+        self.next_node_id += 1;
+        id
     }
 
     /// Record this element's anchor names so the next run built absorbs them.
@@ -551,7 +580,8 @@ impl<'a> TreeExtractor<'a> {
             "details" => self.push_details(element, output),
             "summary" => self.push_summary(element, output),
             "form" => self.push_form(element, output),
-            "input" | "textarea" => self.push_input(element, output),
+            "input" => self.push_input(element, output),
+            "textarea" => self.push_textarea(element, output),
             "select" => self.push_select(element, output),
             "button" => self.push_button(element, output),
             "iframe" | "object" | "embed" | "video" | "audio" => {
@@ -984,12 +1014,45 @@ impl<'a> TreeExtractor<'a> {
         });
     }
 
+    /// Map a `<form>` into a `Form`, resolving its submission `action` and `method`
+    /// before recursing into its children, so the form's own id precedes its controls'
+    /// ids in document order.
     fn push_form(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let id = self.allocate_node_id();
+        let action = self.form_action(element);
+        let method = self.form_method(element);
         let children = self.block_children(element);
         if children.is_empty() {
             return;
         }
-        output.push(SemanticNode::Form { children });
+        output.push(SemanticNode::Form(FormElement {
+            id,
+            action,
+            method,
+            children,
+        }));
+    }
+
+    /// A form's resolved submission target: an absent or empty `action` attribute
+    /// resolves to the document's own URL, exactly like an empty link `href` would.
+    fn form_action(&self, element: usize) -> String {
+        let action = self
+            .attribute(element, "action")
+            .map(sanitize_reference)
+            .unwrap_or_default();
+        resolve_reference(&action, self.base_url.as_ref())
+    }
+
+    /// A form's submission method: matched case-insensitively, defaulting to `Get` for
+    /// an absent or unrecognized `method` attribute.
+    fn form_method(&self, element: usize) -> FormMethod {
+        let Some(raw) = self.attribute(element, "method") else {
+            return FormMethod::Get;
+        };
+        if raw.trim().eq_ignore_ascii_case("post") {
+            return FormMethod::Post;
+        }
+        FormMethod::Get
     }
 
     fn push_landmark(&mut self, element: usize, tag: &str, output: &mut Vec<SemanticNode>) {
@@ -1011,34 +1074,96 @@ impl<'a> TreeExtractor<'a> {
             .unwrap_or(LandmarkRole::Region)
     }
 
-    /// Map an `<input>` or `<textarea>` into an inert `Input` placeholder.
+    /// Map an `<input>` into `Input`, or into `Button` when its `type` normalizes to a
+    /// submit/reset/button control.
     ///
-    /// The control's value is never read: a `type="password"` input is marked sensitive
-    /// and, like every other input, carries no value into the tree.
+    /// A sensitive (`type="password"`) input never has its `value`/`checked` attribute
+    /// read: [`input_value_and_checked`](Self::input_value_and_checked) returns their
+    /// defaults for it without inspecting the source at all.
     fn push_input(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
         let kind = InputKind::from_type_attribute(self.attribute(element, "type").as_deref());
+        if let Some(button_kind) = button_kind_for_input(kind) {
+            let button = self.build_button(element, button_kind);
+            output.push(SemanticNode::Button(button));
+            return;
+        }
         let sensitive = kind.is_sensitive();
+        let id = self.allocate_node_id();
+        let name = self.attribute(element, "name");
         let label = self.control_label(element);
-        output.push(SemanticNode::Input {
+        let (value, checked) = self.input_value_and_checked(element, sensitive);
+        output.push(SemanticNode::Input(InputElement {
+            id,
             kind,
+            name,
+            value,
+            checked,
             label,
             sensitive,
-        });
+        }));
+    }
+
+    /// An input's `value` and `checked` state, or defaults for a sensitive control.
+    ///
+    /// A sensitive input returns before either source attribute is read, so a password
+    /// value is never parsed into a local variable, let alone stored.
+    fn input_value_and_checked(&self, element: usize, sensitive: bool) -> (String, bool) {
+        if sensitive {
+            return (String::new(), false);
+        }
+        let value = self
+            .attribute(element, "value")
+            .map(sanitize_inline)
+            .unwrap_or_default();
+        let checked = self.attribute(element, "checked").is_some();
+        (value, checked)
+    }
+
+    /// Map a `<textarea>` into `Textarea`. Its value is the element's text content, not
+    /// an attribute.
+    fn push_textarea(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let id = self.allocate_node_id();
+        let name = self.attribute(element, "name");
+        let label = self.control_label(element);
+        let value = self.plain_text_of(element);
+        output.push(SemanticNode::Textarea(TextareaElement {
+            id,
+            name,
+            value,
+            label,
+        }));
     }
 
     fn push_select(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
+        let id = self.allocate_node_id();
+        let name = self.attribute(element, "name");
         let label = self.control_label(element);
+        let multiple = self.attribute(element, "multiple").is_some();
         let mut options = Vec::new();
         self.collect_options(element, &mut options);
-        output.push(SemanticNode::Select { label, options });
+        if !multiple {
+            keep_last_selected(&mut options);
+        }
+        output.push(SemanticNode::Select(SelectElement {
+            id,
+            name,
+            label,
+            multiple,
+            options,
+        }));
     }
 
-    /// Gather a select's option labels in source order, descending through `<optgroup>`
-    /// wrappers so grouped options join the flat list.
-    fn collect_options(&self, node: usize, options: &mut Vec<String>) {
+    /// Gather a select's options in source order, descending through `<optgroup>`
+    /// wrappers so grouped options join the flat list. Collection stops once
+    /// [`MAX_SELECT_OPTIONS`] options have been gathered, so a pathological `<select>`
+    /// cannot grow the tree unbounded.
+    fn collect_options(&self, node: usize, options: &mut Vec<SelectOption>) {
         for child in self.child_handles(node) {
+            if options.len() >= MAX_SELECT_OPTIONS {
+                return;
+            }
             if self.is_element_named(child, "option") {
-                options.push(self.plain_text_of(child));
+                options.push(self.build_select_option(child));
                 continue;
             }
             if !self.arena[child].is_element {
@@ -1048,12 +1173,54 @@ impl<'a> TreeExtractor<'a> {
         }
     }
 
+    /// An `<option>`'s submission data: `value` defaults to the option's own text when
+    /// the source carries no `value` attribute.
+    fn build_select_option(&self, node: usize) -> SelectOption {
+        let label = self.plain_text_of(node);
+        let value = self
+            .attribute(node, "value")
+            .map(sanitize_inline)
+            .unwrap_or_else(|| label.clone());
+        let selected = self.attribute(node, "selected").is_some();
+        SelectOption {
+            value,
+            label,
+            selected,
+        }
+    }
+
     fn push_button(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
-        let runs = self.block_runs(element);
-        output.push(SemanticNode::Button {
+        let button = self.build_button(element, ButtonKind::Button);
+        output.push(SemanticNode::Button(button));
+    }
+
+    /// Build a `ButtonElement` for a `<button>` element or a normalized submit/reset/
+    /// button `<input>`, assigning a fresh `NodeId`.
+    ///
+    /// A `<button>`'s label comes from its own inline content. A normalized `<input>`
+    /// has no children, so its label is a single plain-text run built from its `value`
+    /// attribute, falling back to a fixed default matching default browser rendering.
+    fn build_button(&mut self, element: usize, kind: ButtonKind) -> ButtonElement {
+        let id = self.allocate_node_id();
+        let name = self.attribute(element, "name");
+        let value = self.attribute(element, "value").map(sanitize_inline);
+        let is_button_element = self.is_element_named(element, "button");
+        let runs = if is_button_element {
+            self.block_runs(element)
+        } else {
+            let text = value
+                .clone()
+                .unwrap_or_else(|| default_button_label(kind).to_string());
+            vec![InlineRun::plain(text)]
+        };
+        ButtonElement {
+            id,
+            kind,
+            name,
+            value,
             runs,
             inline_style: self.inline_style(element),
-        });
+        }
     }
 
     /// The accessible label of a form control.
@@ -1665,6 +1832,39 @@ fn table_truncation_message(rows_truncated: bool, columns_truncated: bool) -> St
         return format!("A large table was truncated to its first {MAX_TABLE_ROWS} rows");
     }
     format!("A large table was truncated to its first {MAX_TABLE_COLUMNS} columns")
+}
+
+/// The button behavior an `<input>`'s type normalizes to, or `None` when it is not a
+/// submit/reset/button control and should stay an `Input`.
+fn button_kind_for_input(kind: InputKind) -> Option<ButtonKind> {
+    match kind {
+        InputKind::Submit => Some(ButtonKind::Submit),
+        InputKind::Reset => Some(ButtonKind::Reset),
+        InputKind::Button => Some(ButtonKind::Button),
+        _ => None,
+    }
+}
+
+/// The fixed label a normalized `<input type=submit|reset|button>` renders when it has
+/// no `value` attribute, matching default browser rendering.
+fn default_button_label(kind: ButtonKind) -> &'static str {
+    match kind {
+        ButtonKind::Submit => "Submit",
+        ButtonKind::Reset => "Reset",
+        ButtonKind::Button => "Button",
+    }
+}
+
+/// Keep only the last selected option when a non-multiple select's markup selects more
+/// than one, matching how a browser resolves the invalid-but-common case rather than
+/// rejecting the page.
+fn keep_last_selected(options: &mut [SelectOption]) {
+    let Some(last_selected) = options.iter().rposition(|option| option.selected) else {
+        return;
+    };
+    for (index, option) in options.iter_mut().enumerate() {
+        option.selected = index == last_selected;
+    }
 }
 
 fn heading_level(tag: &str) -> Option<u8> {
