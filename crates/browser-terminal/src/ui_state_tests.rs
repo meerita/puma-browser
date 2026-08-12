@@ -252,34 +252,34 @@ fn command_append_char_handles_multibyte_unicode_correctly() {
 }
 
 #[test]
-fn focus_next_link_advances_index() {
+fn focus_next_interactive_advances_index() {
     let mut state = UiState::new(true);
-    state.focus_next_link(3);
-    assert_eq!(state.focused_link_index, Some(0));
-    state.focus_next_link(3);
-    assert_eq!(state.focused_link_index, Some(1));
-    state.focus_next_link(3);
-    assert_eq!(state.focused_link_index, Some(2));
-    state.focus_next_link(3);
-    assert_eq!(state.focused_link_index, Some(0));
+    state.focus_next_interactive(3);
+    assert_eq!(state.focused_interactive_index, Some(0));
+    state.focus_next_interactive(3);
+    assert_eq!(state.focused_interactive_index, Some(1));
+    state.focus_next_interactive(3);
+    assert_eq!(state.focused_interactive_index, Some(2));
+    state.focus_next_interactive(3);
+    assert_eq!(state.focused_interactive_index, Some(0));
 }
 
 #[test]
-fn focus_previous_link_wraps() {
+fn focus_previous_interactive_wraps() {
     let mut state = UiState::new(true);
-    state.focus_previous_link(3);
-    assert_eq!(state.focused_link_index, Some(2));
+    state.focus_previous_interactive(3);
+    assert_eq!(state.focused_interactive_index, Some(2));
 }
 
 #[test]
-fn enter_and_exit_link_navigation() {
+fn enter_and_exit_interactive_navigation() {
     let mut state = UiState::new(true);
-    state.enter_link_navigation(1);
-    assert!(state.is_in_link_navigation());
-    assert_eq!(state.focused_link_index, Some(1));
-    state.exit_link_navigation();
-    assert!(!state.is_in_link_navigation());
-    assert_eq!(state.focused_link_index, None);
+    state.enter_interactive_navigation(1);
+    assert!(state.is_in_interactive_navigation());
+    assert_eq!(state.focused_interactive_index, Some(1));
+    state.exit_interactive_navigation();
+    assert!(!state.is_in_interactive_navigation());
+    assert_eq!(state.focused_interactive_index, None);
 }
 
 #[test]
@@ -700,12 +700,12 @@ fn entering_settings_mode_focuses_the_first_row() {
 #[test]
 fn exiting_settings_mode_restores_the_previous_mode() {
     let mut state = UiState::new(true);
-    state.enter_link_navigation(0);
+    state.enter_interactive_navigation(0);
     state.enter_settings_mode(sample_settings_model());
     assert!(state.is_in_settings_mode());
     state.exit_settings_mode();
     assert!(!state.is_in_settings_mode());
-    assert!(state.is_in_link_navigation());
+    assert!(state.is_in_interactive_navigation());
     assert!(state.settings_model().is_none());
 }
 

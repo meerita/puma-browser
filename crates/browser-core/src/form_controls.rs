@@ -69,6 +69,17 @@ fn form_if_owns(form: &FormElement, id: NodeId) -> Option<&FormElement> {
     None
 }
 
+/// The form control or button node whose id is `id`, anywhere in `document`, or `None`
+/// if the id is unknown or belongs to no form.
+///
+/// Lets an output adapter inspect a control's static shape (its input kind, its select
+/// options, its button kind) by id, reusing the same form-tree walk submission and
+/// radio-grouping already use, rather than duplicating it.
+pub(crate) fn find_control(document: &Document, id: NodeId) -> Option<&SemanticNode> {
+    let form = find_enclosing_form(document, id)?;
+    find_control_by_id(&form.children, id)
+}
+
 /// The button within `form` whose id is `id`, or `None` if `id` does not name one of
 /// its buttons.
 ///

@@ -35,7 +35,7 @@ fn paragraph(text: &str, inline_style: Option<&str>) -> SemanticNode {
 fn a_display_none_paragraph_produces_no_rows() {
     let document = document_of(vec![paragraph("hidden text", Some("display: none"))]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default(), None)
         .expect("layout must succeed");
 
     assert_eq!(buffer.height(), 0);
@@ -48,7 +48,7 @@ fn a_hidden_paragraph_does_not_suppress_its_visible_sibling() {
         paragraph("shown", None),
     ]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default(), None)
         .expect("layout must succeed");
 
     assert_eq!(buffer.height(), 2); // 1 content row + 1 blank from paragraph spacing_after
@@ -59,7 +59,7 @@ fn a_hidden_paragraph_does_not_suppress_its_visible_sibling() {
 fn an_inline_color_reaches_the_rendered_cells() {
     let document = document_of(vec![paragraph("hello", Some("color: red"))]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default(), None)
         .expect("layout must succeed");
 
     let first = buffer.cell_at(0, 0).expect("first cell must exist");
@@ -75,7 +75,7 @@ fn an_inherited_color_reaches_a_child_paragraph_cell() {
         inline_style: Some(String::from("color: green")),
     }]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default(), None)
         .expect("layout must succeed");
 
     let colored = cell_with_grapheme(&buffer, "q").expect("quoted text must be rendered");
@@ -86,7 +86,7 @@ fn an_inherited_color_reaches_a_child_paragraph_cell() {
 fn uppercase_text_transform_is_applied_to_rendered_text() {
     let document = document_of(vec![paragraph("hi", Some("text-transform: uppercase"))]);
 
-    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default())
+    let buffer = render_document(&document, CONTENT_WIDTH, &WidthConfig::default(), None)
         .expect("layout must succeed");
 
     assert_eq!(buffer.cell_at(0, 0).map(|cell| cell.grapheme()), Some("H"));

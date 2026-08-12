@@ -28,7 +28,7 @@ fn paragraph_of(runs: Vec<InlineRun>) -> SemanticNode {
 }
 
 fn render(nodes: Vec<SemanticNode>) -> CellBuffer {
-    render_document(&document_of(nodes), 40, &WidthConfig::default())
+    render_document(&document_of(nodes), 40, &WidthConfig::default(), None)
         .expect("document must lay out")
 }
 

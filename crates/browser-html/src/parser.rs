@@ -1190,8 +1190,23 @@ impl<'a> TreeExtractor<'a> {
     }
 
     fn push_button(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
-        let button = self.build_button(element, ButtonKind::Button);
+        let kind = self.button_type_attribute(element);
+        let button = self.build_button(element, kind);
         output.push(SemanticNode::Button(button));
+    }
+
+    /// A `<button>` element's own submission behavior, read from its `type` attribute
+    /// and matched case-insensitively. An absent or unrecognized value defaults to
+    /// `Submit`, matching a `<button>`'s default behavior inside a form.
+    fn button_type_attribute(&self, element: usize) -> ButtonKind {
+        let Some(raw) = self.attribute(element, "type") else {
+            return ButtonKind::Submit;
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "reset" => ButtonKind::Reset,
+            "button" => ButtonKind::Button,
+            _ => ButtonKind::Submit,
+        }
     }
 
     /// Build a `ButtonElement` for a `<button>` element or a normalized submit/reset/

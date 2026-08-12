@@ -23,7 +23,10 @@ mod tab_id;
 mod tab_state;
 
 pub use address_resolver::resolve_address;
-pub use browser_html::{Document, DocumentTitle, NodeId};
+pub use browser_html::{
+    ButtonElement, ButtonKind, Document, DocumentTitle, FormElement, FormMethod, InputElement,
+    InputKind, NodeId, SelectElement, SelectOption,
+};
 pub use browser_layout::CellBuffer;
 pub use browser_network::{BrowserUrl, RequestHeaders};
 pub use browser_privacy::{CookiePolicy, CookieScope, RejectionReason, SameSite};
@@ -50,9 +53,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use browser_html::{
-    ButtonElement, FormElement, FormMethod, InputElement, InputKind, SelectElement, SemanticNode,
-};
+use browser_html::SemanticNode;
+use browser_layout::{FieldOverlay, FieldRenderValue};
 use browser_network::{
     fetch_once, resolve_redirect, submit_once, FetchedDocument, HopOutcome, NetworkError,
     RequestBody, RequestMethod, MAX_REDIRECT_COUNT,
@@ -738,16 +740,20 @@ impl NavigationController {
     /// Lay the current page out into a cell buffer sized to `width` columns.
     ///
     /// With no page loaded this returns a blank buffer rather than an error, so the
-    /// terminal can draw an empty page. With a page loaded it runs layout and maps a
-    /// [`LayoutError`](browser_layout::LayoutError) into [`CoreError`] by `?`.
+    /// terminal can draw an empty page. With a page loaded, a live-value overlay is
+    /// built from the page's [`FormFieldValues`] and passed into layout so every
+    /// control renders its current typed value rather than its static default. Layout
+    /// errors map into [`CoreError`] by `?`.
     pub fn render(&self, width: u16) -> Result<CellBuffer, CoreError> {
         let Some(page) = &self.current_page else {
             return Ok(CellBuffer::new(width, 0));
         };
+        let overlay = build_field_overlay(page.document(), page.form_field_values());
         let buffer = browser_layout::render_document(
             page.document(),
             width,
             &browser_layout::WidthConfig::default(),
+            Some(&overlay),
         )?;
         Ok(buffer)
     }
@@ -765,6 +771,55 @@ impl NavigationController {
     /// The parsed document for the current page, or `None` when no page is loaded.
     pub fn current_document(&self) -> Option<&Document> {
         self.current_page.as_ref().map(|page| page.document())
+    }
+
+    /// The parsed node for the form control or button identified by `id`, or `None`
+    /// when no page is loaded or the id names no known control.
+    fn control_node(&self, id: NodeId) -> Option<&SemanticNode> {
+        let page = self.current_page.as_ref()?;
+        form_controls::find_control(page.document(), id)
+    }
+
+    /// The parsed `<input>` element identified by `id`, or `None` when no page is
+    /// loaded, the id names no known control, or the control is not an input.
+    ///
+    /// Lets an output adapter inspect an input's kind and sensitivity before deciding
+    /// how to present or activate it.
+    pub fn input_element(&self, id: NodeId) -> Option<&InputElement> {
+        match self.control_node(id)? {
+            SemanticNode::Input(input) => Some(input),
+            _ => None,
+        }
+    }
+
+    /// The parsed `<select>` element identified by `id`, or `None` under the same
+    /// conditions as [`input_element`](Self::input_element).
+    pub fn select_element(&self, id: NodeId) -> Option<&SelectElement> {
+        match self.control_node(id)? {
+            SemanticNode::Select(select) => Some(select),
+            _ => None,
+        }
+    }
+
+    /// The parsed `<button>` element, or the button normalized from a submit, reset, or
+    /// button input, identified by `id`, or `None` under the same conditions as
+    /// [`input_element`](Self::input_element).
+    pub fn button_element(&self, id: NodeId) -> Option<&ButtonElement> {
+        match self.control_node(id)? {
+            SemanticNode::Button(button) => Some(button),
+            _ => None,
+        }
+    }
+
+    /// The declared method and resolved destination of the form enclosing `control_id`,
+    /// or `None` when no page is loaded or the id belongs to no form.
+    ///
+    /// Lets an output adapter build a submission confirmation view before the user
+    /// commits to sending the request; this performs no navigation itself.
+    pub fn form_submission_target(&self, control_id: NodeId) -> Option<(FormMethod, String)> {
+        let page = self.current_page.as_ref()?;
+        let form = form_controls::find_enclosing_form(page.document(), control_id)?;
+        Some((form.method, form.action.clone()))
     }
 
     /// The current page's live form field state, or `None` when no page is loaded.
@@ -836,6 +891,20 @@ impl NavigationController {
         let mut values = page.form_field_values().selected_values(id).to_vec();
         toggle_value(&mut values, value);
         page.form_field_values_mut().set_selected(id, values);
+        Ok(())
+    }
+
+    /// Resets the form enclosing `id` back to its parsed defaults, discarding every
+    /// edit the user made to its controls.
+    ///
+    /// Reuses [`seed_form`], the same per-control seeding `finish_load` runs when a
+    /// page is first loaded, so a reset and a fresh load compute identical defaults.
+    pub fn reset_form(&mut self, id: NodeId) -> Result<(), CoreError> {
+        let page = self.current_page_mut()?;
+        let (document, field_values) = page.document_and_form_field_values_mut();
+        let form =
+            form_controls::find_enclosing_form(document, id).ok_or(CoreError::FieldNotFound)?;
+        seed_form(form, field_values);
         Ok(())
     }
 
@@ -1264,6 +1333,110 @@ fn seed_select(select: &SelectElement, field_values: &mut FormFieldValues) {
         .map(|option| option.value.clone())
         .collect();
     field_values.set_selected(select.id, selected);
+}
+
+/// Walks every form in `document` and builds a [`FieldOverlay`] from `field_values`'s
+/// current state, so `render` shows each control's live typed value instead of its
+/// static parsed default.
+///
+/// A sensitive field's overlay entry carries only its revealed length: `reveal` is
+/// called here to count characters, and the revealed string is dropped immediately
+/// afterward without being stored or returned.
+fn build_field_overlay(document: &Document, field_values: &FormFieldValues) -> FieldOverlay {
+    let mut overlay = FieldOverlay::new();
+    overlay_forms_in(document.children(), field_values, &mut overlay);
+    overlay
+}
+
+fn overlay_forms_in(
+    children: &[SemanticNode],
+    field_values: &FormFieldValues,
+    overlay: &mut FieldOverlay,
+) {
+    for child in children {
+        overlay_form_or_recurse(child, field_values, overlay);
+    }
+}
+
+fn overlay_form_or_recurse(
+    node: &SemanticNode,
+    field_values: &FormFieldValues,
+    overlay: &mut FieldOverlay,
+) {
+    if let SemanticNode::Form(form) = node {
+        overlay_form(form, field_values, overlay);
+        return;
+    }
+    if let Some(children) = form_controls::children_of(node) {
+        overlay_forms_in(children, field_values, overlay);
+    }
+}
+
+fn overlay_form(form: &FormElement, field_values: &FormFieldValues, overlay: &mut FieldOverlay) {
+    for control in form_controls::collect_controls(form) {
+        overlay_control(control, field_values, overlay);
+    }
+}
+
+fn overlay_control(
+    control: &SemanticNode,
+    field_values: &FormFieldValues,
+    overlay: &mut FieldOverlay,
+) {
+    if let SemanticNode::Input(input) = control {
+        overlay_input(input, field_values, overlay);
+        return;
+    }
+    if let SemanticNode::Select(select) = control {
+        overlay_select(select, field_values, overlay);
+        return;
+    }
+    if let SemanticNode::Textarea(textarea) = control {
+        overlay.insert(
+            textarea.id,
+            FieldRenderValue::Text(text_or_default(field_values, textarea.id)),
+        );
+    }
+}
+
+/// Overlays a sensitive input's revealed length, a toggle input's checked state, or a
+/// text-like input's current text.
+fn overlay_input(input: &InputElement, field_values: &FormFieldValues, overlay: &mut FieldOverlay) {
+    if input.sensitive {
+        let length = field_values
+            .sensitive_value(input.id)
+            .map(|value| value.reveal().chars().count())
+            .unwrap_or(0);
+        overlay.insert(input.id, FieldRenderValue::MaskedLength(length));
+        return;
+    }
+    let is_toggle = matches!(input.kind, InputKind::Checkbox | InputKind::Radio);
+    if is_toggle {
+        overlay.insert(
+            input.id,
+            FieldRenderValue::Checked(field_values.is_checked(input.id)),
+        );
+        return;
+    }
+    overlay.insert(
+        input.id,
+        FieldRenderValue::Text(text_or_default(field_values, input.id)),
+    );
+}
+
+fn overlay_select(
+    select: &SelectElement,
+    field_values: &FormFieldValues,
+    overlay: &mut FieldOverlay,
+) {
+    let selected_values = field_values.selected_values(select.id);
+    let labels = select
+        .options
+        .iter()
+        .filter(|option| selected_values.contains(&option.value))
+        .map(|option| option.label.clone())
+        .collect();
+    overlay.insert(select.id, FieldRenderValue::SelectedLabels(labels));
 }
 
 /// Builds the encoded submission pairs for `form`'s controls plus the activated

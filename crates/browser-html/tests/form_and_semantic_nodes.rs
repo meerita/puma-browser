@@ -225,7 +225,8 @@ fn button_text_survives_as_inline_runs() {
     let SemanticNode::Button(button) = node else {
         panic!("expected a button");
     };
-    assert_eq!(button.kind, ButtonKind::Button);
+    // A <button> with no type attribute defaults to Submit, matching HTML.
+    assert_eq!(button.kind, ButtonKind::Submit);
     assert_eq!(
         button
             .runs
@@ -234,6 +235,36 @@ fn button_text_survives_as_inline_runs() {
             .collect::<String>(),
         "Send"
     );
+}
+
+#[test]
+fn a_buttons_own_type_attribute_selects_its_kind() {
+    let submit = first_matching(
+        r#"<form><button type="submit">Go</button></form>"#,
+        |node| matches!(node, SemanticNode::Button(_)),
+    );
+    let SemanticNode::Button(submit) = submit else {
+        panic!("expected a button");
+    };
+    assert_eq!(submit.kind, ButtonKind::Submit);
+
+    let reset = first_matching(
+        r#"<form><button type="reset">Clear</button></form>"#,
+        |node| matches!(node, SemanticNode::Button(_)),
+    );
+    let SemanticNode::Button(reset) = reset else {
+        panic!("expected a button");
+    };
+    assert_eq!(reset.kind, ButtonKind::Reset);
+
+    let plain = first_matching(
+        r#"<form><button type="button">Toggle</button></form>"#,
+        |node| matches!(node, SemanticNode::Button(_)),
+    );
+    let SemanticNode::Button(plain) = plain else {
+        panic!("expected a button");
+    };
+    assert_eq!(plain.kind, ButtonKind::Button);
 }
 
 #[test]

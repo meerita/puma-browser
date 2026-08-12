@@ -29,11 +29,14 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use browser_core::{
-    BrowserUrl, CookiePolicy, CoreError, HistoryEntryId, NavigationController, NavigationSource,
-    NavigationTarget,
+    BrowserUrl, ButtonKind, CookiePolicy, CoreError, FormFieldValues, FormMethod, HistoryEntryId,
+    InputKind, NavigationController, NavigationSource, NavigationTarget, NodeId, SelectElement,
+    SelectOption,
 };
 use browser_css::{Color, Emphasis};
-use browser_layout::{AnchorSpan, Cell, CellBuffer, CellPosition, LinkKind, LinkSpan};
+use browser_layout::{
+    AnchorSpan, Cell, CellBuffer, CellPosition, FieldSpanKind, LinkKind, LinkSpan,
+};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -75,7 +78,7 @@ use settings_view::{
     SettingId, SettingsControl, SettingsModel, SettingsRow,
 };
 use title_bar::compose_title_bar;
-use ui_state::{SettingsEscOutcome, SettingsTextSave, UiState};
+use ui_state::{SettingsEscOutcome, SettingsTextSave, SubmitChoice, UiState};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use viewport::{max_scroll_offset, scroll_percentage, ScrollState, ViewportBounds};
@@ -109,6 +112,14 @@ enum LoadState {
         spinner_frame: usize,
         loading_url: String,
     },
+}
+
+/// What activating a focused interactive target asks the event loop to do next: load a
+/// link's URL through the ordinary navigation path, or submit a form's fields through
+/// the submission path.
+enum NavigationRequest {
+    LoadUrl(String),
+    Submit(NodeId),
 }
 
 /// The result of submitting a command-bar buffer: nothing further to do, a new load to
@@ -359,6 +370,7 @@ impl TerminalApp {
                 self.controller.cookie_counts(),
                 loading_ref,
                 selection_range,
+                self.controller.field_values(),
             )?;
 
             // Accumulators for state transitions; populated inside the select! arms and
@@ -366,7 +378,7 @@ impl TerminalApp {
             let mut completed_load: Option<(NavigationController, Result<(), CoreError>)> = None;
             let mut command_to_submit: Option<String> = None;
             let mut reload_url: Option<BrowserUrl> = None;
-            let mut navigate_to_url: Option<String> = None;
+            let mut navigation_request: Option<NavigationRequest> = None;
             let mut history_key_action: Option<InputAction> = None;
             let mut settings_mutation: Option<SettingsMutation> = None;
 
@@ -402,7 +414,7 @@ impl TerminalApp {
                         match event {
                             Event::Key(key) if key.kind != KeyEventKind::Release => {
                                 let in_command_mode = ui_state.is_in_command_mode();
-                                let in_link_navigation = ui_state.is_in_link_navigation();
+                                let in_interactive_navigation = ui_state.is_in_interactive_navigation();
                                 let palette_active = ui_state.is_palette_active();
                                 let address_suggestions_active = ui_state.has_address_suggestions();
                                 let in_history = ui_state.is_in_history_mode();
@@ -410,18 +422,24 @@ impl TerminalApp {
                                 let in_settings = ui_state.is_in_settings_mode();
                                 let settings_text_field_focused =
                                     ui_state.is_settings_text_field_focused();
+                                let in_field_text_edit = ui_state.is_in_field_text_edit();
+                                let in_field_multi_select = ui_state.is_in_field_multi_select();
+                                let in_submit_confirmation = ui_state.is_in_submit_confirmation();
                                 let action = map_key_event(
                                     key,
                                     ui_state.quit_armed,
                                     ui_state.refresh_armed,
                                     in_command_mode,
-                                    in_link_navigation,
+                                    in_interactive_navigation,
                                     palette_active,
                                     address_suggestions_active,
                                     in_history,
                                     in_cookies,
                                     in_settings,
                                     settings_text_field_focused,
+                                    in_field_text_edit,
+                                    in_field_multi_select,
+                                    in_submit_confirmation,
                                 );
                                 if matches!(action, InputAction::Quit) {
                                     return Ok(());
@@ -437,6 +455,7 @@ impl TerminalApp {
                                     apply_command_action(action, &mut ui_state);
                                 }
                                 apply_settings_text_action(action, &mut ui_state, now);
+                                apply_field_text_action(action, &mut ui_state);
                                 if action_refreshes_suggestions(action) {
                                     self.refresh_address_suggestions(&mut ui_state);
                                 }
@@ -451,7 +470,7 @@ impl TerminalApp {
                                     history_key_action = Some(action);
                                 }
                                 settings_mutation = settings_mutation_for(action);
-                                if let Some(link_url) = handle_navigation_action(
+                                if let Some(request) = handle_navigation_action(
                                     action,
                                     &mut self.controller,
                                     &mut ui_state,
@@ -463,7 +482,7 @@ impl TerminalApp {
                                         max_offset,
                                     },
                                 ) {
-                                    navigate_to_url = Some(link_url);
+                                    navigation_request = Some(request);
                                 }
                                 ui_state.quit_armed = quit_armed_after(action);
                                 ui_state.refresh_armed = refresh_armed_after(action);
@@ -474,18 +493,22 @@ impl TerminalApp {
                                 }
                             }
                             Event::Mouse(mouse) => {
+                                let mut mouse_navigate_url: Option<String> = None;
                                 handle_mouse_event(
                                     mouse,
                                     cache.as_ref().map(|cached| &cached.buffer),
                                     scroll.offset(),
                                     BODY_AREA_TOP_ROW,
                                     &mut selection,
-                                    &mut navigate_to_url,
+                                    &mut mouse_navigate_url,
                                     &mut ui_state,
                                     now,
                                     self.settings.copy_on_select,
                                     self.settings.force_osc52,
                                 );
+                                if let Some(url) = mouse_navigate_url {
+                                    navigation_request = Some(NavigationRequest::LoadUrl(url));
+                                }
                             }
                             _ => {}
                         }
@@ -576,17 +599,25 @@ impl TerminalApp {
                 load_state = self.start_load(url);
             }
 
-            // Apply link navigation — a Tab+Enter activation or a mouse click on a link.
-            if let Some(link_url) = navigate_to_url {
-                load_state = self.start_link_load(
-                    link_url,
-                    &working_dir,
-                    &mut ui_state,
-                    &mut cache,
-                    &mut scroll,
-                    max_offset,
-                    now,
-                );
+            // Apply the requested navigation — a Tab+Enter activation, a mouse click on a
+            // link, or a form submission.
+            match navigation_request {
+                Some(NavigationRequest::LoadUrl(link_url)) => {
+                    load_state = self.start_link_load(
+                        link_url,
+                        &working_dir,
+                        &mut ui_state,
+                        &mut cache,
+                        &mut scroll,
+                        max_offset,
+                        now,
+                    );
+                }
+                Some(NavigationRequest::Submit(submit_button)) => {
+                    ui_state.exit_interactive_navigation();
+                    load_state = self.start_submit_load(submit_button);
+                }
+                None => {}
             }
         }
     }
@@ -1296,7 +1327,7 @@ impl TerminalApp {
         now: Instant,
     ) -> LoadState {
         ui_state.mark_visited(&link_url);
-        ui_state.exit_link_navigation();
+        ui_state.exit_interactive_navigation();
         match browser_core::classify_navigation(
             self.controller.current_url(),
             &link_url,
@@ -1353,6 +1384,30 @@ impl TerminalApp {
         }
     }
 
+    /// Spawns the submission pipeline for the form activated at `submit_button` on a
+    /// background task, mirroring [`start_load`](Self::start_load)'s relationship to
+    /// `load_with_progress`. The status label falls back to the current URL while the
+    /// request is in flight, since the destination is not known to the caller yet.
+    fn start_submit_load(&mut self, submit_button: NodeId) -> LoadState {
+        let (progress_tx, progress_rx) = watch::channel(0usize);
+        let loading_url = self
+            .controller
+            .current_url()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let mut taken = std::mem::take(&mut self.controller);
+        let handle = tokio::spawn(async move {
+            let result = taken.submit_with_progress(submit_button, progress_tx).await;
+            (taken, result)
+        });
+        LoadState::Active {
+            handle,
+            progress_rx,
+            spinner_frame: 0,
+            loading_url,
+        }
+    }
+
     fn status_label(&self) -> String {
         match &self.view_state {
             ViewState::Blank => "blank".to_string(),
@@ -1385,6 +1440,7 @@ impl TerminalApp {
         cookie_counts: (usize, usize),
         loading: Option<(usize, &str, usize)>,
         selection_range: Option<(CellPosition, CellPosition)>,
+        field_values: Option<&FormFieldValues>,
     ) -> Result<(), TerminalError> {
         terminal
             .draw(|frame| {
@@ -1401,6 +1457,7 @@ impl TerminalApp {
                     cookie_counts,
                     loading,
                     selection_range,
+                    field_values,
                 )
             })
             .map_err(|_| TerminalError::RenderFailed)?;
@@ -1512,6 +1569,7 @@ fn draw_frame(
     cookie_counts: (usize, usize),
     loading: Option<(usize, &str, usize)>,
     selection_range: Option<(CellPosition, CellPosition)>,
+    field_values: Option<&FormFieldValues>,
 ) {
     let terminal_width = frame.area().width;
     let chunks = Layout::vertical([
@@ -1524,9 +1582,7 @@ fn draw_frame(
     ])
     .split(frame.area());
 
-    let focused_url = ui_state
-        .focused_link_index
-        .and_then(|index| page.and_then(|buffer| unique_links(buffer).get(index).copied()));
+    let focused_url = focused_interactive_link_span(ui_state, page);
     let link_context = LinkRenderContext {
         focused_url,
         ui_state,
@@ -1548,6 +1604,16 @@ fn draw_frame(
         draw_history_popup(frame, chunks[0], ui_state);
         draw_cookies_popup(frame, chunks[0], ui_state);
         draw_citation_preview_popup(frame, chunks[0], ui_state);
+        draw_field_text_edit(frame, chunks[0], ui_state, page, scroll_offset);
+        draw_field_multi_select(
+            frame,
+            chunks[0],
+            ui_state,
+            page,
+            scroll_offset,
+            field_values,
+        );
+        draw_submit_confirmation(frame, chunks[0], ui_state);
     }
 
     draw_separator(frame, chunks[1]);
@@ -1709,6 +1775,179 @@ fn draw_citation_preview_popup(frame: &mut Frame, content_area: Rect, ui_state: 
     }
     let line = Line::raw(strip_control(url));
     render_bottom_popup(frame, content_area, vec![line]);
+}
+
+/// The mask character drawn in place of a sensitive field's typed characters while it is
+/// being edited, matching the character `browser-layout` uses for a live-typed length.
+const FIELD_EDIT_MASK_CHARACTER: char = '•';
+
+/// Draws the active field text-edit draft over its field's row, replacing the static
+/// placeholder there with the live draft (masked for a sensitive field) and placing the
+/// terminal cursor at the draft's cursor position. Draws nothing when no text-edit
+/// sub-mode is active or the field's row is not in the current viewport; the draft text
+/// itself is a local editor buffer, not remote content, so no sanitizer pass is needed.
+fn draw_field_text_edit(
+    frame: &mut Frame,
+    content_area: Rect,
+    ui_state: &UiState,
+    page: Option<&CellBuffer>,
+    scroll_offset: u16,
+) {
+    let Some((node_id, sensitive)) = ui_state.field_text_edit_target() else {
+        return;
+    };
+    let Some((draft, cursor_byte_offset)) = ui_state.field_text_edit_cursor() else {
+        return;
+    };
+    let Some(buffer) = page else {
+        return;
+    };
+    let Some(span) = buffer
+        .field_spans()
+        .iter()
+        .find(|span| span.node_id == node_id)
+    else {
+        return;
+    };
+    if span.row < scroll_offset {
+        return;
+    }
+    let row_in_view = span.row - scroll_offset;
+    if row_in_view >= content_area.height || span.col_start >= content_area.width {
+        return;
+    }
+    let shown: String = if sensitive {
+        std::iter::repeat_n(FIELD_EDIT_MASK_CHARACTER, draft.chars().count()).collect()
+    } else {
+        draft.to_string()
+    };
+    let available_width = content_area.width - span.col_start;
+    let width = (shown.chars().count() as u16).max(1).min(available_width);
+    let area = Rect {
+        x: content_area.x + span.col_start,
+        y: content_area.y + row_in_view,
+        width,
+        height: 1,
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(shown).style(Style::default().add_modifier(Modifier::REVERSED)),
+        area,
+    );
+    let cursor_columns = (draft[..cursor_byte_offset].chars().count() as u16).min(width);
+    frame.set_cursor_position((area.x + cursor_columns, area.y));
+}
+
+/// Draws a multi-select's expanded option list under its field's row, one line per
+/// option with a checked/unchecked marker and the moved-to option highlighted. Draws
+/// nothing when the sub-mode is closed or the field's row is not in the current
+/// viewport. Every label is local, already-parsed option text, not remote content
+/// re-fetched here.
+fn draw_field_multi_select(
+    frame: &mut Frame,
+    content_area: Rect,
+    ui_state: &UiState,
+    page: Option<&CellBuffer>,
+    scroll_offset: u16,
+    field_values: Option<&FormFieldValues>,
+) {
+    let Some((node_id, options, cursor)) = ui_state.field_multi_select() else {
+        return;
+    };
+    let Some(buffer) = page else {
+        return;
+    };
+    let Some(span) = buffer
+        .field_spans()
+        .iter()
+        .find(|span| span.node_id == node_id)
+    else {
+        return;
+    };
+    if span.row < scroll_offset {
+        return;
+    }
+    let anchor_row = span.row - scroll_offset;
+    if anchor_row >= content_area.height || span.col_start >= content_area.width {
+        return;
+    }
+    let selected_values = field_values
+        .map(|values| values.selected_values(node_id))
+        .unwrap_or(&[]);
+    let lines: Vec<Line<'static>> = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| multi_select_option_line(option, selected_values, index == cursor))
+        .collect();
+    let available_rows = content_area.height - anchor_row - 1;
+    let height = (lines.len() as u16).min(available_rows);
+    if height == 0 {
+        return;
+    }
+    let area = Rect {
+        x: content_area.x + span.col_start,
+        y: content_area.y + anchor_row + 1,
+        width: content_area.width - span.col_start,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn multi_select_option_line(
+    option: &SelectOption,
+    selected_values: &[String],
+    is_cursor_row: bool,
+) -> Line<'static> {
+    let marker = if selected_values.contains(&option.value) {
+        "[x]"
+    } else {
+        "[ ]"
+    };
+    let text = format!("{marker} {}", strip_control(&option.label));
+    let style = if is_cursor_row {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    Line::styled(text, style)
+}
+
+/// Draws the `POST` submission confirmation view over the bottom of the content area,
+/// with the exact wording spec §11.2 specifies and the highlighted choice marked with
+/// `>`. Draws nothing when the view is closed. `destination` is already a resolved,
+/// sanitized action URL; it is control-stripped defensively at this render boundary
+/// like every other page-derived string.
+fn draw_submit_confirmation(frame: &mut Frame, content_area: Rect, ui_state: &UiState) {
+    let Some((_, destination, choice)) = ui_state.submit_confirmation() else {
+        return;
+    };
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let lines = vec![
+        Line::raw("Submit this form?"),
+        Line::raw(""),
+        Line::raw("Method: POST"),
+        Line::raw(format!("Destination: {}", strip_control(destination))),
+        Line::raw(""),
+        Line::raw(confirmation_choice_line(
+            "Submit",
+            choice == SubmitChoice::Submit,
+        )),
+        Line::raw(confirmation_choice_line(
+            "Cancel",
+            choice == SubmitChoice::Cancel,
+        )),
+    ];
+    render_bottom_popup(frame, content_area, lines);
+}
+
+fn confirmation_choice_line(label: &str, is_highlighted: bool) -> String {
+    if is_highlighted {
+        return format!("> {label}");
+    }
+    format!("  {label}")
 }
 
 /// Renders `lines` as a popup anchored to the bottom of `content_area`, clearing the region
@@ -2242,10 +2481,24 @@ fn apply_scroll(
         | InputAction::SettingsTextMoveCursorLeft
         | InputAction::SettingsTextMoveCursorRight
         | InputAction::SettingsTextCancel
-        | InputAction::FocusNextLink
-        | InputAction::FocusPreviousLink
-        | InputAction::ActivateFocusedLink
-        | InputAction::NavigateBack => {}
+        | InputAction::FocusNextInteractive
+        | InputAction::FocusPreviousInteractive
+        | InputAction::ActivateFocused
+        | InputAction::NavigateBack
+        | InputAction::FieldTextInput(_)
+        | InputAction::FieldTextDeleteBack
+        | InputAction::FieldTextMoveCursorLeft
+        | InputAction::FieldTextMoveCursorRight
+        | InputAction::FieldTextCancel
+        | InputAction::FieldTextCommit
+        | InputAction::FieldMultiSelectMoveUp
+        | InputAction::FieldMultiSelectMoveDown
+        | InputAction::FieldMultiSelectToggle
+        | InputAction::FieldMultiSelectCommit
+        | InputAction::FieldMultiSelectCancel
+        | InputAction::SubmitConfirmToggle
+        | InputAction::SubmitConfirmActivate
+        | InputAction::SubmitConfirmCancel => {}
     }
 }
 
@@ -2268,6 +2521,20 @@ fn apply_settings_text_action(action: InputAction, ui_state: &mut UiState, now: 
                 ui_state.exit_settings_mode();
             }
         }
+        _ => {}
+    }
+}
+
+/// Applies a form field's text-edit sub-mode editing action to its draft. Character and
+/// cursor keys edit the draft; commit and cancel need the controller to write the value
+/// back or discard it, so they are applied by `handle_navigation_action` instead. Every
+/// other action is ignored here, mirroring `apply_settings_text_action`.
+fn apply_field_text_action(action: InputAction, ui_state: &mut UiState) {
+    match action {
+        InputAction::FieldTextInput(character) => ui_state.field_text_input(character),
+        InputAction::FieldTextDeleteBack => ui_state.field_text_delete_back(),
+        InputAction::FieldTextMoveCursorLeft => ui_state.field_text_move_left(),
+        InputAction::FieldTextMoveCursorRight => ui_state.field_text_move_right(),
         _ => {}
     }
 }
@@ -2321,34 +2588,68 @@ fn apply_command_action(action: InputAction, ui_state: &mut UiState) {
         | InputAction::CommandSubmit
         | InputAction::HistoryActivateSelected
         | InputAction::HistoryDeleteSelected
-        | InputAction::FocusNextLink
-        | InputAction::FocusPreviousLink
-        | InputAction::ActivateFocusedLink
-        | InputAction::NavigateBack => {}
+        | InputAction::FocusNextInteractive
+        | InputAction::FocusPreviousInteractive
+        | InputAction::ActivateFocused
+        | InputAction::NavigateBack
+        | InputAction::FieldTextInput(_)
+        | InputAction::FieldTextDeleteBack
+        | InputAction::FieldTextMoveCursorLeft
+        | InputAction::FieldTextMoveCursorRight
+        | InputAction::FieldTextCancel
+        | InputAction::FieldTextCommit
+        | InputAction::FieldMultiSelectMoveUp
+        | InputAction::FieldMultiSelectMoveDown
+        | InputAction::FieldMultiSelectToggle
+        | InputAction::FieldMultiSelectCommit
+        | InputAction::FieldMultiSelectCancel
+        | InputAction::SubmitConfirmToggle
+        | InputAction::SubmitConfirmActivate
+        | InputAction::SubmitConfirmCancel => {}
     }
 }
 
-/// The unique link URLs in the order they first appear in the buffer (by row, then
-/// column). Each URL appears once regardless of how many spans it wraps across, so this
-/// is the list Tab navigation steps through.
-fn unique_links(buffer: &CellBuffer) -> Vec<&str> {
-    let mut seen: Vec<&str> = Vec::new();
+/// One focusable target in the unified Tab order: an author-intended link or citation,
+/// or a form control's field span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveTarget<'a> {
+    Link(&'a str),
+    Field(NodeId, FieldSpanKind),
+}
+
+/// The unique interactive targets in the order they first appear in the buffer (by row,
+/// then column), merging link spans and field spans. A link is deduplicated by URL and a
+/// field by its `NodeId`, each keeping its first occurrence's position, mirroring the
+/// former link-only `unique_links`. This is the list Tab navigation steps through.
+fn unique_interactive_targets(buffer: &CellBuffer) -> Vec<InteractiveTarget<'_>> {
+    let mut positioned: Vec<(u16, u16, InteractiveTarget<'_>)> = Vec::new();
     for span in buffer.links() {
-        if !seen.contains(&span.url.as_str()) {
-            seen.push(span.url.as_str());
+        positioned.push((span.row, span.col_start, InteractiveTarget::Link(&span.url)));
+    }
+    for span in buffer.field_spans() {
+        positioned.push((
+            span.row,
+            span.col_start,
+            InteractiveTarget::Field(span.node_id, span.kind),
+        ));
+    }
+    positioned.sort_by_key(|(row, col_start, _)| (*row, *col_start));
+    let mut targets: Vec<InteractiveTarget<'_>> = Vec::new();
+    for (_, _, target) in positioned {
+        if !targets.contains(&target) {
+            targets.push(target);
         }
     }
-    seen
+    targets
 }
 
-/// The index within [`unique_links`] of the first link whose first span starts at or
-/// below `scroll_offset`, so Tab focuses a link the reader can actually see. Falls back
-/// to the first link when every link is above the viewport.
-fn first_visible_link_index(buffer: &CellBuffer, scroll_offset: u16) -> usize {
-    for (index, url) in unique_links(buffer).iter().enumerate() {
-        let first_span = buffer.links().iter().find(|span| span.url.as_str() == *url);
-        if let Some(span) = first_span {
-            if span.row >= scroll_offset {
+/// The index within [`unique_interactive_targets`] of the first target whose first span
+/// starts at or below `scroll_offset`, so Tab focuses a target the reader can actually
+/// see. Falls back to the first target when every target is above the viewport.
+fn first_visible_interactive_index(buffer: &CellBuffer, scroll_offset: u16) -> usize {
+    for (index, target) in unique_interactive_targets(buffer).iter().enumerate() {
+        if let Some(row) = target_row(buffer, target) {
+            if row >= scroll_offset {
                 return index;
             }
         }
@@ -2356,43 +2657,57 @@ fn first_visible_link_index(buffer: &CellBuffer, scroll_offset: u16) -> usize {
     0
 }
 
+/// The row of `target`'s first span in `buffer`, or `None` when it names no span there.
+fn target_row(buffer: &CellBuffer, target: &InteractiveTarget<'_>) -> Option<u16> {
+    match *target {
+        InteractiveTarget::Link(url) => buffer
+            .links()
+            .iter()
+            .find(|span| span.url == url)
+            .map(|span| span.row),
+        InteractiveTarget::Field(node_id, _) => buffer
+            .field_spans()
+            .iter()
+            .find(|span| span.node_id == node_id)
+            .map(|span| span.row),
+    }
+}
+
 /// Whether the cell at `column`, `row` falls within `span`'s extent on its row.
 fn span_contains(span: &LinkSpan, row: u16, column: u16) -> bool {
     span.row == row && span.col_start <= column && column <= span.col_end
 }
 
-/// The row of the focused link's first span: the first `LinkSpan` whose URL matches the
-/// entry at `focused_index` in [`unique_links`]. `None` when the index or a matching span
+/// The row of the focused target's first span. `None` when the index or a matching span
 /// is absent.
-fn focused_link_row(buffer: &CellBuffer, focused_index: usize) -> Option<u16> {
-    let url = *unique_links(buffer).get(focused_index)?;
-    let first_span = buffer
-        .links()
-        .iter()
-        .find(|span| span.url.as_str() == url)?;
-    Some(first_span.row)
+fn focused_interactive_row(buffer: &CellBuffer, focused_index: usize) -> Option<u16> {
+    let target = unique_interactive_targets(buffer)
+        .into_iter()
+        .nth(focused_index)?;
+    target_row(buffer, &target)
 }
 
-/// Scrolls the viewport the minimum needed to reveal the focused link's first row. Does
-/// nothing when no link is focused or its row cannot be resolved.
-fn reveal_focused_link(
+/// Scrolls the viewport the minimum needed to reveal the focused target's first row. Does
+/// nothing when nothing is focused or its row cannot be resolved.
+fn reveal_focused_interactive(
     ui_state: &UiState,
     buffer: &CellBuffer,
     scroll: &mut ScrollState,
     bounds: ViewportBounds,
 ) {
-    let Some(focused_index) = ui_state.focused_link_index else {
+    let Some(focused_index) = ui_state.focused_interactive_index else {
         return;
     };
-    let Some(row) = focused_link_row(buffer, focused_index) else {
+    let Some(row) = focused_interactive_row(buffer, focused_index) else {
         return;
     };
     scroll.reveal_row(row, bounds.height, bounds.max_offset);
 }
 
-/// Applies a link-navigation or history action, returning the raw link URL to load when
-/// the action activates the focused link. Focus and back actions mutate UI and controller
-/// state directly and return `None`.
+/// Applies an interactive-navigation, field-edit, submission-confirmation, or history
+/// action. Returns the navigation the action asks the event loop to run: a link's URL to
+/// load, or a form's activated submit button to submit. Every other action mutates UI or
+/// controller state directly and returns `None`.
 fn handle_navigation_action(
     action: InputAction,
     controller: &mut NavigationController,
@@ -2401,10 +2716,10 @@ fn handle_navigation_action(
     scroll: &mut ScrollState,
     view_state: &mut ViewState,
     bounds: ViewportBounds,
-) -> Option<String> {
+) -> Option<NavigationRequest> {
     match action {
-        InputAction::FocusNextLink => {
-            advance_link_focus(
+        InputAction::FocusNextInteractive => {
+            advance_interactive_focus(
                 ui_state,
                 cache.as_ref().map(|cached| &cached.buffer),
                 scroll,
@@ -2412,8 +2727,8 @@ fn handle_navigation_action(
             );
             None
         }
-        InputAction::FocusPreviousLink => {
-            retreat_link_focus(
+        InputAction::FocusPreviousInteractive => {
+            retreat_interactive_focus(
                 ui_state,
                 cache.as_ref().map(|cached| &cached.buffer),
                 scroll,
@@ -2421,16 +2736,51 @@ fn handle_navigation_action(
             );
             None
         }
-        InputAction::ActivateFocusedLink => {
-            focused_link_url(ui_state, cache.as_ref().map(|cached| &cached.buffer))
-        }
+        InputAction::ActivateFocused => dispatch_activate_focused(
+            controller,
+            ui_state,
+            cache.as_ref().map(|cached| &cached.buffer),
+        ),
         InputAction::NavigateBack => {
             navigate_back(controller, ui_state, cache, scroll, view_state);
             None
         }
+        InputAction::FieldTextCommit => {
+            commit_field_text_edit(controller, ui_state);
+            None
+        }
+        InputAction::FieldTextCancel => {
+            ui_state.take_field_text_edit();
+            None
+        }
+        InputAction::FieldMultiSelectMoveUp => {
+            ui_state.field_multi_select_move_up();
+            None
+        }
+        InputAction::FieldMultiSelectMoveDown => {
+            ui_state.field_multi_select_move_down();
+            None
+        }
+        InputAction::FieldMultiSelectToggle => {
+            apply_field_multi_select_toggle(controller, ui_state);
+            None
+        }
+        InputAction::FieldMultiSelectCommit | InputAction::FieldMultiSelectCancel => {
+            ui_state.exit_field_multi_select();
+            None
+        }
+        InputAction::SubmitConfirmToggle => {
+            ui_state.submit_confirmation_toggle();
+            None
+        }
+        InputAction::SubmitConfirmCancel => {
+            ui_state.exit_submit_confirmation();
+            None
+        }
+        InputAction::SubmitConfirmActivate => activate_submit_confirmation(ui_state),
         InputAction::Disarm => {
-            if ui_state.is_in_link_navigation() {
-                ui_state.exit_link_navigation();
+            if ui_state.is_in_interactive_navigation() {
+                ui_state.exit_interactive_navigation();
             }
             None
         }
@@ -2475,13 +2825,206 @@ fn handle_navigation_action(
         | InputAction::SettingsTextDeleteBack
         | InputAction::SettingsTextMoveCursorLeft
         | InputAction::SettingsTextMoveCursorRight
-        | InputAction::SettingsTextCancel => None,
+        | InputAction::SettingsTextCancel
+        | InputAction::FieldTextInput(_)
+        | InputAction::FieldTextDeleteBack
+        | InputAction::FieldTextMoveCursorLeft
+        | InputAction::FieldTextMoveCursorRight => None,
     }
 }
 
-/// Moves focus to the next link, entering link navigation at the first visible link when
-/// nothing is focused yet, then scrolls the viewport to keep the focused link visible.
-fn advance_link_focus(
+/// Dispatches `ActivateFocused` on the focused target's kind: a link returns its URL to
+/// load, and a field control applies its own activation behavior (instant-apply,
+/// entering an edit sub-mode, or a submission request) and returns `None` unless it is a
+/// submit button. `None` when nothing is focused or the buffer is unavailable.
+fn dispatch_activate_focused(
+    controller: &mut NavigationController,
+    ui_state: &mut UiState,
+    buffer: Option<&CellBuffer>,
+) -> Option<NavigationRequest> {
+    let index = ui_state.focused_interactive_index?;
+    let buffer = buffer?;
+    let target = unique_interactive_targets(buffer).into_iter().nth(index)?;
+    match target {
+        InteractiveTarget::Link(url) => Some(NavigationRequest::LoadUrl(url.to_string())),
+        InteractiveTarget::Field(node_id, FieldSpanKind::Input) => {
+            activate_input_field(controller, ui_state, node_id);
+            None
+        }
+        InteractiveTarget::Field(node_id, FieldSpanKind::Select) => {
+            activate_select_field(controller, ui_state, node_id);
+            None
+        }
+        InteractiveTarget::Field(node_id, FieldSpanKind::Textarea) => {
+            enter_text_edit(controller, ui_state, node_id, false);
+            None
+        }
+        InteractiveTarget::Field(node_id, FieldSpanKind::Button) => {
+            activate_button_field(controller, ui_state, node_id)
+        }
+    }
+}
+
+/// Activates a focused `<input>` control by its kind: a checkbox or radio applies
+/// instantly through the controller, and every other kind opens the text-edit sub-mode
+/// seeded with its current value.
+fn activate_input_field(
+    controller: &mut NavigationController,
+    ui_state: &mut UiState,
+    node_id: NodeId,
+) {
+    let Some(input) = controller.input_element(node_id) else {
+        return;
+    };
+    if input.kind == InputKind::Checkbox {
+        let _ = controller.toggle_checkbox(node_id);
+        return;
+    }
+    if input.kind == InputKind::Radio {
+        let _ = controller.select_radio(node_id);
+        return;
+    }
+    let sensitive = input.sensitive;
+    enter_text_edit(controller, ui_state, node_id, sensitive);
+}
+
+/// Seeds and enters the text-edit sub-mode for `node_id` from its current live value.
+fn enter_text_edit(
+    controller: &NavigationController,
+    ui_state: &mut UiState,
+    node_id: NodeId,
+    sensitive: bool,
+) {
+    let current_value = controller
+        .field_values()
+        .and_then(|values| values.text(node_id))
+        .unwrap_or("");
+    ui_state.enter_field_text_edit(node_id, current_value, sensitive);
+}
+
+/// Activates a focused `<select>` control: a single-select cycles to its next option
+/// immediately, wrapping at the ends; a multi-select opens the expansion sub-mode
+/// snapshotting its current options.
+fn activate_select_field(
+    controller: &mut NavigationController,
+    ui_state: &mut UiState,
+    node_id: NodeId,
+) {
+    let Some(select) = controller.select_element(node_id) else {
+        return;
+    };
+    if select.multiple {
+        ui_state.enter_field_multi_select(node_id, select.options.clone());
+        return;
+    }
+    let next_value = next_select_value(select, controller.field_values());
+    let _ = controller.set_select_value(node_id, next_value);
+}
+
+/// The value of the option after the currently selected one, wrapping at the end, or the
+/// first option when nothing is currently selected. Empty when the select has no
+/// options.
+fn next_select_value(select: &SelectElement, field_values: Option<&FormFieldValues>) -> String {
+    let Some(first_option) = select.options.first() else {
+        return String::new();
+    };
+    let current_value = field_values
+        .and_then(|values| values.selected_values(select.id).first())
+        .map(String::as_str);
+    let current_index = current_value.and_then(|value| {
+        select
+            .options
+            .iter()
+            .position(|option| option.value == value)
+    });
+    let next_index = match current_index {
+        Some(index) => (index + 1) % select.options.len(),
+        None => 0,
+    };
+    select
+        .options
+        .get(next_index)
+        .unwrap_or(first_option)
+        .value
+        .clone()
+}
+
+/// Activates a focused button: a reset button restores its enclosing form's controls to
+/// their parsed defaults, a plain button has no default action, and a submit button
+/// asks for immediate submission (`GET`) or opens the confirmation view (`POST`).
+fn activate_button_field(
+    controller: &mut NavigationController,
+    ui_state: &mut UiState,
+    node_id: NodeId,
+) -> Option<NavigationRequest> {
+    let kind = controller.button_element(node_id)?.kind;
+    match kind {
+        ButtonKind::Reset => {
+            let _ = controller.reset_form(node_id);
+            None
+        }
+        ButtonKind::Button => None,
+        ButtonKind::Submit => dispatch_submit_activation(controller, ui_state, node_id),
+    }
+}
+
+/// Resolves the form enclosing `submit_button` and either asks for an immediate
+/// submission (`GET`, matching how a plain link activation loads today) or opens the
+/// `POST`-only confirmation view.
+fn dispatch_submit_activation(
+    controller: &NavigationController,
+    ui_state: &mut UiState,
+    submit_button: NodeId,
+) -> Option<NavigationRequest> {
+    let (method, destination) = controller.form_submission_target(submit_button)?;
+    if method == FormMethod::Get {
+        return Some(NavigationRequest::Submit(submit_button));
+    }
+    ui_state.enter_submit_confirmation(submit_button, destination);
+    None
+}
+
+/// Toggles the multi-select option at the sub-mode's current cursor through the
+/// controller. A no-op when the sub-mode is closed or the cursor names no option.
+fn apply_field_multi_select_toggle(controller: &mut NavigationController, ui_state: &UiState) {
+    let Some((node_id, options, cursor)) = ui_state.field_multi_select() else {
+        return;
+    };
+    let Some(option) = options.get(cursor) else {
+        return;
+    };
+    let value = option.value.clone();
+    let _ = controller.toggle_multi_select_option(node_id, value);
+}
+
+/// Writes the field text-edit draft back through the controller and leaves the sub-mode.
+/// A no-op when the sub-mode is closed.
+fn commit_field_text_edit(controller: &mut NavigationController, ui_state: &mut UiState) {
+    let Some((node_id, sensitive, text)) = ui_state.take_field_text_edit() else {
+        return;
+    };
+    if sensitive {
+        let _ = controller.set_sensitive_field_text(node_id, text);
+        return;
+    }
+    let _ = controller.set_field_text(node_id, text);
+}
+
+/// Resolves the confirmation view's highlighted choice: `Cancel` closes the view with no
+/// further action, `Submit` asks for the pending button's submission.
+fn activate_submit_confirmation(ui_state: &mut UiState) -> Option<NavigationRequest> {
+    let (submit_button, _, choice) = ui_state.submit_confirmation()?;
+    ui_state.exit_submit_confirmation();
+    if choice == SubmitChoice::Cancel {
+        return None;
+    }
+    Some(NavigationRequest::Submit(submit_button))
+}
+
+/// Moves focus to the next interactive target, entering interactive navigation at the
+/// first visible target when nothing is focused yet, then scrolls the viewport to keep
+/// the focused target visible.
+fn advance_interactive_focus(
     ui_state: &mut UiState,
     buffer: Option<&CellBuffer>,
     scroll: &mut ScrollState,
@@ -2490,22 +3033,24 @@ fn advance_link_focus(
     let Some(buffer) = buffer else {
         return;
     };
-    let count = unique_links(buffer).len();
+    let count = unique_interactive_targets(buffer).len();
     if count == 0 {
         return;
     }
-    if ui_state.focused_link_index.is_none() {
-        ui_state.enter_link_navigation(first_visible_link_index(buffer, scroll.offset()));
+    if ui_state.focused_interactive_index.is_none() {
+        ui_state
+            .enter_interactive_navigation(first_visible_interactive_index(buffer, scroll.offset()));
     } else {
-        ui_state.focus_next_link(count);
+        ui_state.focus_next_interactive(count);
     }
-    reveal_focused_link(ui_state, buffer, scroll, bounds);
+    reveal_focused_interactive(ui_state, buffer, scroll, bounds);
     update_citation_preview(ui_state, Some(buffer));
 }
 
-/// Moves focus to the previous link, entering link navigation at the first visible link
-/// when nothing is focused yet, then scrolls the viewport to keep the focused link visible.
-fn retreat_link_focus(
+/// Moves focus to the previous interactive target, entering interactive navigation at
+/// the first visible target when nothing is focused yet, then scrolls the viewport to
+/// keep the focused target visible.
+fn retreat_interactive_focus(
     ui_state: &mut UiState,
     buffer: Option<&CellBuffer>,
     scroll: &mut ScrollState,
@@ -2514,34 +3059,56 @@ fn retreat_link_focus(
     let Some(buffer) = buffer else {
         return;
     };
-    let count = unique_links(buffer).len();
+    let count = unique_interactive_targets(buffer).len();
     if count == 0 {
         return;
     }
-    if ui_state.focused_link_index.is_none() {
-        ui_state.enter_link_navigation(first_visible_link_index(buffer, scroll.offset()));
+    if ui_state.focused_interactive_index.is_none() {
+        ui_state
+            .enter_interactive_navigation(first_visible_interactive_index(buffer, scroll.offset()));
     } else {
-        ui_state.focus_previous_link(count);
+        ui_state.focus_previous_interactive(count);
     }
-    reveal_focused_link(ui_state, buffer, scroll, bounds);
+    reveal_focused_interactive(ui_state, buffer, scroll, bounds);
     update_citation_preview(ui_state, Some(buffer));
 }
 
-/// The URL of the currently focused link, if link navigation is active and the focused
-/// index still points at a link in the buffer.
-fn focused_link_url(ui_state: &UiState, buffer: Option<&CellBuffer>) -> Option<String> {
-    let index = ui_state.focused_link_index?;
+/// The borrowed URL of the currently focused target, if it is a link, for the render
+/// pass's link-coloring context. `None` when nothing is focused, the focused target is
+/// a field, or the buffer is unavailable.
+fn focused_interactive_link_span<'a>(
+    ui_state: &UiState,
+    buffer: Option<&'a CellBuffer>,
+) -> Option<&'a str> {
+    let index = ui_state.focused_interactive_index?;
     let buffer = buffer?;
-    unique_links(buffer).get(index).map(|url| url.to_string())
+    match unique_interactive_targets(buffer).into_iter().nth(index)? {
+        InteractiveTarget::Link(url) => Some(url),
+        InteractiveTarget::Field(..) => None,
+    }
 }
 
-/// The kind of the currently focused link's span: the first span in the buffer whose URL
-/// matches the focused entry from [`unique_links`]. `None` when nothing is focused or the
-/// focused index no longer points at a link in the buffer.
-fn focused_link_kind(ui_state: &UiState, buffer: Option<&CellBuffer>) -> Option<LinkKind> {
-    let index = ui_state.focused_link_index?;
+/// The URL of the currently focused target, if it is a link and interactive navigation
+/// still points at it in the buffer.
+fn focused_interactive_url(ui_state: &UiState, buffer: Option<&CellBuffer>) -> Option<String> {
+    let index = ui_state.focused_interactive_index?;
     let buffer = buffer?;
-    let url = *unique_links(buffer).get(index)?;
+    match unique_interactive_targets(buffer).into_iter().nth(index)? {
+        InteractiveTarget::Link(url) => Some(url.to_string()),
+        InteractiveTarget::Field(..) => None,
+    }
+}
+
+/// The kind of the currently focused target's link span, if it is a link. `None` when
+/// nothing is focused, the focused target is a field, or it no longer resolves in the
+/// buffer.
+fn focused_interactive_kind(ui_state: &UiState, buffer: Option<&CellBuffer>) -> Option<LinkKind> {
+    let index = ui_state.focused_interactive_index?;
+    let buffer = buffer?;
+    let InteractiveTarget::Link(url) = unique_interactive_targets(buffer).into_iter().nth(index)?
+    else {
+        return None;
+    };
     buffer
         .links()
         .iter()
@@ -2549,11 +3116,13 @@ fn focused_link_kind(ui_state: &UiState, buffer: Option<&CellBuffer>) -> Option<
         .map(|span| span.kind)
 }
 
-/// Shows the citation preview popup when the focused link is a citation, or dismisses it
-/// otherwise. Called after every change to link focus so the popup always tracks it.
+/// Shows the citation preview popup when the focused target is a citation link, or
+/// dismisses it otherwise. Called after every change to interactive focus so the popup
+/// always tracks it.
 fn update_citation_preview(ui_state: &mut UiState, buffer: Option<&CellBuffer>) {
-    if focused_link_kind(ui_state, buffer) == Some(LinkKind::Citation) {
-        let url = focused_link_url(ui_state, buffer).expect("citation kind implies a focused url");
+    if focused_interactive_kind(ui_state, buffer) == Some(LinkKind::Citation) {
+        let url =
+            focused_interactive_url(ui_state, buffer).expect("citation kind implies a focused url");
         ui_state.set_citation_preview(url);
         return;
     }
@@ -2561,7 +3130,7 @@ fn update_citation_preview(ui_state: &mut UiState, buffer: Option<&CellBuffer>) 
 }
 
 /// Restores the previous page from history and resets the viewport, clearing any focused
-/// link. Does nothing when there is no history to restore.
+/// interactive target. Does nothing when there is no history to restore.
 fn navigate_back(
     controller: &mut NavigationController,
     ui_state: &mut UiState,
@@ -2575,7 +3144,7 @@ fn navigate_back(
     *view_state = ViewState::Page;
     *cache = None;
     *scroll = ScrollState::new();
-    ui_state.exit_link_navigation();
+    ui_state.exit_interactive_navigation();
 }
 
 /// Dispatches a left-button mouse gesture over the page body into a text selection.

@@ -37,7 +37,8 @@ fn a_cjk_word_wraps_counting_each_ideograph_as_two_columns() {
     // half, so the whole word lays out on exactly two rows.
     let document = document_of(vec![paragraph("界界界界界界")]);
 
-    let buffer = render_document(&document, 6, &WidthConfig::default()).expect("CJK must lay out");
+    let buffer =
+        render_document(&document, 6, &WidthConfig::default(), None).expect("CJK must lay out");
 
     assert_eq!(buffer.height(), 3); // 2 content rows + 1 blank from paragraph spacing_after
     for row in 0..2 {
@@ -60,7 +61,8 @@ fn a_wide_grapheme_at_the_right_edge_wraps_instead_of_splitting() {
     // and moves to the next row rather than being placed in a single column.
     let document = document_of(vec![paragraph("abcd界")]);
 
-    let buffer = render_document(&document, 5, &WidthConfig::default()).expect("word must lay out");
+    let buffer =
+        render_document(&document, 5, &WidthConfig::default(), None).expect("word must lay out");
 
     assert_eq!(rows(&buffer), vec!["abcd", "界", ""]);
 }
@@ -69,8 +71,8 @@ fn a_wide_grapheme_at_the_right_edge_wraps_instead_of_splitting() {
 fn the_trailing_column_of_a_wide_grapheme_is_blank() {
     let document = document_of(vec![paragraph("界x")]);
 
-    let buffer =
-        render_document(&document, 10, &WidthConfig::default()).expect("paragraph must lay out");
+    let buffer = render_document(&document, 10, &WidthConfig::default(), None)
+        .expect("paragraph must lay out");
 
     assert_eq!(buffer.cell_at(0, 0).expect("wide cell").grapheme(), "界");
     assert_eq!(buffer.cell_at(1, 0).expect("spanned cell").grapheme(), " ");
@@ -86,7 +88,7 @@ fn a_base_and_its_combining_marks_stay_one_cluster_under_force_break() {
     let document = document_of(vec![paragraph(clustered)]);
 
     let buffer =
-        render_document(&document, 1, &WidthConfig::default()).expect("cluster must lay out");
+        render_document(&document, 1, &WidthConfig::default(), None).expect("cluster must lay out");
 
     assert_eq!(rows(&buffer), vec!["a", "e\u{0301}\u{0323}", "b", ""]);
 }
@@ -96,8 +98,13 @@ fn an_ambiguous_width_grapheme_measures_one_column_in_narrow_mode() {
     // U+00A7 SECTION SIGN is East-Asian-ambiguous: one column on a Western terminal.
     let document = document_of(vec![paragraph("\u{00a7}x")]);
 
-    let buffer = render_document(&document, 10, &WidthConfig::new(AmbiguousWidth::Narrow))
-        .expect("paragraph must lay out");
+    let buffer = render_document(
+        &document,
+        10,
+        &WidthConfig::new(AmbiguousWidth::Narrow),
+        None,
+    )
+    .expect("paragraph must lay out");
 
     assert_eq!(
         buffer.cell_at(0, 0).expect("section cell").grapheme(),
@@ -110,7 +117,7 @@ fn an_ambiguous_width_grapheme_measures_one_column_in_narrow_mode() {
 fn an_ambiguous_width_grapheme_measures_two_columns_in_wide_mode() {
     let document = document_of(vec![paragraph("\u{00a7}x")]);
 
-    let buffer = render_document(&document, 10, &WidthConfig::new(AmbiguousWidth::Wide))
+    let buffer = render_document(&document, 10, &WidthConfig::new(AmbiguousWidth::Wide), None)
         .expect("paragraph must lay out");
 
     assert_eq!(
@@ -128,9 +135,14 @@ fn an_ambiguous_width_word_wraps_sooner_in_wide_mode_than_narrow() {
     let text = "\u{00a7}\u{00a7}\u{00a7}\u{00a7}";
     let document = document_of(vec![paragraph(text)]);
 
-    let narrow = render_document(&document, 4, &WidthConfig::new(AmbiguousWidth::Narrow))
-        .expect("narrow must lay out");
-    let wide = render_document(&document, 4, &WidthConfig::new(AmbiguousWidth::Wide))
+    let narrow = render_document(
+        &document,
+        4,
+        &WidthConfig::new(AmbiguousWidth::Narrow),
+        None,
+    )
+    .expect("narrow must lay out");
+    let wide = render_document(&document, 4, &WidthConfig::new(AmbiguousWidth::Wide), None)
         .expect("wide must lay out");
 
     // Four ambiguous graphemes fit one row of four columns in narrow mode; in wide mode
@@ -151,8 +163,8 @@ fn an_ambiguous_width_word_wraps_sooner_in_wide_mode_than_narrow() {
 fn ascii_layout_is_unchanged_by_the_default_width_config() {
     let document = document_of(vec![paragraph("hello world")]);
 
-    let buffer =
-        render_document(&document, 20, &WidthConfig::default()).expect("paragraph must lay out");
+    let buffer = render_document(&document, 20, &WidthConfig::default(), None)
+        .expect("paragraph must lay out");
 
     assert_eq!(rows(&buffer), vec!["hello world", ""]);
 }

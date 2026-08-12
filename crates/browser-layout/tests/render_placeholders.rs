@@ -7,7 +7,9 @@ use browser_html::{
     ButtonElement, ButtonKind, Document, InlineRun, InputElement, InputKind, LandmarkRole, NodeId,
     SelectElement, SelectOption, SemanticNode, TextareaElement,
 };
-use browser_layout::{render_document, CellBuffer, FieldSpanKind, WidthConfig};
+use browser_layout::{
+    render_document, CellBuffer, FieldOverlay, FieldRenderValue, FieldSpanKind, WidthConfig,
+};
 
 fn document_of(nodes: Vec<SemanticNode>) -> Document {
     Document::new(nodes, None, 0)
@@ -53,9 +55,55 @@ fn text_input_renders_a_labelled_blank_field() {
         label: Some("Name".to_string()),
         sensitive: false,
     });
-    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
+    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default(), None)
         .expect("input must lay out");
     assert!(buffer_text(&buffer).contains("[Name: ____]"));
+}
+
+#[test]
+fn text_input_with_a_live_overlay_value_renders_the_typed_text() {
+    let input = SemanticNode::Input(InputElement {
+        id: NodeId::new(0),
+        kind: InputKind::Text,
+        name: None,
+        value: String::new(),
+        checked: false,
+        label: Some("Name".to_string()),
+        sensitive: false,
+    });
+    let mut overlay = FieldOverlay::new();
+    overlay.insert(NodeId::new(0), FieldRenderValue::Text("Ada".to_string()));
+    let buffer = render_document(
+        &document_of(vec![input]),
+        40,
+        &WidthConfig::default(),
+        Some(&overlay),
+    )
+    .expect("input must lay out");
+    assert!(buffer_text(&buffer).contains("[Name: Ada]"));
+}
+
+#[test]
+fn checkbox_input_with_a_checked_overlay_renders_the_checked_marker() {
+    let input = SemanticNode::Input(InputElement {
+        id: NodeId::new(0),
+        kind: InputKind::Checkbox,
+        name: None,
+        value: String::new(),
+        checked: false,
+        label: Some("Remember me".to_string()),
+        sensitive: false,
+    });
+    let mut overlay = FieldOverlay::new();
+    overlay.insert(NodeId::new(0), FieldRenderValue::Checked(true));
+    let buffer = render_document(
+        &document_of(vec![input]),
+        40,
+        &WidthConfig::default(),
+        Some(&overlay),
+    )
+    .expect("input must lay out");
+    assert!(buffer_text(&buffer).contains("[x] Remember me"));
 }
 
 #[test]
@@ -69,13 +117,44 @@ fn password_input_is_masked_and_never_shows_a_value() {
         label: Some("Password".to_string()),
         sensitive: true,
     });
-    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
+    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default(), None)
         .expect("input must lay out");
     let text = buffer_text(&buffer);
     assert!(text.contains("[Password: ••••]"), "the field is masked");
     assert!(
         !text.contains('_'),
         "a masked field draws no blank underscores"
+    );
+}
+
+#[test]
+fn sensitive_input_with_a_masked_length_overlay_shows_matching_length_never_the_value() {
+    let input = SemanticNode::Input(InputElement {
+        id: NodeId::new(0),
+        kind: InputKind::Password,
+        name: None,
+        value: String::new(),
+        checked: false,
+        label: Some("Password".to_string()),
+        sensitive: true,
+    });
+    let mut overlay = FieldOverlay::new();
+    overlay.insert(NodeId::new(0), FieldRenderValue::MaskedLength(6));
+    let buffer = render_document(
+        &document_of(vec![input]),
+        40,
+        &WidthConfig::default(),
+        Some(&overlay),
+    )
+    .expect("input must lay out");
+    let text = buffer_text(&buffer);
+    assert!(
+        text.contains("[Password: ••••••]"),
+        "the mask length matches the typed length"
+    );
+    assert!(
+        !text.contains("secret1"),
+        "the typed value itself never reaches the rendered text"
     );
 }
 
@@ -90,7 +169,7 @@ fn hidden_input_produces_no_row_and_no_field_span() {
         label: None,
         sensitive: false,
     });
-    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
+    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default(), None)
         .expect("hidden input must not error during layout");
     assert_eq!(buffer.height(), 0, "a hidden input produces no rows");
     assert!(
@@ -110,7 +189,7 @@ fn text_input_produces_exactly_one_field_span_carrying_its_node_id() {
         label: Some("Name".to_string()),
         sensitive: false,
     });
-    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default())
+    let buffer = render_document(&document_of(vec![input]), 40, &WidthConfig::default(), None)
         .expect("input must lay out");
     let spans = buffer.field_spans();
     assert_eq!(spans.len(), 1, "one span per row the control occupies");
@@ -130,12 +209,44 @@ fn select_renders_its_selected_option_and_a_dropdown_marker() {
             select_option("France", false),
         ],
     });
-    let buffer = render_document(&document_of(vec![select]), 40, &WidthConfig::default())
-        .expect("select must lay out");
+    let buffer = render_document(
+        &document_of(vec![select]),
+        40,
+        &WidthConfig::default(),
+        None,
+    )
+    .expect("select must lay out");
     assert!(buffer_text(&buffer).contains("[Country: Spain ▾]"));
     let spans = buffer.field_spans();
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].kind, FieldSpanKind::Select);
+}
+
+#[test]
+fn select_with_a_selected_labels_overlay_renders_the_live_selection() {
+    let select = SemanticNode::Select(SelectElement {
+        id: NodeId::new(0),
+        name: None,
+        label: Some("Country".to_string()),
+        multiple: false,
+        options: vec![
+            select_option("Spain", false),
+            select_option("France", false),
+        ],
+    });
+    let mut overlay = FieldOverlay::new();
+    overlay.insert(
+        NodeId::new(0),
+        FieldRenderValue::SelectedLabels(vec!["France".to_string()]),
+    );
+    let buffer = render_document(
+        &document_of(vec![select]),
+        40,
+        &WidthConfig::default(),
+        Some(&overlay),
+    )
+    .expect("select must lay out");
+    assert!(buffer_text(&buffer).contains("[Country: France ▾]"));
 }
 
 #[test]
@@ -148,8 +259,13 @@ fn button_renders_its_label_in_brackets() {
         runs: vec![InlineRun::plain("Submit".to_string())],
         inline_style: None,
     });
-    let buffer = render_document(&document_of(vec![button]), 40, &WidthConfig::default())
-        .expect("button must lay out");
+    let buffer = render_document(
+        &document_of(vec![button]),
+        40,
+        &WidthConfig::default(),
+        None,
+    )
+    .expect("button must lay out");
     assert!(buffer_text(&buffer).contains("[ Submit ]"));
     let spans = buffer.field_spans();
     assert_eq!(spans.len(), 1);
@@ -164,8 +280,13 @@ fn textarea_renders_a_labelled_blank_field_with_a_field_span() {
         value: "ignored for the static placeholder".to_string(),
         label: Some("Bio".to_string()),
     });
-    let buffer = render_document(&document_of(vec![textarea]), 40, &WidthConfig::default())
-        .expect("textarea must lay out");
+    let buffer = render_document(
+        &document_of(vec![textarea]),
+        40,
+        &WidthConfig::default(),
+        None,
+    )
+    .expect("textarea must lay out");
     assert!(buffer_text(&buffer).contains("[Bio: ____]"));
     let spans = buffer.field_spans();
     assert_eq!(spans.len(), 1);
@@ -177,8 +298,13 @@ fn embedded_content_renders_a_kind_placeholder() {
     let embedded = SemanticNode::EmbeddedContent {
         label: "video".to_string(),
     };
-    let buffer = render_document(&document_of(vec![embedded]), 40, &WidthConfig::default())
-        .expect("embed must lay out");
+    let buffer = render_document(
+        &document_of(vec![embedded]),
+        40,
+        &WidthConfig::default(),
+        None,
+    )
+    .expect("embed must lay out");
     assert!(buffer_text(&buffer).contains("[Embedded: video]"));
 }
 
@@ -194,8 +320,13 @@ fn details_renders_the_summary_then_the_body_expanded() {
             paragraph("Hidden body text"),
         ],
     };
-    let buffer = render_document(&document_of(vec![details]), 40, &WidthConfig::default())
-        .expect("details must lay out");
+    let buffer = render_document(
+        &document_of(vec![details]),
+        40,
+        &WidthConfig::default(),
+        None,
+    )
+    .expect("details must lay out");
     let text = buffer_text(&buffer);
     assert!(text.contains("More"), "the summary label renders");
     assert!(
@@ -210,8 +341,13 @@ fn landmark_renders_its_children_structurally() {
         role: LandmarkRole::Navigation,
         children: vec![paragraph("Home")],
     };
-    let buffer = render_document(&document_of(vec![landmark]), 40, &WidthConfig::default())
-        .expect("landmark must lay out");
+    let buffer = render_document(
+        &document_of(vec![landmark]),
+        40,
+        &WidthConfig::default(),
+        None,
+    )
+    .expect("landmark must lay out");
     assert!(buffer_text(&buffer).contains("Home"));
 }
 
@@ -225,8 +361,13 @@ fn figure_with_suppressed_image_renders_only_the_caption() {
         }],
         caption: Some(vec![InlineRun::plain("Quarterly sales".to_string())]),
     };
-    let buffer = render_document(&document_of(vec![figure]), 40, &WidthConfig::default())
-        .expect("figure must lay out");
+    let buffer = render_document(
+        &document_of(vec![figure]),
+        40,
+        &WidthConfig::default(),
+        None,
+    )
+    .expect("figure must lay out");
     let text = buffer_text(&buffer);
     assert!(text.contains("Quarterly sales"), "the caption renders");
     assert!(!text.contains("[Chart]"), "the image label is suppressed");
@@ -239,7 +380,7 @@ fn image_placeholder_produces_no_output() {
         title: Some("Company logo".to_string()),
         source: None,
     };
-    let buffer = render_document(&document_of(vec![image]), 40, &WidthConfig::default())
+    let buffer = render_document(&document_of(vec![image]), 40, &WidthConfig::default(), None)
         .expect("image must not error during layout");
     assert_eq!(buffer.height(), 0, "an image placeholder produces no rows");
 }

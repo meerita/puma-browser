@@ -24,6 +24,9 @@ fn reading(code: KeyCode, quit_armed: bool, refresh_armed: bool) -> InputAction 
         false,
         false,
         false,
+        false,
+        false,
+        false,
     )
 }
 
@@ -35,6 +38,9 @@ fn command_mode(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
+        false,
+        false,
         false,
         false,
         false,
@@ -59,6 +65,9 @@ fn palette_mode(code: KeyCode) -> InputAction {
         false,
         false,
         false,
+        false,
+        false,
+        false,
     )
 }
 
@@ -72,6 +81,9 @@ fn suggestion_mode(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
+        false,
+        false,
         false,
         false,
         false,
@@ -93,6 +105,9 @@ fn history_mode(code: KeyCode) -> InputAction {
         false,
         false,
         false,
+        false,
+        false,
+        false,
     )
 }
 
@@ -108,6 +123,9 @@ fn cookies_mode(code: KeyCode) -> InputAction {
         false,
         false,
         true,
+        false,
+        false,
+        false,
         false,
         false,
     )
@@ -127,6 +145,9 @@ fn settings_mode(code: KeyCode) -> InputAction {
         false,
         true,
         false,
+        false,
+        false,
+        false,
     )
 }
 
@@ -144,11 +165,14 @@ fn settings_text_mode(code: KeyCode) -> InputAction {
         false,
         true,
         true,
+        false,
+        false,
+        false,
     )
 }
 
-/// Maps a key while a link is focused (link-navigation mode).
-fn link_navigation(code: KeyCode) -> InputAction {
+/// Maps a key while a link or form control is focused (interactive-navigation mode).
+fn interactive_navigation(code: KeyCode) -> InputAction {
     map_key_event(
         key(code),
         false,
@@ -161,6 +185,69 @@ fn link_navigation(code: KeyCode) -> InputAction {
         false,
         false,
         false,
+        false,
+        false,
+        false,
+    )
+}
+
+/// Maps a key while a form field's text-edit sub-mode is active.
+fn field_text_edit_mode(code: KeyCode) -> InputAction {
+    map_key_event(
+        key(code),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+    )
+}
+
+/// Maps a key while a multi-select's expanded option list is open.
+fn field_multi_select_mode(code: KeyCode) -> InputAction {
+    map_key_event(
+        key(code),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+    )
+}
+
+/// Maps a key while the `POST` submission confirmation view is open.
+fn submit_confirmation_mode(code: KeyCode) -> InputAction {
+    map_key_event(
+        key(code),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
     )
 }
 
@@ -178,7 +265,10 @@ fn esc_from_armed_yields_the_quit_action() {
 fn ctrl_c_yields_the_quit_action() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, false, false, false, false,),
+        map_key_event(
+            event, false, false, false, false, false, false, false, false, false, false, false,
+            false, false,
+        ),
         InputAction::Quit
     );
 }
@@ -280,7 +370,10 @@ fn unbound_printable_char_with_upper_case_in_reading_mode_enters_command_mode() 
 fn ctrl_c_in_command_mode_yields_quit() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, true, false, false, false, false, false, false, false,),
+        map_key_event(
+            event, false, false, true, false, false, false, false, false, false, false, false,
+            false, false,
+        ),
         InputAction::Quit
     );
 }
@@ -459,24 +552,27 @@ fn esc_in_the_history_list_closes_it() {
 fn ctrl_c_still_quits_from_the_history_list() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, true, false, false, false,),
+        map_key_event(
+            event, false, false, false, false, false, false, true, false, false, false, false,
+            false, false,
+        ),
         InputAction::Quit
     );
 }
 
 #[test]
-fn tab_in_reading_mode_returns_focus_next_link() {
+fn tab_in_reading_mode_returns_focus_next_interactive() {
     assert_eq!(
         reading(KeyCode::Tab, false, false),
-        InputAction::FocusNextLink
+        InputAction::FocusNextInteractive
     );
 }
 
 #[test]
-fn shift_tab_in_reading_mode_returns_focus_previous_link() {
+fn shift_tab_in_reading_mode_returns_focus_previous_interactive() {
     assert_eq!(
         reading(KeyCode::BackTab, false, false),
-        InputAction::FocusPreviousLink
+        InputAction::FocusPreviousInteractive
     );
 }
 
@@ -489,16 +585,16 @@ fn backspace_in_reading_mode_returns_navigate_back() {
 }
 
 #[test]
-fn enter_in_link_navigation_returns_activate_focused_link() {
+fn enter_in_interactive_navigation_returns_activate_focused() {
     assert_eq!(
-        link_navigation(KeyCode::Enter),
-        InputAction::ActivateFocusedLink
+        interactive_navigation(KeyCode::Enter),
+        InputAction::ActivateFocused
     );
 }
 
 #[test]
-fn esc_in_link_navigation_returns_disarm() {
-    assert_eq!(link_navigation(KeyCode::Esc), InputAction::Disarm);
+fn esc_in_interactive_navigation_returns_disarm() {
+    assert_eq!(interactive_navigation(KeyCode::Esc), InputAction::Disarm);
 }
 
 #[test]
@@ -521,7 +617,10 @@ fn a_stray_key_in_the_cookies_popup_is_ignored() {
 fn ctrl_c_still_quits_from_the_cookies_popup() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, false, true, false, false,),
+        map_key_event(
+            event, false, false, false, false, false, false, false, true, false, false, false,
+            false, false,
+        ),
         InputAction::Quit
     );
 }
@@ -663,7 +762,122 @@ fn esc_on_a_settings_text_field_requests_a_cancel() {
 fn ctrl_c_still_quits_from_the_settings_panel() {
     let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
-        map_key_event(event, false, false, false, false, false, false, false, false, true, false,),
+        map_key_event(
+            event, false, false, false, false, false, false, false, false, true, false, false,
+            false, false,
+        ),
         InputAction::Quit
+    );
+}
+
+#[test]
+fn a_printable_key_in_field_text_edit_inserts_a_character() {
+    assert_eq!(
+        field_text_edit_mode(KeyCode::Char('a')),
+        InputAction::FieldTextInput('a')
+    );
+}
+
+#[test]
+fn enter_in_field_text_edit_commits() {
+    assert_eq!(
+        field_text_edit_mode(KeyCode::Enter),
+        InputAction::FieldTextCommit
+    );
+}
+
+#[test]
+fn esc_in_field_text_edit_cancels() {
+    assert_eq!(
+        field_text_edit_mode(KeyCode::Esc),
+        InputAction::FieldTextCancel
+    );
+}
+
+#[test]
+fn backspace_in_field_text_edit_deletes_back() {
+    assert_eq!(
+        field_text_edit_mode(KeyCode::Backspace),
+        InputAction::FieldTextDeleteBack
+    );
+}
+
+#[test]
+fn horizontal_arrows_in_field_text_edit_move_the_cursor() {
+    assert_eq!(
+        field_text_edit_mode(KeyCode::Left),
+        InputAction::FieldTextMoveCursorLeft
+    );
+    assert_eq!(
+        field_text_edit_mode(KeyCode::Right),
+        InputAction::FieldTextMoveCursorRight
+    );
+}
+
+#[test]
+fn arrows_and_vim_keys_in_field_multi_select_move_the_cursor() {
+    assert_eq!(
+        field_multi_select_mode(KeyCode::Up),
+        InputAction::FieldMultiSelectMoveUp
+    );
+    assert_eq!(
+        field_multi_select_mode(KeyCode::Char('k')),
+        InputAction::FieldMultiSelectMoveUp
+    );
+    assert_eq!(
+        field_multi_select_mode(KeyCode::Down),
+        InputAction::FieldMultiSelectMoveDown
+    );
+    assert_eq!(
+        field_multi_select_mode(KeyCode::Char('j')),
+        InputAction::FieldMultiSelectMoveDown
+    );
+}
+
+#[test]
+fn space_in_field_multi_select_toggles_the_moved_to_option() {
+    assert_eq!(
+        field_multi_select_mode(KeyCode::Char(' ')),
+        InputAction::FieldMultiSelectToggle
+    );
+}
+
+#[test]
+fn enter_and_esc_in_field_multi_select_both_close_it() {
+    assert_eq!(
+        field_multi_select_mode(KeyCode::Enter),
+        InputAction::FieldMultiSelectCommit
+    );
+    assert_eq!(
+        field_multi_select_mode(KeyCode::Esc),
+        InputAction::FieldMultiSelectCancel
+    );
+}
+
+#[test]
+fn up_and_down_in_submit_confirmation_toggle_the_choice() {
+    assert_eq!(
+        submit_confirmation_mode(KeyCode::Up),
+        InputAction::SubmitConfirmToggle
+    );
+    assert_eq!(
+        submit_confirmation_mode(KeyCode::Down),
+        InputAction::SubmitConfirmToggle
+    );
+}
+
+#[test]
+fn enter_in_submit_confirmation_activates_the_highlighted_choice() {
+    assert_eq!(
+        submit_confirmation_mode(KeyCode::Enter),
+        InputAction::SubmitConfirmActivate
+    );
+}
+
+#[test]
+fn esc_in_submit_confirmation_cancels() {
+    assert_eq!(
+        submit_confirmation_mode(KeyCode::Esc),
+        InputAction::SubmitConfirmCancel
     );
 }

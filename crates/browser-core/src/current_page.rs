@@ -79,4 +79,13 @@ impl CurrentPage {
     pub(crate) fn form_field_values_mut(&mut self) -> &mut FormFieldValues {
         &mut self.form_field_values
     }
+
+    /// Splits the page into its parsed document and its live field state, so a caller
+    /// can resolve a control against the document and reseed the state that same
+    /// lookup found, without the two borrows aliasing the whole page.
+    pub(crate) fn document_and_form_field_values_mut(
+        &mut self,
+    ) -> (&Document, &mut FormFieldValues) {
+        (&self.document, &mut self.form_field_values)
+    }
 }

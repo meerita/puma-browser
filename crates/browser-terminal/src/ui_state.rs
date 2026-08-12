@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use browser_core::{CookiePolicy, HistoryEntry};
+use browser_core::{CookiePolicy, HistoryEntry, NodeId, SelectOption};
 
 use crate::command::{self, CommandKind, CommandMatch};
 use crate::settings_view::{text_field_id, CycleDirection, SettingId, SettingsModel, SettingsRow};
@@ -77,10 +77,53 @@ pub(crate) struct SettingsTextSave {
 pub(crate) enum InteractionMode {
     Reading,
     Command,
-    LinkNavigation,
+    InteractiveNavigation,
     History,
     Cookies,
     Settings,
+    SubmitConfirmation,
+}
+
+/// Which choice is highlighted in the `POST` submission confirmation view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmitChoice {
+    Submit,
+    Cancel,
+}
+
+impl SubmitChoice {
+    /// The other choice, so `Up`/`Down` toggles between exactly two options.
+    fn toggled(self) -> Self {
+        match self {
+            SubmitChoice::Submit => SubmitChoice::Cancel,
+            SubmitChoice::Cancel => SubmitChoice::Submit,
+        }
+    }
+}
+
+/// The pending `POST` submission the confirmation view holds while it is open: which
+/// button would be activated, where the request would go, and which choice is
+/// highlighted. `destination` is already the resolved, sanitized action URL, safe to
+/// render as-is.
+pub(crate) struct SubmitConfirmation {
+    pub(crate) submit_button: NodeId,
+    pub(crate) destination: String,
+    choice: SubmitChoice,
+}
+
+/// A form field's active editing sub-mode, entered from interactive navigation by
+/// activating a text-like control or a multi-select.
+pub(crate) enum FieldEditState {
+    Text {
+        node_id: NodeId,
+        editor: TextEditor,
+        sensitive: bool,
+    },
+    MultiSelect {
+        node_id: NodeId,
+        options: Vec<SelectOption>,
+        cursor: usize,
+    },
 }
 
 /// A single-line text buffer with a byte-offset cursor and UTF-8-safe edits.
@@ -173,8 +216,10 @@ pub(crate) struct UiState {
     pub(crate) interaction_mode: InteractionMode,
     pub(crate) quit_armed: bool,
     pub(crate) refresh_armed: bool,
-    pub(crate) focused_link_index: Option<usize>,
+    pub(crate) focused_interactive_index: Option<usize>,
     pub(crate) visited_urls: HashSet<String>,
+    focused_field_edit: Option<FieldEditState>,
+    submit_confirmation: Option<SubmitConfirmation>,
     hint_index: usize,
     last_hint_advance: Instant,
     transient_message: Option<String>,
@@ -203,8 +248,10 @@ impl UiState {
             interaction_mode: InteractionMode::Reading,
             quit_armed: false,
             refresh_armed: false,
-            focused_link_index: None,
+            focused_interactive_index: None,
             visited_urls: HashSet::new(),
+            focused_field_edit: None,
+            submit_confirmation: None,
             hint_index: 0,
             last_hint_advance: Instant::now(),
             transient_message: None,
@@ -249,8 +296,29 @@ impl UiState {
         matches!(self.interaction_mode, InteractionMode::Command)
     }
 
-    pub(crate) fn is_in_link_navigation(&self) -> bool {
-        matches!(self.interaction_mode, InteractionMode::LinkNavigation)
+    pub(crate) fn is_in_interactive_navigation(&self) -> bool {
+        matches!(
+            self.interaction_mode,
+            InteractionMode::InteractiveNavigation
+        )
+    }
+
+    pub(crate) fn is_in_submit_confirmation(&self) -> bool {
+        matches!(self.interaction_mode, InteractionMode::SubmitConfirmation)
+    }
+
+    /// Whether a form field's text-edit sub-mode is active, so the key router sends
+    /// printable keys to the draft instead of dispatching interactive-navigation keys.
+    pub(crate) fn is_in_field_text_edit(&self) -> bool {
+        matches!(self.focused_field_edit, Some(FieldEditState::Text { .. }))
+    }
+
+    /// Whether a multi-select's expanded option list is open.
+    pub(crate) fn is_in_field_multi_select(&self) -> bool {
+        matches!(
+            self.focused_field_edit,
+            Some(FieldEditState::MultiSelect { .. })
+        )
     }
 
     pub(crate) fn is_in_history_mode(&self) -> bool {
@@ -753,39 +821,216 @@ impl UiState {
             .map_or(0, SettingsModel::row_count)
     }
 
-    /// Enters link navigation mode and focuses the link at `index`.
-    pub(crate) fn enter_link_navigation(&mut self, index: usize) {
-        self.interaction_mode = InteractionMode::LinkNavigation;
-        self.focused_link_index = Some(index);
+    /// Enters interactive navigation mode and focuses the target at `index`.
+    pub(crate) fn enter_interactive_navigation(&mut self, index: usize) {
+        self.interaction_mode = InteractionMode::InteractiveNavigation;
+        self.focused_interactive_index = Some(index);
     }
 
-    /// Exits link navigation mode and clears the focused link and citation preview.
-    pub(crate) fn exit_link_navigation(&mut self) {
+    /// Exits interactive navigation mode and clears the focused target and citation
+    /// preview.
+    pub(crate) fn exit_interactive_navigation(&mut self) {
         self.interaction_mode = InteractionMode::Reading;
-        self.focused_link_index = None;
+        self.focused_interactive_index = None;
         self.clear_citation_preview();
     }
 
-    /// Advances focus to the next link, wrapping at the end.
-    pub(crate) fn focus_next_link(&mut self, link_count: usize) {
-        if link_count == 0 {
+    /// Advances focus to the next interactive target, wrapping at the end.
+    pub(crate) fn focus_next_interactive(&mut self, target_count: usize) {
+        if target_count == 0 {
             return;
         }
-        self.focused_link_index = Some(match self.focused_link_index {
-            Some(current) => (current + 1) % link_count,
+        self.focused_interactive_index = Some(match self.focused_interactive_index {
+            Some(current) => (current + 1) % target_count,
             None => 0,
         });
     }
 
-    /// Moves focus to the previous link, wrapping at the start.
-    pub(crate) fn focus_previous_link(&mut self, link_count: usize) {
-        if link_count == 0 {
+    /// Moves focus to the previous interactive target, wrapping at the start.
+    pub(crate) fn focus_previous_interactive(&mut self, target_count: usize) {
+        if target_count == 0 {
             return;
         }
-        self.focused_link_index = Some(match self.focused_link_index {
-            Some(current) => current.checked_sub(1).unwrap_or(link_count - 1),
-            None => link_count - 1,
+        self.focused_interactive_index = Some(match self.focused_interactive_index {
+            Some(current) => current.checked_sub(1).unwrap_or(target_count - 1),
+            None => target_count - 1,
         });
+    }
+
+    /// Enters the text-edit sub-mode for `node_id`, seeded with `initial_value`. A
+    /// sensitive field seeds from an empty buffer regardless of `initial_value`, since a
+    /// password's typed characters are never restored once the page has loaded.
+    pub(crate) fn enter_field_text_edit(
+        &mut self,
+        node_id: NodeId,
+        initial_value: &str,
+        sensitive: bool,
+    ) {
+        let seed = if sensitive { "" } else { initial_value };
+        self.focused_field_edit = Some(FieldEditState::Text {
+            node_id,
+            editor: TextEditor::seeded(seed),
+            sensitive,
+        });
+    }
+
+    /// The node id and sensitivity of the field being text-edited, or `None` when no
+    /// text-edit sub-mode is active.
+    pub(crate) fn field_text_edit_target(&self) -> Option<(NodeId, bool)> {
+        match &self.focused_field_edit {
+            Some(FieldEditState::Text {
+                node_id, sensitive, ..
+            }) => Some((*node_id, *sensitive)),
+            _ => None,
+        }
+    }
+
+    /// The draft buffer and cursor byte offset for the active field text edit, for
+    /// drawing the field and placing the terminal cursor. `None` when no text-edit
+    /// sub-mode is active.
+    pub(crate) fn field_text_edit_cursor(&self) -> Option<(&str, usize)> {
+        match &self.focused_field_edit {
+            Some(FieldEditState::Text { editor, .. }) => {
+                Some((editor.buffer(), editor.cursor_byte_offset()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Inserts `character` into the active field text-edit draft. A no-op when no
+    /// text-edit sub-mode is active.
+    pub(crate) fn field_text_input(&mut self, character: char) {
+        if let Some(FieldEditState::Text { editor, .. }) = &mut self.focused_field_edit {
+            editor.insert_char(character);
+        }
+    }
+
+    /// Deletes the character before the cursor in the active field text-edit draft. A
+    /// no-op when no text-edit sub-mode is active.
+    pub(crate) fn field_text_delete_back(&mut self) {
+        if let Some(FieldEditState::Text { editor, .. }) = &mut self.focused_field_edit {
+            editor.delete_before_cursor();
+        }
+    }
+
+    pub(crate) fn field_text_move_left(&mut self) {
+        if let Some(FieldEditState::Text { editor, .. }) = &mut self.focused_field_edit {
+            editor.move_left();
+        }
+    }
+
+    pub(crate) fn field_text_move_right(&mut self) {
+        if let Some(FieldEditState::Text { editor, .. }) = &mut self.focused_field_edit {
+            editor.move_right();
+        }
+    }
+
+    /// Takes the field text-edit draft's node id, sensitivity, and buffer, and leaves
+    /// the sub-mode. Used by both commit and cancel: the caller decides whether to write
+    /// the buffer back through the controller.
+    pub(crate) fn take_field_text_edit(&mut self) -> Option<(NodeId, bool, String)> {
+        match self.focused_field_edit.take() {
+            Some(FieldEditState::Text {
+                node_id,
+                editor,
+                sensitive,
+            }) => Some((node_id, sensitive, editor.buffer().to_string())),
+            other => {
+                self.focused_field_edit = other;
+                None
+            }
+        }
+    }
+
+    /// Enters the multi-select expansion sub-mode for `node_id`, snapshotting `options`
+    /// as they are when the mode is entered.
+    pub(crate) fn enter_field_multi_select(&mut self, node_id: NodeId, options: Vec<SelectOption>) {
+        self.focused_field_edit = Some(FieldEditState::MultiSelect {
+            node_id,
+            options,
+            cursor: 0,
+        });
+    }
+
+    /// The multi-select sub-mode's node id, option snapshot, and highlighted cursor, or
+    /// `None` when the sub-mode is not active.
+    pub(crate) fn field_multi_select(&self) -> Option<(NodeId, &[SelectOption], usize)> {
+        match &self.focused_field_edit {
+            Some(FieldEditState::MultiSelect {
+                node_id,
+                options,
+                cursor,
+            }) => Some((*node_id, options.as_slice(), *cursor)),
+            _ => None,
+        }
+    }
+
+    /// Moves the multi-select cursor up by one, clamped at the first option (a bounded
+    /// list, not a cycle).
+    pub(crate) fn field_multi_select_move_up(&mut self) {
+        if let Some(FieldEditState::MultiSelect { cursor, .. }) = &mut self.focused_field_edit {
+            *cursor = cursor.saturating_sub(1);
+        }
+    }
+
+    /// Moves the multi-select cursor down by one, clamped at the last option.
+    pub(crate) fn field_multi_select_move_down(&mut self) {
+        if let Some(FieldEditState::MultiSelect {
+            cursor, options, ..
+        }) = &mut self.focused_field_edit
+        {
+            let last = options.len().saturating_sub(1);
+            *cursor = (*cursor + 1).min(last);
+        }
+    }
+
+    /// Leaves the multi-select expansion sub-mode. Every toggle already applied
+    /// instantly, so there is nothing to discard.
+    pub(crate) fn exit_field_multi_select(&mut self) {
+        if matches!(
+            self.focused_field_edit,
+            Some(FieldEditState::MultiSelect { .. })
+        ) {
+            self.focused_field_edit = None;
+        }
+    }
+
+    /// Opens the `POST` submission confirmation view for `submit_button`, highlighting
+    /// `Cancel` first so an accidental `Enter` never sends the request.
+    pub(crate) fn enter_submit_confirmation(&mut self, submit_button: NodeId, destination: String) {
+        self.interaction_mode = InteractionMode::SubmitConfirmation;
+        self.submit_confirmation = Some(SubmitConfirmation {
+            submit_button,
+            destination,
+            choice: SubmitChoice::Cancel,
+        });
+    }
+
+    /// Closes the confirmation view and returns to interactive navigation with the same
+    /// field still focused.
+    pub(crate) fn exit_submit_confirmation(&mut self) {
+        self.interaction_mode = InteractionMode::InteractiveNavigation;
+        self.submit_confirmation = None;
+    }
+
+    /// The open confirmation view's pending button, destination, and highlighted
+    /// choice, or `None` when it is closed.
+    pub(crate) fn submit_confirmation(&self) -> Option<(NodeId, &str, SubmitChoice)> {
+        self.submit_confirmation.as_ref().map(|state| {
+            (
+                state.submit_button,
+                state.destination.as_str(),
+                state.choice,
+            )
+        })
+    }
+
+    /// Toggles the confirmation view's highlighted choice between `Submit` and
+    /// `Cancel`. A no-op when the view is closed.
+    pub(crate) fn submit_confirmation_toggle(&mut self) {
+        if let Some(state) = self.submit_confirmation.as_mut() {
+            state.choice = state.choice.toggled();
+        }
     }
 
     /// Records `url` as visited for this session.

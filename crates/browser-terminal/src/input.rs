@@ -51,10 +51,24 @@ pub(crate) enum InputAction {
     SettingsTextMoveCursorLeft,
     SettingsTextMoveCursorRight,
     SettingsTextCancel,
-    FocusNextLink,
-    FocusPreviousLink,
-    ActivateFocusedLink,
+    FocusNextInteractive,
+    FocusPreviousInteractive,
+    ActivateFocused,
     NavigateBack,
+    FieldTextInput(char),
+    FieldTextDeleteBack,
+    FieldTextMoveCursorLeft,
+    FieldTextMoveCursorRight,
+    FieldTextCancel,
+    FieldTextCommit,
+    FieldMultiSelectMoveUp,
+    FieldMultiSelectMoveDown,
+    FieldMultiSelectToggle,
+    FieldMultiSelectCommit,
+    FieldMultiSelectCancel,
+    SubmitConfirmToggle,
+    SubmitConfirmActivate,
+    SubmitConfirmCancel,
 }
 
 /// Interprets one key event against the current arm state and interaction mode.
@@ -71,16 +85,22 @@ pub(crate) fn map_key_event(
     quit_armed: bool,
     refresh_armed: bool,
     in_command_mode: bool,
-    in_link_navigation: bool,
+    in_interactive_navigation: bool,
     palette_active: bool,
     address_suggestions_active: bool,
     in_history: bool,
     in_cookies: bool,
     in_settings: bool,
     settings_text_field_focused: bool,
+    in_field_text_edit: bool,
+    in_field_multi_select: bool,
+    in_submit_confirmation: bool,
 ) -> InputAction {
     if is_quit_combination(event) {
         return InputAction::Quit;
+    }
+    if in_submit_confirmation {
+        return map_submit_confirmation_key(event);
     }
     if in_settings {
         return map_settings_key(event, settings_text_field_focused);
@@ -94,8 +114,14 @@ pub(crate) fn map_key_event(
     if in_command_mode {
         return map_command_mode_key(event, palette_active, address_suggestions_active);
     }
-    if in_link_navigation {
-        return map_link_navigation_key(event);
+    if in_field_text_edit {
+        return map_field_text_key(event);
+    }
+    if in_field_multi_select {
+        return map_field_multi_select_key(event);
+    }
+    if in_interactive_navigation {
+        return map_interactive_navigation_key(event);
     }
     map_reading_mode_key(event, quit_armed, refresh_armed)
 }
@@ -124,23 +150,23 @@ fn map_reading_mode_key(event: KeyEvent, quit_armed: bool, refresh_armed: bool) 
         KeyCode::PageUp => InputAction::ScrollPageUp,
         KeyCode::Char('g') => InputAction::ScrollToTop,
         KeyCode::Char('G') => InputAction::ScrollToBottom,
-        KeyCode::Tab => InputAction::FocusNextLink,
-        KeyCode::BackTab => InputAction::FocusPreviousLink,
+        KeyCode::Tab => InputAction::FocusNextInteractive,
+        KeyCode::BackTab => InputAction::FocusPreviousInteractive,
         KeyCode::Backspace => InputAction::NavigateBack,
         KeyCode::Char(ch) if !ch.is_control() => InputAction::EnterCommand(ch),
         _ => InputAction::Disarm,
     }
 }
 
-/// Maps a key while a link is focused. Tab and Shift+Tab move focus, Enter activates the
-/// focused link, Backspace goes back in history, Esc leaves link navigation, and the
-/// scroll keys keep working so the reader can move the viewport while a link stays
-/// focused. Any other key leaves link navigation.
-fn map_link_navigation_key(event: KeyEvent) -> InputAction {
+/// Maps a key while a link or form control is focused. Tab and Shift+Tab move focus,
+/// Enter activates the focused target, Backspace goes back in history, Esc leaves
+/// interactive navigation, and the scroll keys keep working so the reader can move the
+/// viewport while a target stays focused. Any other key leaves interactive navigation.
+fn map_interactive_navigation_key(event: KeyEvent) -> InputAction {
     match event.code {
-        KeyCode::Tab => InputAction::FocusNextLink,
-        KeyCode::BackTab => InputAction::FocusPreviousLink,
-        KeyCode::Enter => InputAction::ActivateFocusedLink,
+        KeyCode::Tab => InputAction::FocusNextInteractive,
+        KeyCode::BackTab => InputAction::FocusPreviousInteractive,
+        KeyCode::Enter => InputAction::ActivateFocused,
         KeyCode::Esc => InputAction::Disarm,
         KeyCode::Backspace => InputAction::NavigateBack,
         KeyCode::Down | KeyCode::Char('j') => InputAction::ScrollLineDown,
@@ -149,6 +175,52 @@ fn map_link_navigation_key(event: KeyEvent) -> InputAction {
         KeyCode::PageUp => InputAction::ScrollPageUp,
         KeyCode::Char('g') => InputAction::ScrollToTop,
         KeyCode::Char('G') => InputAction::ScrollToBottom,
+        _ => InputAction::Disarm,
+    }
+}
+
+/// Maps a key while a form field's text-edit sub-mode is active. Printable characters
+/// edit the draft, `Backspace` deletes, `Left`/`Right` move the cursor, `Enter` commits
+/// the draft back through the controller, and `Esc` discards it. Both return focus to
+/// interactive navigation with the same field still focused. Mirrors
+/// `map_settings_text_key` exactly in shape.
+fn map_field_text_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Left => InputAction::FieldTextMoveCursorLeft,
+        KeyCode::Right => InputAction::FieldTextMoveCursorRight,
+        KeyCode::Backspace => InputAction::FieldTextDeleteBack,
+        KeyCode::Enter => InputAction::FieldTextCommit,
+        KeyCode::Esc => InputAction::FieldTextCancel,
+        KeyCode::Char(character) if !character.is_control() => {
+            InputAction::FieldTextInput(character)
+        }
+        _ => InputAction::Disarm,
+    }
+}
+
+/// Maps a key while a multi-select's expanded option list is open. `Up`/`Down` (and
+/// `k`/`j`) move the highlighted option, `Space` toggles it, and `Enter` or `Esc` both
+/// close the list back to interactive navigation, since every toggle already applied
+/// instantly and there is nothing left to discard.
+fn map_field_multi_select_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Up | KeyCode::Char('k') => InputAction::FieldMultiSelectMoveUp,
+        KeyCode::Down | KeyCode::Char('j') => InputAction::FieldMultiSelectMoveDown,
+        KeyCode::Char(' ') => InputAction::FieldMultiSelectToggle,
+        KeyCode::Enter => InputAction::FieldMultiSelectCommit,
+        KeyCode::Esc => InputAction::FieldMultiSelectCancel,
+        _ => InputAction::Disarm,
+    }
+}
+
+/// Maps a key while the `POST` submission confirmation view is open. `Up`/`Down` toggle
+/// between `Submit` and `Cancel`, `Enter` activates the highlighted choice, and `Esc` is
+/// equivalent to choosing `Cancel`.
+fn map_submit_confirmation_key(event: KeyEvent) -> InputAction {
+    match event.code {
+        KeyCode::Up | KeyCode::Down => InputAction::SubmitConfirmToggle,
+        KeyCode::Enter => InputAction::SubmitConfirmActivate,
+        KeyCode::Esc => InputAction::SubmitConfirmCancel,
         _ => InputAction::Disarm,
     }
 }

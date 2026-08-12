@@ -8,26 +8,31 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{
-    action_refreshes_suggestions, advance_link_focus, build_settings_model, cell_is_selected,
-    clamped_document_coordinate, copied_message, decode_fragment, document_coordinate,
-    handle_mouse_event, max_scroll_offset, parse_history_request, resolve_anchor_row,
-    retreat_link_focus, sanitize_fragment_for_display, CachedPage, CommandOutcome, EnvOverrides,
-    HistoryRequest, InputAction, LoadState, ScrollState, SettingsModel, SettingsMutation,
-    TerminalApp, TerminalSettings, TextSelection, UiState, ViewState, ViewportBounds,
-    BODY_AREA_TOP_ROW, CONTENT_PADDING, SETTINGS_ENV_LOCKED, SETTINGS_TEXT_INVALID,
+    action_refreshes_suggestions, advance_interactive_focus, build_settings_model,
+    cell_is_selected, clamped_document_coordinate, copied_message, decode_fragment,
+    document_coordinate, handle_mouse_event, handle_navigation_action, max_scroll_offset,
+    parse_history_request, resolve_anchor_row, retreat_interactive_focus,
+    sanitize_fragment_for_display, unique_interactive_targets, CachedPage, CommandOutcome,
+    EnvOverrides, HistoryRequest, InputAction, InteractiveTarget, LoadState, NavigationRequest,
+    ScrollState, SettingsModel, SettingsMutation, TerminalApp, TerminalSettings, TextSelection,
+    UiState, ViewState, ViewportBounds, BODY_AREA_TOP_ROW, CONTENT_PADDING, SETTINGS_ENV_LOCKED,
+    SETTINGS_TEXT_INVALID,
 };
 use crate::settings_view::SettingId;
-use crate::ui_state::SETTINGS_AUTOSAVE_DEBOUNCE;
+use crate::ui_state::{SubmitChoice, SETTINGS_AUTOSAVE_DEBOUNCE};
 use browser_core::{
-    CookiePolicy, CookiePolicyPair, HistoryMode, HistorySettings, HistoryStore,
-    NavigationController, SearchEngine, SitePolicyStore, SuggestionEntry,
+    resolve_address, CookiePolicy, CookiePolicyPair, HistoryMode, HistorySettings, HistoryStore,
+    NavigationController, NavigationSource, NodeId, SearchEngine, SitePolicyStore, SuggestionEntry,
 };
 
 use crate::command::CookiesRequest;
 use browser_html::{Document, InlineEmphasis, InlineRun, SemanticNode};
-use browser_layout::{render_document, AnchorSpan, CellBuffer, CellPosition, WidthConfig};
+use browser_layout::{
+    render_document, AnchorSpan, CellBuffer, CellPosition, FieldSpanKind, WidthConfig,
+};
 use browser_storage::{ConfigStore, HistoryEntry, NewVisit, StorageError};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use tempfile::tempdir;
 
 fn citation_run(text: &str, cite_url: &str) -> InlineRun {
     InlineRun {
@@ -70,7 +75,7 @@ fn cache_with_run(run: InlineRun) -> CachedPage {
         None,
         0,
     );
-    let buffer = render_document(&document, 40, &WidthConfig::default())
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
         .expect("a single-run paragraph must lay out for the citation test");
     CachedPage { width: 40, buffer }
 }
@@ -100,7 +105,7 @@ fn cache_with_anchor(anchor_name: &str) -> CachedPage {
         inline_style: None,
     };
     let document = Document::new(vec![first, target], None, 0);
-    let buffer = render_document(&document, 40, &WidthConfig::default())
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
         .expect("document must lay out for the anchor test");
     CachedPage { width: 40, buffer }
 }
@@ -577,7 +582,7 @@ fn cache_with_links(link_count: usize) -> CachedPage {
         })
         .collect();
     let document = Document::new(nodes, None, 0);
-    let buffer = render_document(&document, 40, &WidthConfig::default())
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
         .expect("linked paragraphs must lay out for the focus test");
     CachedPage { width: 40, buffer }
 }
@@ -591,7 +596,7 @@ fn tabbing_down_onto_a_link_below_the_fold_scrolls_to_reveal_it() {
     let mut scroll = ScrollState::new();
 
     // The entry Tab focuses the first visible link (row 0) and does not scroll.
-    advance_link_focus(
+    advance_interactive_focus(
         &mut ui_state,
         Some(&cache.buffer),
         &mut scroll,
@@ -604,7 +609,7 @@ fn tabbing_down_onto_a_link_below_the_fold_scrolls_to_reveal_it() {
 
     // Tabbing down to the fourth link (row 6) scrolls it onto the bottom edge.
     for _ in 0..3 {
-        advance_link_focus(
+        advance_interactive_focus(
             &mut ui_state,
             Some(&cache.buffer),
             &mut scroll,
@@ -614,7 +619,7 @@ fn tabbing_down_onto_a_link_below_the_fold_scrolls_to_reveal_it() {
             },
         );
     }
-    assert_eq!(ui_state.focused_link_index, Some(3));
+    assert_eq!(ui_state.focused_interactive_index, Some(3));
     assert_eq!(scroll.offset(), 6 - (viewport_height - 1));
 }
 
@@ -626,11 +631,11 @@ fn shift_tabbing_up_to_a_link_above_the_window_scrolls_to_reveal_it() {
     let mut ui_state = UiState::new(true);
     let mut scroll = ScrollState::new();
     // Focus the fifth link (row 8) with the window scrolled to the bottom.
-    ui_state.enter_link_navigation(4);
+    ui_state.enter_interactive_navigation(4);
     scroll.scroll_to(8, max_offset);
 
     // Shift+Tab up to the fourth link (row 6) sits above the window and scrolls up to it.
-    retreat_link_focus(
+    retreat_interactive_focus(
         &mut ui_state,
         Some(&cache.buffer),
         &mut scroll,
@@ -639,7 +644,7 @@ fn shift_tabbing_up_to_a_link_above_the_window_scrolls_to_reveal_it() {
             max_offset,
         },
     );
-    assert_eq!(ui_state.focused_link_index, Some(3));
+    assert_eq!(ui_state.focused_interactive_index, Some(3));
     assert_eq!(scroll.offset(), 6);
 }
 
@@ -650,10 +655,10 @@ fn tabbing_forward_off_the_last_link_wraps_and_scrolls_to_the_top() {
     let max_offset = max_scroll_offset(cache.buffer.height(), viewport_height);
     let mut ui_state = UiState::new(true);
     let mut scroll = ScrollState::new();
-    ui_state.enter_link_navigation(5);
+    ui_state.enter_interactive_navigation(5);
     scroll.scroll_to(8, max_offset);
 
-    advance_link_focus(
+    advance_interactive_focus(
         &mut ui_state,
         Some(&cache.buffer),
         &mut scroll,
@@ -662,7 +667,7 @@ fn tabbing_forward_off_the_last_link_wraps_and_scrolls_to_the_top() {
             max_offset,
         },
     );
-    assert_eq!(ui_state.focused_link_index, Some(0));
+    assert_eq!(ui_state.focused_interactive_index, Some(0));
     assert_eq!(scroll.offset(), 0);
 }
 
@@ -673,10 +678,10 @@ fn shift_tabbing_backward_off_the_first_link_wraps_and_reveals_the_last() {
     let max_offset = max_scroll_offset(cache.buffer.height(), viewport_height);
     let mut ui_state = UiState::new(true);
     let mut scroll = ScrollState::new();
-    ui_state.enter_link_navigation(0);
+    ui_state.enter_interactive_navigation(0);
 
     // The last link sits on row 10; the bottom edge lands it at offset 10 - (4 - 1) = 7.
-    retreat_link_focus(
+    retreat_interactive_focus(
         &mut ui_state,
         Some(&cache.buffer),
         &mut scroll,
@@ -685,7 +690,7 @@ fn shift_tabbing_backward_off_the_first_link_wraps_and_reveals_the_last() {
             max_offset,
         },
     );
-    assert_eq!(ui_state.focused_link_index, Some(5));
+    assert_eq!(ui_state.focused_interactive_index, Some(5));
     assert_eq!(scroll.offset(), 10 - (viewport_height - 1));
 }
 
@@ -696,10 +701,10 @@ fn tabbing_onto_an_already_visible_link_leaves_the_offset_unchanged() {
     let max_offset = max_scroll_offset(cache.buffer.height(), viewport_height);
     let mut ui_state = UiState::new(true);
     let mut scroll = ScrollState::new();
-    ui_state.enter_link_navigation(0);
+    ui_state.enter_interactive_navigation(0);
 
     // The second link (row 2) is already inside the window that starts at the top.
-    advance_link_focus(
+    advance_interactive_focus(
         &mut ui_state,
         Some(&cache.buffer),
         &mut scroll,
@@ -708,7 +713,7 @@ fn tabbing_onto_an_already_visible_link_leaves_the_offset_unchanged() {
             max_offset,
         },
     );
-    assert_eq!(ui_state.focused_link_index, Some(1));
+    assert_eq!(ui_state.focused_interactive_index, Some(1));
     assert_eq!(scroll.offset(), 0);
 }
 
@@ -1548,7 +1553,7 @@ fn tab_focusing_a_citation_span_sets_the_preview_and_a_hyperlink_leaves_it_unset
         max_offset: 0,
     };
 
-    advance_link_focus(
+    advance_interactive_focus(
         &mut ui_state,
         Some(&citation_cache.buffer),
         &mut scroll,
@@ -1564,13 +1569,13 @@ fn tab_focusing_a_citation_span_sets_the_preview_and_a_hyperlink_leaves_it_unset
     let mut ui_state = UiState::new(true);
     let mut scroll = ScrollState::new();
 
-    advance_link_focus(&mut ui_state, Some(&link_cache.buffer), &mut scroll, bounds);
+    advance_interactive_focus(&mut ui_state, Some(&link_cache.buffer), &mut scroll, bounds);
 
     assert_eq!(ui_state.citation_preview(), None);
 }
 
 #[test]
-fn exiting_link_navigation_clears_the_citation_preview() {
+fn exiting_interactive_navigation_clears_the_citation_preview() {
     let cache = cache_with_run(citation_run("Quote", "https://example.com/source"));
     let mut ui_state = UiState::new(true);
     let mut scroll = ScrollState::new();
@@ -1578,10 +1583,10 @@ fn exiting_link_navigation_clears_the_citation_preview() {
         height: 4,
         max_offset: 0,
     };
-    advance_link_focus(&mut ui_state, Some(&cache.buffer), &mut scroll, bounds);
+    advance_interactive_focus(&mut ui_state, Some(&cache.buffer), &mut scroll, bounds);
     assert!(ui_state.citation_preview().is_some());
 
-    ui_state.exit_link_navigation();
+    ui_state.exit_interactive_navigation();
 
     assert_eq!(ui_state.citation_preview(), None);
 }
@@ -1697,7 +1702,7 @@ fn a_quote_nested_inside_an_anchor_never_previews_and_activates_the_anchor_url()
         max_offset: 0,
     };
 
-    advance_link_focus(&mut ui_state, Some(&cache.buffer), &mut scroll, bounds);
+    advance_interactive_focus(&mut ui_state, Some(&cache.buffer), &mut scroll, bounds);
     assert_eq!(ui_state.citation_preview(), None);
 
     let mut selection = TextSelection::new();
@@ -1739,4 +1744,606 @@ fn a_quote_nested_inside_an_anchor_never_previews_and_activates_the_anchor_url()
         navigate_to_url,
         Some("https://example.com/article".to_string())
     );
+}
+
+// --- Phase 04: unified interactive focus, field editing, and submission confirmation ---
+
+/// Loads `body` as a local file page, so a real parsed document and seeded
+/// `FormFieldValues` back the controller without any network access.
+async fn load_form_page(body: &str) -> NavigationController {
+    let working_directory = tempdir().expect("a temporary working directory must be created");
+    std::fs::write(working_directory.path().join("page.html"), body)
+        .expect("the temporary HTML file must be written");
+    let url = resolve_address("page.html", working_directory.path())
+        .expect("an existing local HTML file must resolve to a file URL");
+    let mut controller = NavigationController::new();
+    controller
+        .load(url, NavigationSource::AddressBar)
+        .await
+        .expect("loading the temporary page must succeed");
+    controller
+}
+
+fn cache_for(controller: &NavigationController) -> CachedPage {
+    let buffer = controller.render(80).expect("a loaded page must render");
+    CachedPage { width: 80, buffer }
+}
+
+fn wide_bounds() -> ViewportBounds {
+    ViewportBounds {
+        height: 40,
+        max_offset: 0,
+    }
+}
+
+#[test]
+fn unique_interactive_targets_merges_links_and_fields_in_position_order_and_dedups_each() {
+    let repeated_link = InlineRun {
+        text: "Again".to_string(),
+        emphasis: InlineEmphasis::none(),
+        link: Some("https://example.com/a".to_string()),
+        citation: None,
+        anchors: Vec::new(),
+    };
+    let first_link = SemanticNode::Paragraph {
+        runs: vec![InlineRun {
+            text: "Next".to_string(),
+            emphasis: InlineEmphasis::none(),
+            link: Some("https://example.com/a".to_string()),
+            citation: None,
+            anchors: Vec::new(),
+        }],
+        inline_style: None,
+    };
+    let field = SemanticNode::Input(browser_html::InputElement {
+        id: NodeId::new(0),
+        kind: browser_html::InputKind::Text,
+        name: None,
+        value: String::new(),
+        checked: false,
+        label: None,
+        sensitive: false,
+    });
+    let repeated_link_paragraph = SemanticNode::Paragraph {
+        runs: vec![repeated_link],
+        inline_style: None,
+    };
+    let document = Document::new(vec![first_link, field, repeated_link_paragraph], None, 0);
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("a link and a field must lay out");
+
+    let targets = unique_interactive_targets(&buffer);
+    assert_eq!(
+        targets,
+        vec![
+            InteractiveTarget::Link("https://example.com/a"),
+            InteractiveTarget::Field(NodeId::new(0), FieldSpanKind::Input),
+        ],
+        "the repeated link URL collapses into its first occurrence, not a second entry"
+    );
+}
+
+#[test]
+fn tab_cycles_through_a_link_and_every_form_control_in_document_order_and_wraps() {
+    let link = SemanticNode::Paragraph {
+        runs: vec![InlineRun {
+            text: "Next".to_string(),
+            emphasis: InlineEmphasis::none(),
+            link: Some("https://example.com/next".to_string()),
+            citation: None,
+            anchors: Vec::new(),
+        }],
+        inline_style: None,
+    };
+    let form = SemanticNode::Form(browser_html::FormElement {
+        id: NodeId::new(0),
+        action: "https://example.com/submit".to_string(),
+        method: browser_html::FormMethod::Post,
+        children: vec![
+            SemanticNode::Input(browser_html::InputElement {
+                id: NodeId::new(1),
+                kind: browser_html::InputKind::Text,
+                name: None,
+                value: String::new(),
+                checked: false,
+                label: None,
+                sensitive: false,
+            }),
+            SemanticNode::Button(browser_html::ButtonElement {
+                id: NodeId::new(2),
+                kind: browser_html::ButtonKind::Submit,
+                name: None,
+                value: None,
+                runs: vec![InlineRun::plain("Go".to_string())],
+                inline_style: None,
+            }),
+        ],
+    });
+    let document = Document::new(vec![link, form], None, 0);
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("a link and a form must lay out");
+    let cache = CachedPage { width: 40, buffer };
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+
+    for expected in [0, 1, 2, 0] {
+        advance_interactive_focus(
+            &mut ui_state,
+            Some(&cache.buffer),
+            &mut scroll,
+            wide_bounds(),
+        );
+        assert_eq!(ui_state.focused_interactive_index, Some(expected));
+    }
+}
+
+#[tokio::test]
+async fn activating_a_checkbox_toggles_it_without_entering_a_sub_mode() {
+    let mut controller = load_form_page(
+        r#"<html><body>
+            <form action="/submit" method="post">
+                <input type="checkbox" name="agree" />
+            </form>
+        </body></html>"#,
+    )
+    .await;
+    let mut cache = Some(cache_for(&controller));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let mut view_state = ViewState::Page;
+
+    handle_navigation_action(
+        InputAction::FocusNextInteractive,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    let request = handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+
+    assert!(
+        request.is_none(),
+        "a checkbox activation is not a navigation request"
+    );
+    assert!(
+        ui_state.field_text_edit_target().is_none(),
+        "a checkbox activation never enters the text-edit sub-mode"
+    );
+    assert!(controller
+        .field_values()
+        .expect("a page must be current")
+        .is_checked(NodeId::new(1)));
+}
+
+#[tokio::test]
+async fn activating_a_radio_unchecks_its_siblings() {
+    let mut controller = load_form_page(
+        r#"<html><body>
+            <form action="/submit" method="post">
+                <input type="radio" name="color" value="red" checked />
+                <input type="radio" name="color" value="blue" />
+            </form>
+        </body></html>"#,
+    )
+    .await;
+    let mut cache = Some(cache_for(&controller));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let mut view_state = ViewState::Page;
+
+    for _ in 0..2 {
+        handle_navigation_action(
+            InputAction::FocusNextInteractive,
+            &mut controller,
+            &mut ui_state,
+            &mut cache,
+            &mut scroll,
+            &mut view_state,
+            wide_bounds(),
+        );
+    }
+    handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+
+    let field_values = controller.field_values().expect("a page must be current");
+    assert!(
+        !field_values.is_checked(NodeId::new(1)),
+        "the previously checked radio is now unchecked"
+    );
+    assert!(field_values.is_checked(NodeId::new(2)));
+}
+
+#[tokio::test]
+async fn activating_a_text_input_enters_text_edit_and_commit_writes_it_back() {
+    let mut controller = load_form_page(
+        r#"<html><body>
+            <form action="/submit" method="post">
+                <input type="text" name="q" value="hello" />
+            </form>
+        </body></html>"#,
+    )
+    .await;
+    let mut cache = Some(cache_for(&controller));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let mut view_state = ViewState::Page;
+
+    handle_navigation_action(
+        InputAction::FocusNextInteractive,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    assert_eq!(
+        ui_state.field_text_edit_target(),
+        Some((NodeId::new(1), false))
+    );
+    assert_eq!(ui_state.field_text_edit_cursor(), Some(("hello", 5)));
+
+    ui_state.field_text_input('!');
+    handle_navigation_action(
+        InputAction::FieldTextCommit,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+
+    assert_eq!(
+        controller
+            .field_values()
+            .expect("a page must be current")
+            .text(NodeId::new(1)),
+        Some("hello!")
+    );
+    assert!(ui_state.field_text_edit_target().is_none());
+    assert!(ui_state.is_in_interactive_navigation());
+}
+
+#[tokio::test]
+async fn cancelling_a_text_edit_discards_the_draft() {
+    let mut controller = load_form_page(
+        r#"<html><body>
+            <form action="/submit" method="post">
+                <input type="text" name="q" value="hello" />
+            </form>
+        </body></html>"#,
+    )
+    .await;
+    let mut cache = Some(cache_for(&controller));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let mut view_state = ViewState::Page;
+
+    handle_navigation_action(
+        InputAction::FocusNextInteractive,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    ui_state.field_text_input('!');
+    handle_navigation_action(
+        InputAction::FieldTextCancel,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+
+    assert_eq!(
+        controller
+            .field_values()
+            .expect("a page must be current")
+            .text(NodeId::new(1)),
+        Some("hello")
+    );
+    assert!(ui_state.field_text_edit_target().is_none());
+}
+
+#[tokio::test]
+async fn activating_a_single_select_cycles_its_option_without_a_sub_mode() {
+    let mut controller = load_form_page(
+        r#"<html><body>
+            <form action="/submit" method="post">
+                <select name="fruit">
+                    <option value="apple">Apple</option>
+                    <option value="banana">Banana</option>
+                </select>
+            </form>
+        </body></html>"#,
+    )
+    .await;
+    let mut cache = Some(cache_for(&controller));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let mut view_state = ViewState::Page;
+
+    handle_navigation_action(
+        InputAction::FocusNextInteractive,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    assert!(ui_state.field_multi_select().is_none());
+    assert_eq!(
+        controller
+            .field_values()
+            .expect("a page must be current")
+            .selected_values(NodeId::new(1)),
+        ["apple"]
+    );
+
+    handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    assert_eq!(
+        controller
+            .field_values()
+            .expect("a page must be current")
+            .selected_values(NodeId::new(1)),
+        ["banana"]
+    );
+}
+
+#[tokio::test]
+async fn activating_a_multi_select_opens_the_expansion_and_space_toggles_the_moved_to_option() {
+    let mut controller = load_form_page(
+        r#"<html><body>
+            <form action="/submit" method="post">
+                <select name="tags" multiple>
+                    <option value="a">Alpha</option>
+                    <option value="b">Beta</option>
+                </select>
+            </form>
+        </body></html>"#,
+    )
+    .await;
+    let mut cache = Some(cache_for(&controller));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let mut view_state = ViewState::Page;
+
+    handle_navigation_action(
+        InputAction::FocusNextInteractive,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    let (node_id, options, cursor) = ui_state
+        .field_multi_select()
+        .expect("a multi-select activation must open the expansion sub-mode");
+    assert_eq!(node_id, NodeId::new(1));
+    assert_eq!(options.len(), 2);
+    assert_eq!(cursor, 0);
+
+    handle_navigation_action(
+        InputAction::FieldMultiSelectMoveDown,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    handle_navigation_action(
+        InputAction::FieldMultiSelectToggle,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+
+    assert_eq!(
+        controller
+            .field_values()
+            .expect("a page must be current")
+            .selected_values(NodeId::new(1)),
+        ["b"]
+    );
+}
+
+#[tokio::test]
+async fn activating_a_get_forms_submit_button_requests_immediate_submission() {
+    let mut controller = load_form_page(
+        r#"<html><body>
+            <form action="/search" method="get">
+                <button type="submit">Go</button>
+            </form>
+        </body></html>"#,
+    )
+    .await;
+    let mut cache = Some(cache_for(&controller));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let mut view_state = ViewState::Page;
+
+    handle_navigation_action(
+        InputAction::FocusNextInteractive,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    let request = handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+
+    assert!(matches!(request, Some(NavigationRequest::Submit(id)) if id == NodeId::new(1)));
+    assert!(!ui_state.is_in_submit_confirmation());
+}
+
+#[tokio::test]
+async fn activating_a_post_forms_submit_button_opens_confirmation_and_waits_for_submit() {
+    let mut controller = load_form_page(
+        r#"<html><body>
+            <form action="/create" method="post">
+                <button type="submit">Go</button>
+            </form>
+        </body></html>"#,
+    )
+    .await;
+    let mut cache = Some(cache_for(&controller));
+    let mut ui_state = UiState::new(true);
+    let mut scroll = ScrollState::new();
+    let mut view_state = ViewState::Page;
+
+    handle_navigation_action(
+        InputAction::FocusNextInteractive,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    let activation_request = handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    assert!(
+        activation_request.is_none(),
+        "a POST submit does not submit on activation"
+    );
+    assert!(ui_state.is_in_submit_confirmation());
+    let (submit_button, destination, choice) = ui_state
+        .submit_confirmation()
+        .expect("the confirmation view must be open");
+    assert_eq!(submit_button, NodeId::new(1));
+    assert!(destination.ends_with("/create"));
+    assert_eq!(choice, SubmitChoice::Cancel);
+
+    let cancel_activation = handle_navigation_action(
+        InputAction::SubmitConfirmActivate,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    assert!(
+        cancel_activation.is_none(),
+        "confirming Cancel submits nothing"
+    );
+    assert!(!ui_state.is_in_submit_confirmation());
+
+    // Re-open the confirmation and this time toggle to Submit before confirming.
+    handle_navigation_action(
+        InputAction::ActivateFocused,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    handle_navigation_action(
+        InputAction::SubmitConfirmToggle,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    let submit_request = handle_navigation_action(
+        InputAction::SubmitConfirmActivate,
+        &mut controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut view_state,
+        wide_bounds(),
+    );
+    assert!(matches!(submit_request, Some(NavigationRequest::Submit(id)) if id == submit_button));
 }
