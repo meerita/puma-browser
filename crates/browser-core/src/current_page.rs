@@ -6,13 +6,16 @@
 use browser_html::{Document, DocumentTitle};
 use browser_network::BrowserUrl;
 
+use crate::form_field_values::FormFieldValues;
+
 /// The page currently held by the navigation controller.
 ///
 /// This milestone tracks one page at a time, not a set of tabs. It keeps the URL the
 /// fetch finally resolved to (after any redirects), the parsed document, the
 /// document's title so an adapter can show it without walking the node stream, the
-/// raw byte count of the response body, and how many cookies this navigation accepted
-/// and rejected so an adapter can show a per-page indicator.
+/// raw byte count of the response body, how many cookies this navigation accepted
+/// and rejected so an adapter can show a per-page indicator, and the page's live form
+/// field state.
 #[derive(Debug)]
 pub(crate) struct CurrentPage {
     final_url: BrowserUrl,
@@ -21,6 +24,7 @@ pub(crate) struct CurrentPage {
     byte_count: usize,
     accepted_cookie_count: usize,
     rejected_cookie_count: usize,
+    form_field_values: FormFieldValues,
 }
 
 impl CurrentPage {
@@ -31,6 +35,7 @@ impl CurrentPage {
         byte_count: usize,
         accepted_cookie_count: usize,
         rejected_cookie_count: usize,
+        form_field_values: FormFieldValues,
     ) -> Self {
         Self {
             final_url,
@@ -39,6 +44,7 @@ impl CurrentPage {
             byte_count,
             accepted_cookie_count,
             rejected_cookie_count,
+            form_field_values,
         }
     }
 
@@ -64,5 +70,13 @@ impl CurrentPage {
 
     pub(crate) fn rejected_cookie_count(&self) -> usize {
         self.rejected_cookie_count
+    }
+
+    pub(crate) fn form_field_values(&self) -> &FormFieldValues {
+        &self.form_field_values
+    }
+
+    pub(crate) fn form_field_values_mut(&mut self) -> &mut FormFieldValues {
+        &mut self.form_field_values
     }
 }

@@ -49,6 +49,9 @@ pub enum CoreError {
 
     #[error("privacy policy error")]
     Privacy(#[source] PrivacyError),
+
+    #[error("form field not found")]
+    FieldNotFound,
 }
 
 impl From<NetworkError> for CoreError {

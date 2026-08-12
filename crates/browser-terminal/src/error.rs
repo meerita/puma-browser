@@ -52,6 +52,7 @@ impl TerminalError {
             CoreError::Layout(_) => "Could not display the page",
             CoreError::Storage(_) => "Could not access local data",
             CoreError::Privacy(_) => "Blocked by privacy policy",
+            CoreError::FieldNotFound => "Form field not found",
         }
     }
 }

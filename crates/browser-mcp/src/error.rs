@@ -65,6 +65,7 @@ impl McpError {
             CoreError::Storage(_) => "NAVIGATION_FAILED",
             // A privacy-policy rejection is reported to the client as a denial.
             CoreError::Privacy(_) => "PERMISSION_DENIED",
+            CoreError::FieldNotFound => "FIELD_NOT_FOUND",
         }
     }
 }
