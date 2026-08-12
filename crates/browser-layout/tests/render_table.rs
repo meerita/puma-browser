@@ -84,6 +84,7 @@ fn wide_view_aligns_each_column_across_header_and_data_rows() {
         &document_of(vec![people_table()]),
         40,
         &WidthConfig::default(),
+        None,
     )
     .expect("a table that fits must lay out");
 
@@ -107,6 +108,7 @@ fn header_cells_render_bold_and_data_cells_do_not() {
         &document_of(vec![people_table()]),
         40,
         &WidthConfig::default(),
+        None,
     )
     .expect("a table that fits must lay out");
 
@@ -122,6 +124,7 @@ fn narrow_view_falls_back_to_record_lines() {
         &document_of(vec![people_table()]),
         18,
         &WidthConfig::default(),
+        None,
     )
     .expect("a narrow table must lay out");
 
@@ -145,7 +148,7 @@ fn column_widths_derive_from_the_widest_cell_in_the_column() {
         row(vec![cell(false, "long"), cell(false, "y")]),
     ]);
 
-    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default())
+    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default(), None)
         .expect("table must lay out");
 
     // Column zero is as wide as "long" (4) plus a two-column gap, so the second column
@@ -161,7 +164,7 @@ fn wide_grapheme_cells_measure_at_two_columns() {
         row(vec![cell(false, "a"), cell(false, "c")]),
     ]);
 
-    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default())
+    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default(), None)
         .expect("table must lay out");
 
     // The wide grapheme occupies two columns, so column zero is two wide and the second
@@ -178,7 +181,7 @@ fn linked_cell_content_is_underlined() {
         cell(false, "tail"),
     ])]);
 
-    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default())
+    let buffer = render_document(&document_of(vec![grid]), 40, &WidthConfig::default(), None)
         .expect("table must lay out");
 
     let first = buffer.cell_at(0, 0).expect("the linked cell renders");

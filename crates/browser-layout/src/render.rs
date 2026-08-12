@@ -6,11 +6,15 @@
 use std::borrow::Cow;
 
 use browser_css::{cascade, computed_run_style, Color, DisplayMode, TextStyle, TextTransform};
-use browser_html::{Document, InlineRun, SemanticNode};
+use browser_html::{
+    Document, InlineRun, InputElement, InputKind, NodeId, SelectOption, SemanticNode,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::cell::{AnchorSpan, Cell, CellBuffer, LinkKind, LinkSpan};
 use crate::error::LayoutError;
+use crate::field_overlay::{FieldOverlay, FieldRenderValue};
+use crate::field_span::{FieldSpan, FieldSpanKind};
 use crate::table::render_table;
 use crate::width::{emoji_replacement, grapheme_columns, WidthConfig};
 
@@ -37,8 +41,19 @@ const INPUT_BLANK: &str = "____";
 /// The masked field drawn for a password input, so a value is never revealed.
 const INPUT_MASK: &str = "••••";
 
+/// The character repeated to mask a sensitive field's live length, one per typed
+/// character, so a password's length is visible but never its value.
+const MASK_CHARACTER: &str = "•";
+
 /// The marker drawn after a select placeholder to signal a dropdown control.
 const SELECT_MARKER: &str = "▾";
+
+/// The checkbox/radio marker drawn for a checked control, matching the settings panel's
+/// checkbox glyph.
+const CHECKBOX_CHECKED: &str = "[x]";
+
+/// The checkbox/radio marker drawn for an unchecked control.
+const CHECKBOX_UNCHECKED: &str = "[ ]";
 
 /// Lay a document out into a cell buffer sized to `width` columns.
 ///
@@ -53,6 +68,7 @@ pub fn render_document(
     document: &Document,
     width: u16,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) -> Result<CellBuffer, LayoutError> {
     if width == 0 {
         return Err(LayoutError::ZeroWidth);
@@ -66,6 +82,7 @@ pub fn render_document(
             ..TextStyle::default()
         },
         width_config,
+        field_overlay,
     );
     build_buffer(rows, width, width_config)
 }
@@ -79,10 +96,18 @@ pub(crate) fn render_children(
     width: usize,
     inherited: &TextStyle,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) -> Vec<Vec<Cell>> {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for node in children {
-        append_node_rows(&mut rows, node, width, inherited, width_config);
+        append_node_rows(
+            &mut rows,
+            node,
+            width,
+            inherited,
+            width_config,
+            field_overlay,
+        );
     }
     rows
 }
@@ -93,18 +118,20 @@ pub(crate) fn render_children(
 /// contributes no rows and its subtree is not walked. A structural node with no content
 /// contributes nothing, not even its spacing, so invisible nodes never leave stray blank
 /// rows behind.
+#[allow(clippy::too_many_arguments)]
 fn append_node_rows(
     rows: &mut Vec<Vec<Cell>>,
     node: &SemanticNode,
     width: usize,
     inherited: &TextStyle,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) {
     let style = cascade(inherited, node);
     if is_hidden(&style) {
         return;
     }
-    let content = node_rows(node, &style, width, width_config);
+    let content = node_rows(node, &style, width, width_config, field_overlay);
     if content.is_empty() {
         return;
     }
@@ -137,18 +164,30 @@ fn node_rows(
     style: &TextStyle,
     width: usize,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) -> Vec<Vec<Cell>> {
     match node {
         SemanticNode::Heading { runs, .. } => wrap_runs(runs, style, width, width_config),
         SemanticNode::Paragraph { runs, .. } => wrap_runs(runs, style, width, width_config),
-        SemanticNode::Quote { children, .. } => render_quote(children, style, width, width_config),
+        SemanticNode::Quote { children, .. } => {
+            render_quote(children, style, width, width_config, field_overlay)
+        }
         SemanticNode::List {
             ordered, children, ..
-        } => render_list(*ordered, children, width, style, width_config),
+        } => render_list(
+            *ordered,
+            children,
+            width,
+            style,
+            width_config,
+            field_overlay,
+        ),
         SemanticNode::ListItem { children, .. } => {
-            render_children(children, width, style, width_config)
+            render_children(children, width, style, width_config, field_overlay)
         }
-        SemanticNode::Table { children } => render_table(children, style, width, width_config),
+        SemanticNode::Table { children } => {
+            render_table(children, style, width, width_config, field_overlay)
+        }
         SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
             render_verbatim(text, style, width, width_config)
         }
@@ -158,31 +197,52 @@ fn node_rows(
         }
         SemanticNode::ImagePlaceholder { .. } => Vec::new(),
         SemanticNode::Figure { children, caption } => {
-            render_figure(children, caption, style, width, width_config)
+            render_figure(children, caption, style, width, width_config, field_overlay)
         }
         SemanticNode::Details { children, .. } => {
-            render_children(children, width, style, width_config)
+            render_children(children, width, style, width_config, field_overlay)
         }
         SemanticNode::Summary { runs, .. } => wrap_runs(runs, style, width, width_config),
         SemanticNode::Landmark { children, .. } => {
-            render_children(children, width, style, width_config)
+            render_children(children, width, style, width_config, field_overlay)
         }
-        SemanticNode::Form { children } => render_children(children, width, style, width_config),
-        SemanticNode::Input {
-            label, sensitive, ..
-        } => single_row(clip_line(
-            &input_placeholder(label.as_deref(), *sensitive),
-            style,
-            width,
-            width_config,
-        )),
-        SemanticNode::Select { label, options } => single_row(clip_line(
-            &select_placeholder(label.as_deref(), options),
-            style,
-            width,
-            width_config,
-        )),
-        SemanticNode::Button { runs, .. } => render_button(runs, style, width, width_config),
+        SemanticNode::Form(form) => {
+            render_children(&form.children, width, style, width_config, field_overlay)
+        }
+        SemanticNode::Input(input) => {
+            render_input(input, style, width, width_config, field_overlay)
+        }
+        SemanticNode::Textarea(textarea) => {
+            let overlay_value = field_overlay.and_then(|overlay| overlay.get(textarea.id));
+            mark_field(
+                single_row(clip_line(
+                    &input_placeholder(textarea.label.as_deref(), false, overlay_value),
+                    style,
+                    width,
+                    width_config,
+                )),
+                textarea.id,
+                FieldSpanKind::Textarea,
+            )
+        }
+        SemanticNode::Select(select) => {
+            let overlay_value = field_overlay.and_then(|overlay| overlay.get(select.id));
+            mark_field(
+                single_row(clip_line(
+                    &select_placeholder(select.label.as_deref(), &select.options, overlay_value),
+                    style,
+                    width,
+                    width_config,
+                )),
+                select.id,
+                FieldSpanKind::Select,
+            )
+        }
+        SemanticNode::Button(button) => mark_field(
+            render_button(&button.runs, style, width, width_config),
+            button.id,
+            FieldSpanKind::Button,
+        ),
         SemanticNode::EmbeddedContent { label } => single_row(clip_line(
             &embedded_placeholder(label),
             style,
@@ -321,6 +381,7 @@ fn render_quote(
     style: &TextStyle,
     width: usize,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) -> Vec<Vec<Cell>> {
     let indent = quote_indent(width);
     let content_width = width - indent;
@@ -329,6 +390,7 @@ fn render_quote(
         content_width,
         style,
         width_config,
+        field_overlay,
     ))
     .into_iter()
     .map(|row| indent_row(row, indent, style))
@@ -346,12 +408,14 @@ fn quote_indent(width: usize) -> usize {
 /// `N. ` number for an ordered list), then lay the item's block children out and indent
 /// them under the item text. Ordered numbering is 1-based within this list; a nested
 /// list is rendered by its own call, so its numbering restarts from one.
+#[allow(clippy::too_many_arguments)]
 fn render_list(
     ordered: bool,
     items: &[SemanticNode],
     width: usize,
     inherited: &TextStyle,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) -> Vec<Vec<Cell>> {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     let mut ordinal = 1usize;
@@ -366,6 +430,7 @@ fn render_list(
             width,
             inherited,
             width_config,
+            field_overlay,
         );
         ordinal += 1;
     }
@@ -379,6 +444,7 @@ fn render_list(
 /// Trailing blank rows from the last child are stripped so consecutive list items run
 /// tight without gaps between them. The blank that follows the whole list comes from the
 /// list node's own spacing_after.
+#[allow(clippy::too_many_arguments)]
 fn append_list_item_rows(
     rows: &mut Vec<Vec<Cell>>,
     item: &SemanticNode,
@@ -386,6 +452,7 @@ fn append_list_item_rows(
     width: usize,
     inherited: &TextStyle,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) {
     let SemanticNode::ListItem { children, .. } = item else {
         return;
@@ -399,6 +466,7 @@ fn append_list_item_rows(
         content_width,
         &style,
         width_config,
+        field_overlay,
     ));
     for (index, row) in children_rows.into_iter().enumerate() {
         rows.push(decorate_list_row(
@@ -507,33 +575,143 @@ fn render_figure(
     style: &TextStyle,
     width: usize,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) -> Vec<Vec<Cell>> {
-    let mut rows = render_children(children, width, style, width_config);
+    let mut rows = render_children(children, width, style, width_config, field_overlay);
     if let Some(runs) = caption {
         rows.extend(wrap_runs(runs, style, width, width_config));
     }
     rows
 }
 
-/// The bracketed placeholder for an inert input control.
+/// Render an `<input>` control: a hidden input contributes no row, matching the
+/// `ImagePlaceholder` convention that an invisible node renders as nothing; every other
+/// kind renders a single marked placeholder row, substituting a live overlay value for
+/// its static placeholder when the overlay carries one for this control.
+fn render_input(
+    input: &InputElement,
+    style: &TextStyle,
+    width: usize,
+    width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
+) -> Vec<Vec<Cell>> {
+    if input.kind == InputKind::Hidden {
+        return Vec::new();
+    }
+    let overlay_value = field_overlay.and_then(|overlay| overlay.get(input.id));
+    let text = input_display_text(input.label.as_deref(), input.sensitive, overlay_value);
+    mark_field(
+        single_row(clip_line(&text, style, width, width_config)),
+        input.id,
+        FieldSpanKind::Input,
+    )
+}
+
+/// The text shown for an `<input>` control. A live `Checked` overlay renders the
+/// checkbox/radio marker beside the label instead of the bracketed placeholder; every
+/// other case renders [`input_placeholder`].
+fn input_display_text(
+    label: Option<&str>,
+    sensitive: bool,
+    overlay: Option<&FieldRenderValue>,
+) -> String {
+    if let Some(FieldRenderValue::Checked(checked)) = overlay {
+        return checkbox_display(label, *checked);
+    }
+    input_placeholder(label, sensitive, overlay)
+}
+
+/// The checked/unchecked marker for a checkbox or radio input, matching the settings
+/// panel's checkbox glyph, followed by the label when one is known.
+fn checkbox_display(label: Option<&str>, checked: bool) -> String {
+    let marker = if checked {
+        CHECKBOX_CHECKED
+    } else {
+        CHECKBOX_UNCHECKED
+    };
+    match label {
+        Some(label) => format!("{marker} {label}"),
+        None => marker.to_string(),
+    }
+}
+
+/// The bracketed placeholder for an inert input or textarea control.
 ///
-/// A password input renders a fixed mask, never its value; every other input renders a
-/// blank field. The label, when known, precedes the field.
-fn input_placeholder(label: Option<&str>, sensitive: bool) -> String {
-    let field = if sensitive { INPUT_MASK } else { INPUT_BLANK };
+/// A `Text` overlay value replaces the field with the live typed text; a `MaskedLength`
+/// overlay value replaces it with that many mask characters, never the value itself. With
+/// no matching overlay value, a password input renders a fixed mask and every other
+/// control renders a blank field. The label, when known, precedes the field.
+fn input_placeholder(
+    label: Option<&str>,
+    sensitive: bool,
+    overlay: Option<&FieldRenderValue>,
+) -> String {
+    let field = input_field_text(sensitive, overlay);
     match label {
         Some(label) => format!("[{label}: {field}]"),
         None => format!("[{field}]"),
     }
 }
 
-/// The bracketed placeholder for an inert select control, showing its first option.
-fn select_placeholder(label: Option<&str>, options: &[String]) -> String {
-    let selected = options.first().map(String::as_str).unwrap_or("");
-    match label {
-        Some(label) => format!("[{label}: {selected} {SELECT_MARKER}]"),
-        None => format!("[{selected} {SELECT_MARKER}]"),
+fn input_field_text(sensitive: bool, overlay: Option<&FieldRenderValue>) -> String {
+    match overlay {
+        Some(FieldRenderValue::Text(value)) => value.clone(),
+        Some(FieldRenderValue::MaskedLength(length)) => MASK_CHARACTER.repeat(*length),
+        Some(FieldRenderValue::Checked(_)) | Some(FieldRenderValue::SelectedLabels(_)) | None => {
+            default_field_text(sensitive)
+        }
     }
+}
+
+fn default_field_text(sensitive: bool) -> String {
+    if sensitive {
+        INPUT_MASK.to_string()
+    } else {
+        INPUT_BLANK.to_string()
+    }
+}
+
+/// The bracketed placeholder for an inert select control, showing a live `SelectedLabels`
+/// overlay value when present, or otherwise its selected option, or, when none is marked
+/// selected, its first option, matching the HTML default.
+fn select_placeholder(
+    label: Option<&str>,
+    options: &[SelectOption],
+    overlay: Option<&FieldRenderValue>,
+) -> String {
+    let chosen = selected_option_display(options, overlay);
+    match label {
+        Some(label) => format!("[{label}: {chosen} {SELECT_MARKER}]"),
+        None => format!("[{chosen} {SELECT_MARKER}]"),
+    }
+}
+
+fn selected_option_display(options: &[SelectOption], overlay: Option<&FieldRenderValue>) -> String {
+    if let Some(FieldRenderValue::SelectedLabels(labels)) = overlay {
+        return labels.join(", ");
+    }
+    options
+        .iter()
+        .find(|option| option.selected)
+        .or_else(|| options.first())
+        .map(|option| option.label.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Mark every cell of every row with the given control's identity, so
+/// [`extract_field_spans`] can recover its geometry after layout.
+fn mark_field(rows: Vec<Vec<Cell>>, node_id: NodeId, kind: FieldSpanKind) -> Vec<Vec<Cell>> {
+    rows.into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|mut cell| {
+                    cell.set_field_marker(node_id, kind);
+                    cell
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Render a button as its label wrapped in brackets, keeping the label's inline styling.
@@ -618,6 +796,7 @@ fn build_buffer(
 ) -> Result<CellBuffer, LayoutError> {
     let links = extract_link_spans(&rows, width_config);
     let anchors = extract_anchor_spans(&rows);
+    let field_spans = extract_field_spans(&rows, width_config);
     let height = row_height(rows.len())?;
     let mut buffer = CellBuffer::new(width, height);
     for (row_index, row) in rows.into_iter().enumerate() {
@@ -625,6 +804,7 @@ fn build_buffer(
     }
     buffer.set_links(links);
     buffer.set_anchors(anchors);
+    buffer.set_field_spans(field_spans);
     Ok(buffer)
 }
 
@@ -710,6 +890,63 @@ fn extract_link_spans(rows: &[Vec<Cell>], width_config: &WidthConfig) -> Vec<Lin
         if let Some((start, url, kind)) = open {
             spans.push(LinkSpan {
                 url,
+                kind,
+                row: row_u16,
+                col_start: start,
+                col_end: col.saturating_sub(1),
+            });
+        }
+    }
+    spans
+}
+
+/// Scan the laid-out rows and record one [`FieldSpan`] per contiguous run of cells that
+/// share a field marker on a row, mirroring [`extract_link_spans`] exactly in shape. A
+/// control that wraps across rows yields one span per row.
+fn extract_field_spans(rows: &[Vec<Cell>], width_config: &WidthConfig) -> Vec<FieldSpan> {
+    let mut spans: Vec<FieldSpan> = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let Ok(row_u16) = u16::try_from(row_index) else {
+            continue;
+        };
+        let mut col: u16 = 0;
+        let mut open: Option<(u16, NodeId, FieldSpanKind)> = None; // (col_start, node_id, kind)
+        for cell in row {
+            let advance =
+                u16::try_from(grapheme_columns(cell.grapheme(), width_config)).unwrap_or(1);
+            match (&open, cell.field_marker()) {
+                (None, Some((node_id, kind))) => {
+                    open = Some((col, node_id, kind));
+                }
+                (Some((start, previous_node_id, previous_kind)), Some((node_id, kind)))
+                    if node_id != *previous_node_id || kind != *previous_kind =>
+                {
+                    spans.push(FieldSpan {
+                        node_id: *previous_node_id,
+                        kind: *previous_kind,
+                        row: row_u16,
+                        col_start: *start,
+                        col_end: col.saturating_sub(1),
+                    });
+                    open = Some((col, node_id, kind));
+                }
+                (Some((start, previous_node_id, previous_kind)), None) => {
+                    spans.push(FieldSpan {
+                        node_id: *previous_node_id,
+                        kind: *previous_kind,
+                        row: row_u16,
+                        col_start: *start,
+                        col_end: col.saturating_sub(1),
+                    });
+                    open = None;
+                }
+                _ => {}
+            }
+            col = col.saturating_add(advance);
+        }
+        if let Some((start, node_id, kind)) = open {
+            spans.push(FieldSpan {
+                node_id,
                 kind,
                 row: row_u16,
                 col_start: start,

@@ -56,7 +56,7 @@ fn replace() -> WidthConfig {
 fn a_family_emoji_stays_one_cell_when_it_fits_on_a_line() {
     let document = document_of(vec![paragraph(&format!("{FAMILY}x"))]);
 
-    let buffer = render_document(&document, 10, &wide()).expect("emoji must lay out");
+    let buffer = render_document(&document, 10, &wide(), None).expect("emoji must lay out");
 
     assert_eq!(grapheme_at(&buffer, 0, 0), FAMILY);
     // The family spans two columns in wide mode, so its trailing column is blank and the
@@ -69,7 +69,7 @@ fn a_family_emoji_stays_one_cell_when_it_fits_on_a_line() {
 fn a_family_emoji_advances_one_column_in_narrow_mode() {
     let document = document_of(vec![paragraph(&format!("{FAMILY}x"))]);
 
-    let buffer = render_document(&document, 10, &narrow()).expect("emoji must lay out");
+    let buffer = render_document(&document, 10, &narrow(), None).expect("emoji must lay out");
 
     assert_eq!(grapheme_at(&buffer, 0, 0), FAMILY);
     assert_eq!(grapheme_at(&buffer, 1, 0), "x");
@@ -79,7 +79,7 @@ fn a_family_emoji_advances_one_column_in_narrow_mode() {
 fn an_emoji_with_a_variation_selector_stays_intact() {
     let document = document_of(vec![paragraph(WARNING_WITH_VARIATION_SELECTOR)]);
 
-    let buffer = render_document(&document, 10, &wide()).expect("emoji must lay out");
+    let buffer = render_document(&document, 10, &wide(), None).expect("emoji must lay out");
 
     assert_eq!(grapheme_at(&buffer, 0, 0), WARNING_WITH_VARIATION_SELECTOR);
 }
@@ -88,7 +88,7 @@ fn an_emoji_with_a_variation_selector_stays_intact() {
 fn replace_mode_substitutes_the_placeholder_and_advances_by_its_width() {
     let document = document_of(vec![paragraph(&format!("{FAMILY}x"))]);
 
-    let buffer = render_document(&document, 10, &replace()).expect("emoji must lay out");
+    let buffer = render_document(&document, 10, &replace(), None).expect("emoji must lay out");
 
     // The placeholder is one column, so the following grapheme lands immediately after it.
     assert_eq!(grapheme_at(&buffer, 0, 0), PLACEHOLDER);
@@ -103,7 +103,7 @@ fn a_family_emoji_is_never_split_across_rows_by_a_force_break() {
     let word = FAMILY.repeat(3);
     let document = document_of(vec![paragraph(&word)]);
 
-    let buffer = render_document(&document, 4, &wide()).expect("emoji must lay out");
+    let buffer = render_document(&document, 4, &wide(), None).expect("emoji must lay out");
 
     assert_eq!(buffer.height(), 3); // 2 content rows + 1 blank from paragraph spacing_after
     assert_eq!(grapheme_at(&buffer, 0, 0), FAMILY);
@@ -117,7 +117,7 @@ fn truncation_drops_an_emoji_cluster_that_would_cross_the_width() {
     // cannot fit in the single remaining column and is dropped whole, never half-written.
     let document = document_of(vec![code_block(&format!("abcd{FAMILY}"))]);
 
-    let buffer = render_document(&document, 5, &wide()).expect("code must lay out");
+    let buffer = render_document(&document, 5, &wide(), None).expect("code must lay out");
 
     assert_eq!(grapheme_at(&buffer, 0, 0), "a");
     assert_eq!(grapheme_at(&buffer, 3, 0), "d");
@@ -128,7 +128,7 @@ fn truncation_drops_an_emoji_cluster_that_would_cross_the_width() {
 fn truncation_keeps_an_emoji_cluster_whole_when_it_fits_exactly() {
     let document = document_of(vec![code_block(&format!("abcd{FAMILY}"))]);
 
-    let buffer = render_document(&document, 6, &wide()).expect("code must lay out");
+    let buffer = render_document(&document, 6, &wide(), None).expect("code must lay out");
 
     assert_eq!(grapheme_at(&buffer, 3, 0), "d");
     assert_eq!(grapheme_at(&buffer, 4, 0), FAMILY);
@@ -139,7 +139,7 @@ fn truncation_keeps_an_emoji_cluster_whole_when_it_fits_exactly() {
 fn a_paragraph_of_plain_text_is_unaffected_by_replace_mode() {
     let document = document_of(vec![paragraph("hello world")]);
 
-    let buffer = render_document(&document, 20, &replace()).expect("text must lay out");
+    let buffer = render_document(&document, 20, &replace(), None).expect("text must lay out");
 
     let row: String = (0..buffer.width())
         .map(|column| grapheme_at(&buffer, column, 0))

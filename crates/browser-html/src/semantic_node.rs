@@ -3,9 +3,13 @@
 // @layer html
 // @created meerita <meerita@icloud.com>
 
+use crate::button_element::ButtonElement;
+use crate::form_element::FormElement;
 use crate::inline_run::InlineRun;
-use crate::input_kind::InputKind;
+use crate::input_element::InputElement;
 use crate::landmark_role::LandmarkRole;
+use crate::select_element::SelectElement;
+use crate::textarea_element::TextareaElement;
 
 /// A single node in the browser's semantic document tree.
 ///
@@ -73,22 +77,11 @@ pub enum SemanticNode {
         children: Vec<SemanticNode>,
         caption: Option<Vec<InlineRun>>,
     },
-    Form {
-        children: Vec<SemanticNode>,
-    },
-    Input {
-        kind: InputKind,
-        label: Option<String>,
-        sensitive: bool,
-    },
-    Select {
-        label: Option<String>,
-        options: Vec<String>,
-    },
-    Button {
-        runs: Vec<InlineRun>,
-        inline_style: Option<String>,
-    },
+    Form(FormElement),
+    Input(InputElement),
+    Select(SelectElement),
+    Textarea(TextareaElement),
+    Button(ButtonElement),
     Separator,
     Landmark {
         role: LandmarkRole,

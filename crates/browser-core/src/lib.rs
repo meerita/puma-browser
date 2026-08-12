@@ -9,6 +9,9 @@ mod cookie_record;
 mod cookie_settings;
 mod current_page;
 mod error;
+mod field_value;
+mod form_controls;
+mod form_field_values;
 mod frecency;
 mod history_mode;
 mod ids;
@@ -20,7 +23,10 @@ mod tab_id;
 mod tab_state;
 
 pub use address_resolver::resolve_address;
-pub use browser_html::{Document, DocumentTitle};
+pub use browser_html::{
+    ButtonElement, ButtonKind, Document, DocumentTitle, FormElement, FormMethod, InputElement,
+    InputKind, NodeId, SelectElement, SelectOption,
+};
 pub use browser_layout::CellBuffer;
 pub use browser_network::{BrowserUrl, RequestHeaders};
 pub use browser_privacy::{CookiePolicy, CookieScope, RejectionReason, SameSite};
@@ -30,6 +36,8 @@ pub use browser_storage::{
 pub use cookie_record::CookieRecord;
 pub use cookie_settings::{parse_policy, CookiePolicyPair};
 pub use error::CoreError;
+pub use field_value::FieldValue;
+pub use form_field_values::{FieldState, FormFieldValues};
 pub use frecency::frecency;
 pub use history_mode::{history_mode_from_str, HistoryMode, HistorySettings};
 pub use ids::{BookmarkId, HistoryEntryId};
@@ -45,8 +53,11 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use browser_html::SemanticNode;
+use browser_layout::{FieldOverlay, FieldRenderValue};
 use browser_network::{
-    fetch_once, resolve_redirect, FetchedDocument, HopOutcome, NetworkError, MAX_REDIRECT_COUNT,
+    fetch_once, resolve_redirect, submit_once, FetchedDocument, HopOutcome, NetworkError,
+    RequestBody, RequestMethod, MAX_REDIRECT_COUNT,
 };
 use browser_privacy::{
     classify, decide, registrable_domain, CookieContext, CookieDecision, ParsedCookie,
@@ -268,19 +279,88 @@ impl NavigationController {
         progress: tokio::sync::watch::Sender<usize>,
         source: NavigationSource,
     ) -> Result<(), CoreError> {
-        let top_level_host = url.host_str().unwrap_or_default().to_string();
-        let mut current_url = url;
+        let (fetched, tally) = self
+            .run_hops(url, RequestMethod::Get, RequestBody::None, progress)
+            .await?;
+        self.finish_load(fetched, source, tally).await
+    }
+
+    /// Submit the form whose activated button is `submit_button`, streaming byte-count
+    /// updates to `progress`.
+    ///
+    /// Resolves the button's enclosing form, builds the encoded field pairs from the
+    /// page's live [`FormFieldValues`], and submits with the form's declared method.
+    /// [`FieldValue::reveal`](crate::FieldValue::reveal) is called only here, while
+    /// building those pairs; the revealed string is consumed into the encoded pair and
+    /// never stored or logged.
+    pub async fn submit_with_progress(
+        &mut self,
+        submit_button: NodeId,
+        progress: tokio::sync::watch::Sender<usize>,
+    ) -> Result<(), CoreError> {
+        let Some(page) = self.current_page.as_ref() else {
+            return Err(CoreError::FieldNotFound);
+        };
+        let Some(form) = form_controls::find_enclosing_form(page.document(), submit_button) else {
+            return Err(CoreError::FieldNotFound);
+        };
+        let Some(button) = form_controls::find_button_in_form(form, submit_button) else {
+            return Err(CoreError::FieldNotFound);
+        };
+        let pairs = build_submission_pairs(form, button, page.form_field_values());
+        let action = BrowserUrl::parse(&form.action).map_err(CoreError::from)?;
+        let (method, body) = match form.method {
+            FormMethod::Get => (RequestMethod::Get, RequestBody::UrlEncoded(pairs)),
+            FormMethod::Post => (RequestMethod::Post, RequestBody::UrlEncoded(pairs)),
+        };
+        let (fetched, tally) = self.run_hops(action, method, body, progress).await?;
+        self.finish_load(fetched, NavigationSource::FormSubmission, tally)
+            .await
+    }
+
+    /// Submit the form whose activated button is `submit_button`, without progress
+    /// reporting.
+    ///
+    /// The no-progress convenience wrapper, mirroring [`load`](Self::load)'s
+    /// relationship to [`load_with_progress`](Self::load_with_progress).
+    pub async fn submit(&mut self, submit_button: NodeId) -> Result<(), CoreError> {
+        let (progress_tx, _) = tokio::sync::watch::channel(0usize);
+        self.submit_with_progress(submit_button, progress_tx).await
+    }
+
+    /// Drive one request's redirect chain to completion, sending `initial_method`/
+    /// `initial_body` on the first hop and downgrading to `GET` with no body on every
+    /// hop after (D7's simplified redirect policy).
+    ///
+    /// Shared by [`load_with_progress`](Self::load_with_progress) and
+    /// [`submit_with_progress`](Self::submit_with_progress) so both a plain navigation
+    /// and a form submission apply the same cookie handling, redirect-count limit, and
+    /// POST-redirect-GET downgrade. Does not call `finish_load`; the caller does that
+    /// with the returned document.
+    async fn run_hops(
+        &mut self,
+        initial_url: BrowserUrl,
+        initial_method: RequestMethod,
+        initial_body: RequestBody,
+        progress: tokio::sync::watch::Sender<usize>,
+    ) -> Result<(FetchedDocument, CookieTally), CoreError> {
+        let top_level_host = initial_url.host_str().unwrap_or_default().to_string();
+        let mut current_url = initial_url;
+        let mut method = initial_method;
+        let mut body = initial_body;
         let mut hop_count: usize = 0;
         let mut tally = CookieTally::default();
         let fetched = loop {
             let cookie_header = self.cookie_jar.cookie_header_for(&current_url);
-            let outcome = fetch_once(
-                &current_url,
-                cookie_header.as_deref(),
-                &self.request_headers,
-                progress.clone(),
-            )
-            .await?;
+            let outcome = self
+                .fetch_hop(
+                    &current_url,
+                    method,
+                    &body,
+                    cookie_header.as_deref(),
+                    &progress,
+                )
+                .await?;
             match outcome {
                 HopOutcome::Final(document) => {
                     self.process_set_cookies(
@@ -307,10 +387,46 @@ impl NavigationController {
                         return Err(CoreError::from(NetworkError::TooManyRedirects));
                     }
                     current_url = resolve_redirect(&current_url, &location)?;
+                    method = RequestMethod::Get;
+                    body = RequestBody::None;
                 }
             }
         };
-        self.finish_load(fetched, source, tally).await
+        Ok((fetched, tally))
+    }
+
+    /// Perform one hop, choosing the acquisition path by request shape.
+    ///
+    /// A plain `(GET, no body)` hop uses [`fetch_once`], which also serves `file://`
+    /// navigation; every other combination is a genuine form submission and uses
+    /// [`submit_once`], which accepts only `http`/`https`. [`run_hops`](Self::run_hops)
+    /// downgrades every hop after the first to `(GET, no body)`, so a redirect never
+    /// reaches `file://` through this path either way.
+    async fn fetch_hop(
+        &self,
+        url: &BrowserUrl,
+        method: RequestMethod,
+        body: &RequestBody,
+        cookie_header: Option<&str>,
+        progress: &tokio::sync::watch::Sender<usize>,
+    ) -> Result<HopOutcome, CoreError> {
+        let is_plain_get =
+            matches!(method, RequestMethod::Get) && matches!(body, RequestBody::None);
+        if is_plain_get {
+            return fetch_once(url, cookie_header, &self.request_headers, progress.clone())
+                .await
+                .map_err(CoreError::from);
+        }
+        submit_once(
+            url,
+            method,
+            body,
+            cookie_header,
+            &self.request_headers,
+            progress.clone(),
+        )
+        .await
+        .map_err(CoreError::from)
     }
 
     /// Turn the final fetched document into the current page and record the visit.
@@ -338,6 +454,7 @@ impl NavigationController {
             Some(fetched.final_url().as_str()),
         )?;
         let title = document.title().cloned();
+        let form_field_values = seed_form_field_values(&document);
         // Push the current page to history before replacing it, so Backspace can restore
         // it without a second network round-trip.
         if let Some(previous) = self.current_page.take() {
@@ -353,6 +470,7 @@ impl NavigationController {
             byte_count,
             tally.accepted,
             tally.rejected,
+            form_field_values,
         ));
         self.record_current_visit(source).await;
         Ok(())
@@ -622,16 +740,20 @@ impl NavigationController {
     /// Lay the current page out into a cell buffer sized to `width` columns.
     ///
     /// With no page loaded this returns a blank buffer rather than an error, so the
-    /// terminal can draw an empty page. With a page loaded it runs layout and maps a
-    /// [`LayoutError`](browser_layout::LayoutError) into [`CoreError`] by `?`.
+    /// terminal can draw an empty page. With a page loaded, a live-value overlay is
+    /// built from the page's [`FormFieldValues`] and passed into layout so every
+    /// control renders its current typed value rather than its static default. Layout
+    /// errors map into [`CoreError`] by `?`.
     pub fn render(&self, width: u16) -> Result<CellBuffer, CoreError> {
         let Some(page) = &self.current_page else {
             return Ok(CellBuffer::new(width, 0));
         };
+        let overlay = build_field_overlay(page.document(), page.form_field_values());
         let buffer = browser_layout::render_document(
             page.document(),
             width,
             &browser_layout::WidthConfig::default(),
+            Some(&overlay),
         )?;
         Ok(buffer)
     }
@@ -649,6 +771,146 @@ impl NavigationController {
     /// The parsed document for the current page, or `None` when no page is loaded.
     pub fn current_document(&self) -> Option<&Document> {
         self.current_page.as_ref().map(|page| page.document())
+    }
+
+    /// The parsed node for the form control or button identified by `id`, or `None`
+    /// when no page is loaded or the id names no known control.
+    fn control_node(&self, id: NodeId) -> Option<&SemanticNode> {
+        let page = self.current_page.as_ref()?;
+        form_controls::find_control(page.document(), id)
+    }
+
+    /// The parsed `<input>` element identified by `id`, or `None` when no page is
+    /// loaded, the id names no known control, or the control is not an input.
+    ///
+    /// Lets an output adapter inspect an input's kind and sensitivity before deciding
+    /// how to present or activate it.
+    pub fn input_element(&self, id: NodeId) -> Option<&InputElement> {
+        match self.control_node(id)? {
+            SemanticNode::Input(input) => Some(input),
+            _ => None,
+        }
+    }
+
+    /// The parsed `<select>` element identified by `id`, or `None` under the same
+    /// conditions as [`input_element`](Self::input_element).
+    pub fn select_element(&self, id: NodeId) -> Option<&SelectElement> {
+        match self.control_node(id)? {
+            SemanticNode::Select(select) => Some(select),
+            _ => None,
+        }
+    }
+
+    /// The parsed `<button>` element, or the button normalized from a submit, reset, or
+    /// button input, identified by `id`, or `None` under the same conditions as
+    /// [`input_element`](Self::input_element).
+    pub fn button_element(&self, id: NodeId) -> Option<&ButtonElement> {
+        match self.control_node(id)? {
+            SemanticNode::Button(button) => Some(button),
+            _ => None,
+        }
+    }
+
+    /// The declared method and resolved destination of the form enclosing `control_id`,
+    /// or `None` when no page is loaded or the id belongs to no form.
+    ///
+    /// Lets an output adapter build a submission confirmation view before the user
+    /// commits to sending the request; this performs no navigation itself.
+    pub fn form_submission_target(&self, control_id: NodeId) -> Option<(FormMethod, String)> {
+        let page = self.current_page.as_ref()?;
+        let form = form_controls::find_enclosing_form(page.document(), control_id)?;
+        Some((form.method, form.action.clone()))
+    }
+
+    /// The current page's live form field state, or `None` when no page is loaded.
+    pub fn field_values(&self) -> Option<&FormFieldValues> {
+        self.current_page
+            .as_ref()
+            .map(CurrentPage::form_field_values)
+    }
+
+    /// Sets a non-sensitive text field's live value.
+    ///
+    /// [`CoreError::FieldNotFound`] guards against a stale terminal-side id surviving a
+    /// reload, and also covers the no-page-loaded case.
+    pub fn set_field_text(&mut self, id: NodeId, text: String) -> Result<(), CoreError> {
+        let page = self.current_page_mut()?;
+        require_known_field(page.document(), id)?;
+        page.form_field_values_mut().set_text(id, text);
+        Ok(())
+    }
+
+    /// Sets a sensitive (password) field's live value.
+    pub fn set_sensitive_field_text(&mut self, id: NodeId, text: String) -> Result<(), CoreError> {
+        let page = self.current_page_mut()?;
+        require_known_field(page.document(), id)?;
+        page.form_field_values_mut().set_sensitive_text(id, text);
+        Ok(())
+    }
+
+    /// Flips a checkbox's checked state.
+    pub fn toggle_checkbox(&mut self, id: NodeId) -> Result<(), CoreError> {
+        let page = self.current_page_mut()?;
+        require_known_field(page.document(), id)?;
+        let checked = page.form_field_values().is_checked(id);
+        page.form_field_values_mut().set_checked(id, !checked);
+        Ok(())
+    }
+
+    /// Selects the radio at `id`, unchecking every other radio sharing its `name`
+    /// within the same enclosing form.
+    pub fn select_radio(&mut self, id: NodeId) -> Result<(), CoreError> {
+        let page = self.current_page_mut()?;
+        let form = form_controls::find_enclosing_form(page.document(), id)
+            .ok_or(CoreError::FieldNotFound)?;
+        let target_name = radio_name(form, id).ok_or(CoreError::FieldNotFound)?;
+        let sibling_ids = radio_sibling_ids(form, target_name);
+        let field_values = page.form_field_values_mut();
+        for sibling_id in sibling_ids {
+            field_values.set_checked(sibling_id, sibling_id == id);
+        }
+        Ok(())
+    }
+
+    /// Replaces a single-select's selection with `value`.
+    pub fn set_select_value(&mut self, id: NodeId, value: String) -> Result<(), CoreError> {
+        let page = self.current_page_mut()?;
+        require_known_field(page.document(), id)?;
+        page.form_field_values_mut().set_selected(id, vec![value]);
+        Ok(())
+    }
+
+    /// Adds `value` to a multi-select's selection if absent, removes it if present.
+    pub fn toggle_multi_select_option(
+        &mut self,
+        id: NodeId,
+        value: String,
+    ) -> Result<(), CoreError> {
+        let page = self.current_page_mut()?;
+        require_known_field(page.document(), id)?;
+        let mut values = page.form_field_values().selected_values(id).to_vec();
+        toggle_value(&mut values, value);
+        page.form_field_values_mut().set_selected(id, values);
+        Ok(())
+    }
+
+    /// Resets the form enclosing `id` back to its parsed defaults, discarding every
+    /// edit the user made to its controls.
+    ///
+    /// Reuses [`seed_form`], the same per-control seeding `finish_load` runs when a
+    /// page is first loaded, so a reset and a fresh load compute identical defaults.
+    pub fn reset_form(&mut self, id: NodeId) -> Result<(), CoreError> {
+        let page = self.current_page_mut()?;
+        let (document, field_values) = page.document_and_form_field_values_mut();
+        let form =
+            form_controls::find_enclosing_form(document, id).ok_or(CoreError::FieldNotFound)?;
+        seed_form(form, field_values);
+        Ok(())
+    }
+
+    /// The current page, or [`CoreError::FieldNotFound`] when none is loaded.
+    fn current_page_mut(&mut self) -> Result<&mut CurrentPage, CoreError> {
+        self.current_page.as_mut().ok_or(CoreError::FieldNotFound)
     }
 
     /// Whether a page is currently loaded.
@@ -940,4 +1202,354 @@ fn now_unix_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Whether `id` names a known `Form`/`Input`/`Select`/`Textarea`/`Button` in `document`.
+///
+/// Guards every field mutator against a stale terminal-side id surviving a reload,
+/// returning [`CoreError::FieldNotFound`] instead of silently no-oping or panicking.
+fn require_known_field(document: &Document, id: NodeId) -> Result<(), CoreError> {
+    form_controls::find_enclosing_form(document, id)
+        .map(|_| ())
+        .ok_or(CoreError::FieldNotFound)
+}
+
+/// The `name` of the radio input `id` within `form`, or `None` if `id` does not name
+/// one of the form's radio inputs.
+fn radio_name(form: &FormElement, id: NodeId) -> Option<&str> {
+    form_controls::collect_controls(form)
+        .into_iter()
+        .find_map(|control| radio_name_if_id_matches(control, id))
+}
+
+fn radio_name_if_id_matches(control: &SemanticNode, id: NodeId) -> Option<&str> {
+    let SemanticNode::Input(input) = control else {
+        return None;
+    };
+    let is_target_radio = input.id == id && matches!(input.kind, InputKind::Radio);
+    if !is_target_radio {
+        return None;
+    }
+    input.name.as_deref()
+}
+
+/// The ids of every radio input in `form` sharing `target_name`.
+fn radio_sibling_ids(form: &FormElement, target_name: &str) -> Vec<NodeId> {
+    form_controls::collect_controls(form)
+        .into_iter()
+        .filter_map(|control| radio_id_if_named(control, target_name))
+        .collect()
+}
+
+fn radio_id_if_named(control: &SemanticNode, target_name: &str) -> Option<NodeId> {
+    let SemanticNode::Input(input) = control else {
+        return None;
+    };
+    let is_group_member =
+        matches!(input.kind, InputKind::Radio) && input.name.as_deref() == Some(target_name);
+    if !is_group_member {
+        return None;
+    }
+    Some(input.id)
+}
+
+/// Removes `value` from `values` if present, otherwise appends it.
+fn toggle_value(values: &mut Vec<String>, value: String) {
+    match values.iter().position(|existing| *existing == value) {
+        Some(index) => {
+            values.remove(index);
+        }
+        None => values.push(value),
+    }
+}
+
+/// Walks every form in `document` and seeds a fresh [`FormFieldValues`] from each
+/// control's parsed default value.
+///
+/// This is what makes a hidden field (commonly a CSRF token) round-trip on submission
+/// unmodified without the user ever touching it.
+fn seed_form_field_values(document: &Document) -> FormFieldValues {
+    let mut field_values = FormFieldValues::new();
+    seed_forms_in(document.children(), &mut field_values);
+    field_values
+}
+
+fn seed_forms_in(children: &[SemanticNode], field_values: &mut FormFieldValues) {
+    for child in children {
+        seed_form_or_recurse(child, field_values);
+    }
+}
+
+fn seed_form_or_recurse(node: &SemanticNode, field_values: &mut FormFieldValues) {
+    if let SemanticNode::Form(form) = node {
+        seed_form(form, field_values);
+        return;
+    }
+    if let Some(children) = form_controls::children_of(node) {
+        seed_forms_in(children, field_values);
+    }
+}
+
+fn seed_form(form: &FormElement, field_values: &mut FormFieldValues) {
+    for control in form_controls::collect_controls(form) {
+        seed_control(control, field_values);
+    }
+}
+
+fn seed_control(control: &SemanticNode, field_values: &mut FormFieldValues) {
+    if let SemanticNode::Input(input) = control {
+        seed_input(input, field_values);
+        return;
+    }
+    if let SemanticNode::Select(select) = control {
+        seed_select(select, field_values);
+        return;
+    }
+    if let SemanticNode::Textarea(textarea) = control {
+        field_values.set_text(textarea.id, textarea.value.clone());
+    }
+}
+
+/// Seeds a non-sensitive input as `Checked` (checkbox/radio) or `Text` (every other
+/// kind); a sensitive input is left unset, since Phase 01 guarantees its parsed value
+/// is always empty.
+fn seed_input(input: &InputElement, field_values: &mut FormFieldValues) {
+    if input.sensitive {
+        return;
+    }
+    let is_toggle = matches!(input.kind, InputKind::Checkbox | InputKind::Radio);
+    if is_toggle {
+        field_values.set_checked(input.id, input.checked);
+        return;
+    }
+    field_values.set_text(input.id, input.value.clone());
+}
+
+fn seed_select(select: &SelectElement, field_values: &mut FormFieldValues) {
+    let selected = select
+        .options
+        .iter()
+        .filter(|option| option.selected)
+        .map(|option| option.value.clone())
+        .collect();
+    field_values.set_selected(select.id, selected);
+}
+
+/// Walks every form in `document` and builds a [`FieldOverlay`] from `field_values`'s
+/// current state, so `render` shows each control's live typed value instead of its
+/// static parsed default.
+///
+/// A sensitive field's overlay entry carries only its revealed length: `reveal` is
+/// called here to count characters, and the revealed string is dropped immediately
+/// afterward without being stored or returned.
+fn build_field_overlay(document: &Document, field_values: &FormFieldValues) -> FieldOverlay {
+    let mut overlay = FieldOverlay::new();
+    overlay_forms_in(document.children(), field_values, &mut overlay);
+    overlay
+}
+
+fn overlay_forms_in(
+    children: &[SemanticNode],
+    field_values: &FormFieldValues,
+    overlay: &mut FieldOverlay,
+) {
+    for child in children {
+        overlay_form_or_recurse(child, field_values, overlay);
+    }
+}
+
+fn overlay_form_or_recurse(
+    node: &SemanticNode,
+    field_values: &FormFieldValues,
+    overlay: &mut FieldOverlay,
+) {
+    if let SemanticNode::Form(form) = node {
+        overlay_form(form, field_values, overlay);
+        return;
+    }
+    if let Some(children) = form_controls::children_of(node) {
+        overlay_forms_in(children, field_values, overlay);
+    }
+}
+
+fn overlay_form(form: &FormElement, field_values: &FormFieldValues, overlay: &mut FieldOverlay) {
+    for control in form_controls::collect_controls(form) {
+        overlay_control(control, field_values, overlay);
+    }
+}
+
+fn overlay_control(
+    control: &SemanticNode,
+    field_values: &FormFieldValues,
+    overlay: &mut FieldOverlay,
+) {
+    if let SemanticNode::Input(input) = control {
+        overlay_input(input, field_values, overlay);
+        return;
+    }
+    if let SemanticNode::Select(select) = control {
+        overlay_select(select, field_values, overlay);
+        return;
+    }
+    if let SemanticNode::Textarea(textarea) = control {
+        overlay.insert(
+            textarea.id,
+            FieldRenderValue::Text(text_or_default(field_values, textarea.id)),
+        );
+    }
+}
+
+/// Overlays a sensitive input's revealed length, a toggle input's checked state, or a
+/// text-like input's current text.
+fn overlay_input(input: &InputElement, field_values: &FormFieldValues, overlay: &mut FieldOverlay) {
+    if input.sensitive {
+        let length = field_values
+            .sensitive_value(input.id)
+            .map(|value| value.reveal().chars().count())
+            .unwrap_or(0);
+        overlay.insert(input.id, FieldRenderValue::MaskedLength(length));
+        return;
+    }
+    let is_toggle = matches!(input.kind, InputKind::Checkbox | InputKind::Radio);
+    if is_toggle {
+        overlay.insert(
+            input.id,
+            FieldRenderValue::Checked(field_values.is_checked(input.id)),
+        );
+        return;
+    }
+    overlay.insert(
+        input.id,
+        FieldRenderValue::Text(text_or_default(field_values, input.id)),
+    );
+}
+
+fn overlay_select(
+    select: &SelectElement,
+    field_values: &FormFieldValues,
+    overlay: &mut FieldOverlay,
+) {
+    let selected_values = field_values.selected_values(select.id);
+    let labels = select
+        .options
+        .iter()
+        .filter(|option| selected_values.contains(&option.value))
+        .map(|option| option.label.clone())
+        .collect();
+    overlay.insert(select.id, FieldRenderValue::SelectedLabels(labels));
+}
+
+/// Builds the encoded submission pairs for `form`'s controls plus the activated
+/// `button`, in document order, skipping any control whose `name` is empty or absent.
+fn build_submission_pairs(
+    form: &FormElement,
+    button: &ButtonElement,
+    field_values: &FormFieldValues,
+) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for control in form_controls::collect_controls(form) {
+        push_control_pairs(control, field_values, &mut pairs);
+    }
+    push_button_pair(button, &mut pairs);
+    pairs
+}
+
+fn push_control_pairs(
+    control: &SemanticNode,
+    field_values: &FormFieldValues,
+    pairs: &mut Vec<(String, String)>,
+) {
+    if let SemanticNode::Input(input) = control {
+        push_input_pair(input, field_values, pairs);
+        return;
+    }
+    if let SemanticNode::Select(select) = control {
+        push_select_pairs(select, field_values, pairs);
+        return;
+    }
+    if let SemanticNode::Textarea(textarea) = control {
+        push_named_pair(
+            &textarea.name,
+            text_or_default(field_values, textarea.id),
+            pairs,
+        );
+    }
+}
+
+/// A checkbox/radio contributes its pair only when checked; every other input kind
+/// contributes its current text (revealing a sensitive value only here).
+fn push_input_pair(
+    input: &InputElement,
+    field_values: &FormFieldValues,
+    pairs: &mut Vec<(String, String)>,
+) {
+    let is_toggle = matches!(input.kind, InputKind::Checkbox | InputKind::Radio);
+    if is_toggle {
+        push_toggle_pair(input, field_values, pairs);
+        return;
+    }
+    let value = if input.sensitive {
+        field_values
+            .sensitive_value(input.id)
+            .map(FieldValue::reveal)
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        text_or_default(field_values, input.id)
+    };
+    push_named_pair(&input.name, value, pairs);
+}
+
+fn push_toggle_pair(
+    input: &InputElement,
+    field_values: &FormFieldValues,
+    pairs: &mut Vec<(String, String)>,
+) {
+    if !field_values.is_checked(input.id) {
+        return;
+    }
+    let value = if input.value.is_empty() {
+        "on".to_string()
+    } else {
+        input.value.clone()
+    };
+    push_named_pair(&input.name, value, pairs);
+}
+
+fn push_select_pairs(
+    select: &SelectElement,
+    field_values: &FormFieldValues,
+    pairs: &mut Vec<(String, String)>,
+) {
+    let Some(name) = &select.name else {
+        return;
+    };
+    if name.is_empty() {
+        return;
+    }
+    for value in field_values.selected_values(select.id) {
+        pairs.push((name.clone(), value.clone()));
+    }
+}
+
+fn push_button_pair(button: &ButtonElement, pairs: &mut Vec<(String, String)>) {
+    push_named_pair(
+        &button.name,
+        button.value.clone().unwrap_or_default(),
+        pairs,
+    );
+}
+
+fn push_named_pair(name: &Option<String>, value: String, pairs: &mut Vec<(String, String)>) {
+    let Some(name) = name else {
+        return;
+    };
+    if name.is_empty() {
+        return;
+    }
+    pairs.push((name.clone(), value));
+}
+
+fn text_or_default(field_values: &FormFieldValues, id: NodeId) -> String {
+    field_values.text(id).unwrap_or_default().to_string()
 }

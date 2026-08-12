@@ -3,7 +3,10 @@
 // @layer html
 // @created meerita <meerita@icloud.com>
 
-use browser_html::{InlineRun, InputKind, LandmarkRole, SemanticNode};
+use browser_html::{
+    ButtonElement, ButtonKind, FormElement, FormMethod, InlineRun, InputElement, InputKind,
+    LandmarkRole, NodeId, SelectElement, SelectOption, SemanticNode, TextareaElement,
+};
 
 #[test]
 fn all_semantic_node_variants_construct() {
@@ -91,25 +94,60 @@ fn all_semantic_node_variants_construct() {
             }],
             caption: Some(vec![InlineRun::plain("Figure 1".to_string())]),
         },
-        SemanticNode::Form {
-            children: vec![SemanticNode::Button {
+        SemanticNode::Form(FormElement {
+            id: NodeId::new(0),
+            action: "https://example.com/".to_string(),
+            method: FormMethod::Get,
+            children: vec![SemanticNode::Button(ButtonElement {
+                id: NodeId::new(1),
+                kind: ButtonKind::Submit,
+                name: None,
+                value: None,
                 runs: vec![InlineRun::plain("Send".to_string())],
                 inline_style: None,
-            }],
-        },
-        SemanticNode::Input {
+            })],
+        }),
+        SemanticNode::Input(InputElement {
+            id: NodeId::new(2),
             kind: InputKind::Password,
+            name: None,
+            value: String::new(),
+            checked: false,
             label: Some("Password".to_string()),
             sensitive: true,
-        },
-        SemanticNode::Select {
+        }),
+        SemanticNode::Select(SelectElement {
+            id: NodeId::new(3),
+            name: None,
             label: Some("Country".to_string()),
-            options: vec!["Spain".to_string(), "United Kingdom".to_string()],
-        },
-        SemanticNode::Button {
+            multiple: false,
+            options: vec![
+                SelectOption {
+                    value: "es".to_string(),
+                    label: "Spain".to_string(),
+                    selected: true,
+                },
+                SelectOption {
+                    value: "uk".to_string(),
+                    label: "United Kingdom".to_string(),
+                    selected: false,
+                },
+            ],
+        }),
+        SemanticNode::Textarea(TextareaElement {
+            id: NodeId::new(4),
+            name: None,
+            value: "Bio text".to_string(),
+            label: Some("Bio".to_string()),
+        }),
+        SemanticNode::Button(ButtonElement {
+            id: NodeId::new(5),
+            kind: ButtonKind::Button,
+            name: None,
+            value: None,
             runs: vec![InlineRun::plain("Submit".to_string())],
             inline_style: None,
-        },
+        }),
         SemanticNode::Separator,
         SemanticNode::Landmark {
             role: LandmarkRole::Navigation,
@@ -137,5 +175,5 @@ fn all_semantic_node_variants_construct() {
         },
     ];
 
-    assert_eq!(nodes.len(), 22);
+    assert_eq!(nodes.len(), 23);
 }

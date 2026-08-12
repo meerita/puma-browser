@@ -37,7 +37,7 @@ fn row_text(buffer: &CellBuffer, row: u16) -> String {
 fn zero_width_returns_zero_width_error() {
     let document = document_of(vec![paragraph("hello")]);
 
-    let outcome = render_document(&document, 0, &WidthConfig::default());
+    let outcome = render_document(&document, 0, &WidthConfig::default(), None);
 
     assert!(matches!(outcome, Err(LayoutError::ZeroWidth)));
 }
@@ -48,8 +48,8 @@ fn long_paragraph_wraps_so_no_row_exceeds_the_width() {
     let words = vec!["word"; 40].join(" ");
     let document = document_of(vec![paragraph(&words)]);
 
-    let buffer =
-        render_document(&document, width, &WidthConfig::default()).expect("paragraph must lay out");
+    let buffer = render_document(&document, width, &WidthConfig::default(), None)
+        .expect("paragraph must lay out");
 
     assert!(
         buffer.height() > 1,
@@ -77,8 +77,8 @@ fn heading_and_two_list_items_produce_expected_rows_and_bullets() {
         },
     ]);
 
-    let buffer =
-        render_document(&document, 40, &WidthConfig::default()).expect("document must lay out");
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("document must lay out");
 
     // One blank row after the heading, then one row per list item, then one blank from list.
     assert_eq!(buffer.height(), 5);
@@ -96,8 +96,8 @@ fn ordered_list_items_render_running_numbers() {
         inline_style: None,
     }]);
 
-    let buffer =
-        render_document(&document, 40, &WidthConfig::default()).expect("ordered list must lay out");
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("ordered list must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "1. x");
     assert_eq!(row_text(&buffer, 1).trim_end(), "2. y");
@@ -119,8 +119,8 @@ fn a_nested_unordered_list_indents_one_level_under_its_parent() {
         inline_style: None,
     }]);
 
-    let buffer =
-        render_document(&document, 40, &WidthConfig::default()).expect("nested list must lay out");
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("nested list must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "• a");
     // row 1 is blank: paragraph spacing_after inside the list item before the nested list
@@ -146,7 +146,7 @@ fn ordered_numbering_restarts_within_each_nested_list() {
         inline_style: None,
     }]);
 
-    let buffer = render_document(&document, 40, &WidthConfig::default())
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
         .expect("nested ordered list must lay out");
 
     let rows: Vec<String> = (0..buffer.height())
@@ -165,7 +165,8 @@ fn a_wrapped_list_item_aligns_its_continuation_under_the_item_text() {
         inline_style: None,
     }]);
 
-    let buffer = render_document(&document, 7, &WidthConfig::default()).expect("list must lay out");
+    let buffer =
+        render_document(&document, 7, &WidthConfig::default(), None).expect("list must lay out");
 
     // "• alpha" fills the width; "beta" wraps and indents under the item text, not the marker.
     assert_eq!(row_text(&buffer, 0).trim_end(), "• alpha");
@@ -178,8 +179,8 @@ fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
         text: String::from("abcdefghij\nkl"),
     }]);
 
-    let buffer =
-        render_document(&document, 5, &WidthConfig::default()).expect("code block must lay out");
+    let buffer = render_document(&document, 5, &WidthConfig::default(), None)
+        .expect("code block must lay out");
 
     // Two source lines stay two rows, followed by one blank from code block spacing_after.
     assert_eq!(buffer.height(), 3);
@@ -191,8 +192,8 @@ fn code_block_is_rendered_verbatim_and_clipped_not_wrapped() {
 fn combining_mark_grapheme_occupies_a_single_cell() {
     let document = document_of(vec![paragraph("e\u{0301}x")]);
 
-    let buffer =
-        render_document(&document, 10, &WidthConfig::default()).expect("paragraph must lay out");
+    let buffer = render_document(&document, 10, &WidthConfig::default(), None)
+        .expect("paragraph must lay out");
 
     assert_eq!(
         buffer.cell_at(0, 0).expect("cluster cell").grapheme(),
@@ -205,8 +206,8 @@ fn combining_mark_grapheme_occupies_a_single_cell() {
 fn double_width_grapheme_advances_two_columns() {
     let document = document_of(vec![paragraph("x界y")]);
 
-    let buffer =
-        render_document(&document, 10, &WidthConfig::default()).expect("paragraph must lay out");
+    let buffer = render_document(&document, 10, &WidthConfig::default(), None)
+        .expect("paragraph must lay out");
 
     assert_eq!(buffer.cell_at(0, 0).expect("first cell").grapheme(), "x");
     assert_eq!(buffer.cell_at(1, 0).expect("wide cell").grapheme(), "界");
@@ -239,8 +240,8 @@ fn representative_document_renders_to_the_expected_rows() {
         SemanticNode::Separator,
     ]);
 
-    let buffer =
-        render_document(&document, 20, &WidthConfig::default()).expect("document must lay out");
+    let buffer = render_document(&document, 20, &WidthConfig::default(), None)
+        .expect("document must lay out");
 
     let rows: Vec<String> = (0..buffer.height())
         .map(|row| row_text(&buffer, row).trim_end().to_string())
@@ -268,8 +269,8 @@ fn representative_document_renders_to_the_expected_rows() {
 fn a_separator_draws_a_centered_thirty_percent_rule_at_a_wide_width() {
     let document = document_of(vec![SemanticNode::Separator]);
 
-    let buffer =
-        render_document(&document, 100, &WidthConfig::default()).expect("document must lay out");
+    let buffer = render_document(&document, 100, &WidthConfig::default(), None)
+        .expect("document must lay out");
 
     // clamp(100 * 30 / 100 = 30, 8, 40) = 30 glyphs, centered with a (100 - 30) / 2 = 35 pad.
     assert_eq!(
@@ -282,8 +283,8 @@ fn a_separator_draws_a_centered_thirty_percent_rule_at_a_wide_width() {
 fn a_separator_rule_is_clamped_to_the_ceiling_on_an_ultrawide_terminal() {
     let document = document_of(vec![SemanticNode::Separator]);
 
-    let buffer =
-        render_document(&document, 200, &WidthConfig::default()).expect("document must lay out");
+    let buffer = render_document(&document, 200, &WidthConfig::default(), None)
+        .expect("document must lay out");
 
     // clamp(200 * 30 / 100 = 60, 8, 40) = 40 glyphs, not 60.
     let rule = row_text(&buffer, 0);
@@ -294,8 +295,8 @@ fn a_separator_rule_is_clamped_to_the_ceiling_on_an_ultrawide_terminal() {
 fn a_separator_rule_is_clamped_to_the_floor_on_a_narrow_terminal() {
     let document = document_of(vec![SemanticNode::Separator]);
 
-    let buffer =
-        render_document(&document, 10, &WidthConfig::default()).expect("document must lay out");
+    let buffer = render_document(&document, 10, &WidthConfig::default(), None)
+        .expect("document must lay out");
 
     // clamp(10 * 30 / 100 = 3, 8, 40) = 8 glyphs, centered with a (10 - 8) / 2 = 1 pad.
     assert_eq!(
@@ -308,8 +309,8 @@ fn a_separator_rule_is_clamped_to_the_floor_on_a_narrow_terminal() {
 fn a_separator_rule_is_capped_at_the_content_width_and_does_not_panic() {
     let document = document_of(vec![SemanticNode::Separator]);
 
-    let buffer =
-        render_document(&document, 4, &WidthConfig::default()).expect("document must lay out");
+    let buffer = render_document(&document, 4, &WidthConfig::default(), None)
+        .expect("document must lay out");
 
     // The floor 8 exceeds the width 4, so the rule is capped at 4 glyphs with no left pad.
     assert_eq!(row_text(&buffer, 0).trim_end(), "━".repeat(4));
@@ -319,8 +320,8 @@ fn a_separator_rule_is_capped_at_the_content_width_and_does_not_panic() {
 fn a_separator_uses_the_heavy_glyph_never_the_light_one() {
     let document = document_of(vec![SemanticNode::Separator]);
 
-    let buffer =
-        render_document(&document, 40, &WidthConfig::default()).expect("document must lay out");
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("document must lay out");
 
     let rule = row_text(&buffer, 0);
     assert!(rule.contains('━'));
@@ -362,8 +363,8 @@ fn a_multi_run_paragraph_applies_each_runs_own_emphasis() {
         inline_style: None,
     }]);
 
-    let buffer =
-        render_document(&document, 40, &WidthConfig::default()).expect("paragraph must lay out");
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("paragraph must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "word bold tail");
     // "word " occupies columns 0..5, "bold" columns 5..9, " tail" from column 9.
@@ -395,8 +396,8 @@ fn a_linked_run_is_underlined_while_plain_text_is_not() {
         inline_style: None,
     }]);
 
-    let buffer =
-        render_document(&document, 40, &WidthConfig::default()).expect("paragraph must lay out");
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("paragraph must lay out");
 
     assert_eq!(row_text(&buffer, 0).trim_end(), "see link");
     // "see " occupies columns 0..4, "link" columns 4..8.
@@ -419,9 +420,9 @@ fn run_boundaries_do_not_change_word_wrapping() {
         inline_style: None,
     }]);
 
-    let plain_buffer = render_document(&plain, width, &WidthConfig::default())
+    let plain_buffer = render_document(&plain, width, &WidthConfig::default(), None)
         .expect("plain paragraph must lay out");
-    let marked_buffer = render_document(&marked, width, &WidthConfig::default())
+    let marked_buffer = render_document(&marked, width, &WidthConfig::default(), None)
         .expect("marked paragraph must lay out");
 
     let plain_rows: Vec<String> = (0..plain_buffer.height())
@@ -440,7 +441,7 @@ fn document_taller_than_the_addressable_range_returns_dimension_overflow() {
     let nodes = vec![SemanticNode::Separator; usize::from(u16::MAX) + 1];
     let document = document_of(nodes);
 
-    let outcome = render_document(&document, 4, &WidthConfig::default());
+    let outcome = render_document(&document, 4, &WidthConfig::default(), None);
 
     assert!(matches!(outcome, Err(LayoutError::DimensionOverflow)));
 }

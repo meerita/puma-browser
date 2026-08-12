@@ -7,6 +7,7 @@ use browser_css::{cascade, Emphasis, TextStyle};
 use browser_html::{InlineRun, SemanticNode};
 
 use crate::cell::Cell;
+use crate::field_overlay::FieldOverlay;
 use crate::render::{
     count_columns, graphemes_to_cells, render_children, runs_to_cells, space_cells, wrap_cells,
 };
@@ -41,9 +42,10 @@ pub(crate) fn render_table(
     base: &TextStyle,
     width: usize,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) -> Vec<Vec<Cell>> {
     if is_layout_table(rows) {
-        return render_layout_table(rows, base, width, width_config);
+        return render_layout_table(rows, base, width, width_config, field_overlay);
     }
     let grid = build_grid(rows, base, width_config);
     if grid.is_empty() {
@@ -81,7 +83,8 @@ fn is_block_node(node: &SemanticNode) -> bool {
         node,
         SemanticNode::Table { .. }
             | SemanticNode::Landmark { .. }
-            | SemanticNode::Form { .. }
+            | SemanticNode::Form(_)
+            | SemanticNode::Textarea(_)
             | SemanticNode::Details { .. }
             | SemanticNode::List { .. }
     )
@@ -97,6 +100,7 @@ fn render_layout_table(
     base: &TextStyle,
     width: usize,
     width_config: &WidthConfig,
+    field_overlay: Option<&FieldOverlay>,
 ) -> Vec<Vec<Cell>> {
     let mut output: Vec<Vec<Cell>> = Vec::new();
     for row in rows {
@@ -108,7 +112,13 @@ fn render_layout_table(
                 continue;
             };
             let cell_style = cascade(base, cell);
-            output.extend(render_children(children, width, &cell_style, width_config));
+            output.extend(render_children(
+                children,
+                width,
+                &cell_style,
+                width_config,
+                field_overlay,
+            ));
         }
     }
     output

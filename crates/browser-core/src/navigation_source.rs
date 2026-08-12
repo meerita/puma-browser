@@ -19,6 +19,8 @@ pub enum NavigationSource {
     Reload,
     /// An MCP client opened the address.
     Mcp,
+    /// A form on the current page was submitted.
+    FormSubmission,
 }
 
 impl NavigationSource {

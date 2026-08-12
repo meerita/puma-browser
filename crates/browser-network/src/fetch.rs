@@ -14,7 +14,9 @@ use url::Url;
 use crate::browser_url::BrowserUrl;
 use crate::error::NetworkError;
 use crate::fetched_document::FetchedDocument;
+use crate::request_body::RequestBody;
 use crate::request_headers::RequestHeaders;
+use crate::request_method::RequestMethod;
 
 /// Largest response body accepted, in bytes. Enforced while streaming, not after
 /// buffering, so an oversized body is abandoned as soon as the cap is crossed.
@@ -124,6 +126,19 @@ async fn fetch_once_over_http(
     if let Some(cookie_header) = cookie_header {
         request = request.header(COOKIE, cookie_header);
     }
+    run_http_request(request, progress).await
+}
+
+/// Send a built request and turn its response into a [`HopOutcome`].
+///
+/// Shared by every HTTP-issuing path (`fetch_once`, `submit_once`): checks the
+/// response header size cap, captures every `Set-Cookie` line, and returns a
+/// `Redirect` outcome without reading the body or a `Final` outcome with the body
+/// collected under the size cap.
+async fn run_http_request(
+    request: reqwest::RequestBuilder,
+    progress: &watch::Sender<usize>,
+) -> Result<HopOutcome, NetworkError> {
     let response = request.send().await.map_err(map_send_error)?;
     if response_header_bytes(&response) > MAX_RESPONSE_HEADER_BYTES {
         return Err(NetworkError::ResponseHeadersTooLarge);
@@ -140,6 +155,55 @@ async fn fetch_once_over_http(
     let document =
         collect_document_reporting_progress(response, set_cookie_lines, progress).await?;
     Ok(HopOutcome::Final(document))
+}
+
+/// Submit a form to `url` with `method` and `body`, sharing the same cookie-header-in/
+/// `Set-Cookie`-out/redirect-detection path as [`fetch_once`].
+///
+/// Only `http` and `https` schemes are accepted; a form must never submit to `file://`
+/// or any other scheme. The caller drives any resulting redirect loop, exactly as it
+/// does for [`fetch_once`].
+pub async fn submit_once(
+    url: &BrowserUrl,
+    method: RequestMethod,
+    body: &RequestBody,
+    cookie_header: Option<&str>,
+    headers: &RequestHeaders,
+    progress: watch::Sender<usize>,
+) -> Result<HopOutcome, NetworkError> {
+    if !scheme_is_http(url.scheme()) {
+        return Err(NetworkError::UnsupportedScheme {
+            scheme: url.scheme().to_string(),
+        });
+    }
+    let client = build_client()?;
+    let mut request = build_submission_request(&client, url, method, body);
+    request = headers.apply(request);
+    if let Some(cookie_header) = cookie_header {
+        request = request.header(COOKIE, cookie_header);
+    }
+    run_http_request(request, &progress).await
+}
+
+/// Build the `reqwest::RequestBuilder` for one `(method, body)` submission combination.
+fn build_submission_request(
+    client: &reqwest::Client,
+    url: &BrowserUrl,
+    method: RequestMethod,
+    body: &RequestBody,
+) -> reqwest::RequestBuilder {
+    match (method, body) {
+        (RequestMethod::Get, RequestBody::None) => client.get(url.as_str()),
+        (RequestMethod::Get, RequestBody::UrlEncoded(pairs)) => {
+            let mut target = url.as_url().clone();
+            target.query_pairs_mut().clear().extend_pairs(pairs);
+            client.get(target.as_str())
+        }
+        (RequestMethod::Post, RequestBody::None) => client.post(url.as_str()),
+        (RequestMethod::Post, RequestBody::UrlEncoded(pairs)) => {
+            client.post(url.as_str()).form(pairs)
+        }
+    }
 }
 
 /// Approximate wire size of a response's headers, in bytes.
