@@ -975,3 +975,48 @@ fn closing_the_settings_panel_drops_the_active_text_edit() {
     state.exit_settings_mode();
     assert!(state.settings_text_edit_id().is_none());
 }
+
+#[test]
+fn a_pushed_anchor_return_pops_once_and_then_reports_none() {
+    let mut ui_state = UiState::new(true);
+
+    ui_state.push_anchor_return(12);
+
+    assert!(ui_state.has_anchor_return());
+    assert_eq!(ui_state.pop_anchor_return(), Some(12));
+    assert_eq!(ui_state.pop_anchor_return(), None);
+    assert!(!ui_state.has_anchor_return());
+}
+
+#[test]
+fn three_pushed_anchor_returns_pop_in_reverse_order() {
+    let mut ui_state = UiState::new(true);
+
+    ui_state.push_anchor_return(1);
+    ui_state.push_anchor_return(2);
+    ui_state.push_anchor_return(3);
+
+    assert_eq!(ui_state.pop_anchor_return(), Some(3));
+    assert_eq!(ui_state.pop_anchor_return(), Some(2));
+    assert_eq!(ui_state.pop_anchor_return(), Some(1));
+    assert_eq!(ui_state.pop_anchor_return(), None);
+}
+
+#[test]
+fn clearing_anchor_returns_empties_the_stack() {
+    let mut ui_state = UiState::new(true);
+    ui_state.push_anchor_return(4);
+    ui_state.push_anchor_return(9);
+
+    ui_state.clear_anchor_returns();
+
+    assert!(!ui_state.has_anchor_return());
+    assert_eq!(ui_state.pop_anchor_return(), None);
+}
+
+#[test]
+fn a_new_ui_state_has_no_anchor_return() {
+    let ui_state = UiState::new(true);
+
+    assert!(!ui_state.has_anchor_return());
+}

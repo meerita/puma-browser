@@ -523,6 +523,7 @@ impl TerminalApp {
                 self.controller = ctrl;
                 load_state = LoadState::Idle;
                 selection.clear();
+                ui_state.clear_anchor_returns();
                 match result {
                     Ok(()) => {
                         self.view_state = ViewState::Page;
@@ -943,6 +944,7 @@ impl TerminalApp {
             return;
         };
         if let Some(row) = resolve_anchor_row(fragment, cached.buffer.anchors()) {
+            ui_state.push_anchor_return(scroll.offset());
             scroll.scroll_to(row, max_offset);
             return;
         }
@@ -1007,7 +1009,7 @@ impl TerminalApp {
             ),
             CommandKind::Search => self.run_search(remainder, ui_state, now),
             CommandKind::Reload => self.run_reload(ui_state, now),
-            CommandKind::Back => self.run_back(ui_state, cache, scroll, now),
+            CommandKind::Back => self.run_back(ui_state, cache, scroll, max_offset, now),
             CommandKind::History => CommandOutcome::History(parse_history_request(remainder)),
             CommandKind::Cookies => {
                 self.run_cookies(parse_cookies_request(remainder), ui_state, now);
@@ -1103,9 +1105,10 @@ impl TerminalApp {
         ui_state: &mut UiState,
         cache: &mut Option<CachedPage>,
         scroll: &mut ScrollState,
+        max_offset: u16,
         now: Instant,
     ) -> CommandOutcome {
-        if !self.controller.can_go_back() {
+        if !self.controller.can_go_back() && !ui_state.has_anchor_return() {
             ui_state.set_transient_message("no page to go back to".to_string(), now);
             return CommandOutcome::None;
         }
@@ -1115,6 +1118,7 @@ impl TerminalApp {
             cache,
             scroll,
             &mut self.view_state,
+            max_offset,
         );
         CommandOutcome::None
     }
@@ -2742,7 +2746,14 @@ fn handle_navigation_action(
             cache.as_ref().map(|cached| &cached.buffer),
         ),
         InputAction::NavigateBack => {
-            navigate_back(controller, ui_state, cache, scroll, view_state);
+            navigate_back(
+                controller,
+                ui_state,
+                cache,
+                scroll,
+                view_state,
+                bounds.max_offset,
+            );
             None
         }
         InputAction::FieldTextCommit => {
@@ -3129,21 +3140,32 @@ fn update_citation_preview(ui_state: &mut UiState, buffer: Option<&CellBuffer>) 
     ui_state.clear_citation_preview();
 }
 
-/// Restores the previous page from history and resets the viewport, clearing any focused
-/// interactive target. Does nothing when there is no history to restore.
+/// Undoes the most recent same-page anchor jump, or, when none is outstanding, restores
+/// the previous page from history and resets the viewport, clearing any focused
+/// interactive target.
+///
+/// A jump within one page is undone before the page is left, so a table of contents is not
+/// a one-way trip. Does nothing when there is neither a jump to undo nor history to
+/// restore.
 fn navigate_back(
     controller: &mut NavigationController,
     ui_state: &mut UiState,
     cache: &mut Option<CachedPage>,
     scroll: &mut ScrollState,
     view_state: &mut ViewState,
+    max_offset: u16,
 ) {
+    if let Some(offset) = ui_state.pop_anchor_return() {
+        scroll.scroll_to(offset, max_offset);
+        return;
+    }
     if !controller.go_back() {
         return;
     }
     *view_state = ViewState::Page;
     *cache = None;
     *scroll = ScrollState::new();
+    ui_state.clear_anchor_returns();
     ui_state.exit_interactive_navigation();
 }
 
