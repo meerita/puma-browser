@@ -134,7 +134,8 @@ fn control_id(node: &SemanticNode) -> Option<NodeId> {
         | SemanticNode::Details { .. }
         | SemanticNode::Summary { .. }
         | SemanticNode::EmbeddedContent { .. }
-        | SemanticNode::Warning { .. } => None,
+        | SemanticNode::Warning { .. }
+        | SemanticNode::AnchorTarget { .. } => None,
     }
 }
 
@@ -166,6 +167,7 @@ pub(crate) fn children_of(node: &SemanticNode) -> Option<&[SemanticNode]> {
         | SemanticNode::Input(_)
         | SemanticNode::Select(_)
         | SemanticNode::Textarea(_)
-        | SemanticNode::Button(_) => None,
+        | SemanticNode::Button(_)
+        | SemanticNode::AnchorTarget { .. } => None,
     }
 }

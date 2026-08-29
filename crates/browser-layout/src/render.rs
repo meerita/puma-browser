@@ -74,17 +74,103 @@ pub fn render_document(
         return Err(LayoutError::ZeroWidth);
     }
     let width_columns = usize::from(width);
-    let rows = render_children(
+    let mut pass = RenderPass::new(width_config, field_overlay);
+    let mut rows = render_children(
         document.children(),
         width_columns,
         &TextStyle {
             foreground: Some(Color::White),
             ..TextStyle::default()
         },
-        width_config,
-        field_overlay,
+        &mut pass,
     );
+    mark_trailing_anchors(&mut rows, &mut pass.pending_anchors);
     build_buffer(rows, width, width_config)
+}
+
+/// The state carried through the whole block recursion.
+///
+/// The width configuration and the field overlay are read at every level, and the anchors
+/// awaiting placement are filled in at one level and consumed at another, so the three
+/// travel together rather than as separate parameters on every signature.
+pub(crate) struct RenderPass<'a> {
+    width_config: &'a WidthConfig,
+    field_overlay: Option<&'a FieldOverlay>,
+    /// Fragment targets declared but not yet bound to a row.
+    ///
+    /// A target names the position the document declared it at. Which row that position
+    /// falls on is unknown until the next content row is laid out, so the names wait here
+    /// until one appears.
+    pending_anchors: Vec<String>,
+}
+
+impl<'a> RenderPass<'a> {
+    pub(crate) fn new(
+        width_config: &'a WidthConfig,
+        field_overlay: Option<&'a FieldOverlay>,
+    ) -> RenderPass<'a> {
+        RenderPass {
+            width_config,
+            field_overlay,
+            pending_anchors: Vec::new(),
+        }
+    }
+
+    pub(crate) fn width_config(&self) -> &'a WidthConfig {
+        self.width_config
+    }
+
+    pub(crate) fn field_overlay(&self) -> Option<&'a FieldOverlay> {
+        self.field_overlay
+    }
+}
+
+/// Append each name not already awaiting placement, preserving declaration order.
+fn push_unique_anchor_names(destination: &mut Vec<String>, names: &[String]) {
+    for name in names {
+        if destination.iter().any(|present| present == name) {
+            continue;
+        }
+        destination.push(name.clone());
+    }
+}
+
+/// Bind the anchors awaiting placement to the first row at or after `from` that holds a
+/// cell, then clear them.
+///
+/// Blank rows hold no cell and carry no anchor, so the scan skips them: a target must name
+/// the row its content starts on, not the spacing above it. When no row in range holds a
+/// cell the names stay pending and bind to whatever content comes next.
+fn mark_pending_anchors(rows: &mut [Vec<Cell>], from: usize, pending: &mut Vec<String>) {
+    if pending.is_empty() {
+        return;
+    }
+    let Some(row) = rows.iter_mut().skip(from).find(|row| !row.is_empty()) else {
+        return;
+    };
+    let Some(cell) = row.first_mut() else {
+        return;
+    };
+    cell.push_anchor_names(pending);
+    pending.clear();
+}
+
+/// Bind anchors still awaiting placement once the document ends to its last content row.
+///
+/// A target declared after everything the document renders would otherwise resolve to
+/// nothing, so a link to the final section reports a miss instead of scrolling to the end.
+fn mark_trailing_anchors(rows: &mut [Vec<Cell>], pending: &mut Vec<String>) {
+    if pending.is_empty() {
+        return;
+    }
+    let Some(row) = rows.iter_mut().rev().find(|row| !row.is_empty()) else {
+        return;
+    };
+    let Some(cell) = row.first_mut() else {
+        return;
+    };
+    cell.push_anchor_names(pending);
+    pending.clear();
 }
 
 /// Lay a sequence of sibling nodes out into rows, applying each node's own spacing.
@@ -95,19 +181,11 @@ pub(crate) fn render_children(
     children: &[SemanticNode],
     width: usize,
     inherited: &TextStyle,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) -> Vec<Vec<Cell>> {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for node in children {
-        append_node_rows(
-            &mut rows,
-            node,
-            width,
-            inherited,
-            width_config,
-            field_overlay,
-        );
+        append_node_rows(&mut rows, node, width, inherited, pass);
     }
     rows
 }
@@ -118,25 +196,34 @@ pub(crate) fn render_children(
 /// contributes no rows and its subtree is not walked. A structural node with no content
 /// contributes nothing, not even its spacing, so invisible nodes never leave stray blank
 /// rows behind.
-#[allow(clippy::too_many_arguments)]
+///
+/// A fragment target contributes no rows either, so it never reaches the cascade. Its
+/// names wait instead for the first node after it that does produce content, which is
+/// where a reader following the link expects to land: a hidden node or an image
+/// placeholder renders nothing, so the target belongs to the content that takes its place.
 fn append_node_rows(
     rows: &mut Vec<Vec<Cell>>,
     node: &SemanticNode,
     width: usize,
     inherited: &TextStyle,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) {
+    if let SemanticNode::AnchorTarget { names } = node {
+        push_unique_anchor_names(&mut pass.pending_anchors, names);
+        return;
+    }
     let style = cascade(inherited, node);
     if is_hidden(&style) {
         return;
     }
-    let content = node_rows(node, &style, width, width_config, field_overlay);
+    let content = node_rows(node, &style, width, pass);
     if content.is_empty() {
         return;
     }
     append_blank_rows(rows, style.spacing_before);
+    let first_content_row = rows.len();
     rows.extend(content);
+    mark_pending_anchors(rows, first_content_row, &mut pass.pending_anchors);
     append_blank_rows(rows, style.spacing_after);
 }
 
@@ -163,31 +250,18 @@ fn node_rows(
     node: &SemanticNode,
     style: &TextStyle,
     width: usize,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) -> Vec<Vec<Cell>> {
+    let width_config = pass.width_config();
     match node {
         SemanticNode::Heading { runs, .. } => wrap_runs(runs, style, width, width_config),
         SemanticNode::Paragraph { runs, .. } => wrap_runs(runs, style, width, width_config),
-        SemanticNode::Quote { children, .. } => {
-            render_quote(children, style, width, width_config, field_overlay)
-        }
+        SemanticNode::Quote { children, .. } => render_quote(children, style, width, pass),
         SemanticNode::List {
             ordered, children, ..
-        } => render_list(
-            *ordered,
-            children,
-            width,
-            style,
-            width_config,
-            field_overlay,
-        ),
-        SemanticNode::ListItem { children, .. } => {
-            render_children(children, width, style, width_config, field_overlay)
-        }
-        SemanticNode::Table { children } => {
-            render_table(children, style, width, width_config, field_overlay)
-        }
+        } => render_list(*ordered, children, width, style, pass),
+        SemanticNode::ListItem { children, .. } => render_children(children, width, style, pass),
+        SemanticNode::Table { children } => render_table(children, style, width, pass),
         SemanticNode::CodeBlock { text } | SemanticNode::PreformattedBlock { text } => {
             render_verbatim(text, style, width, width_config)
         }
@@ -197,23 +271,19 @@ fn node_rows(
         }
         SemanticNode::ImagePlaceholder { .. } => Vec::new(),
         SemanticNode::Figure { children, caption } => {
-            render_figure(children, caption, style, width, width_config, field_overlay)
+            render_figure(children, caption, style, width, pass)
         }
-        SemanticNode::Details { children, .. } => {
-            render_children(children, width, style, width_config, field_overlay)
-        }
+        SemanticNode::Details { children, .. } => render_children(children, width, style, pass),
         SemanticNode::Summary { runs, .. } => wrap_runs(runs, style, width, width_config),
-        SemanticNode::Landmark { children, .. } => {
-            render_children(children, width, style, width_config, field_overlay)
-        }
-        SemanticNode::Form(form) => {
-            render_children(&form.children, width, style, width_config, field_overlay)
-        }
+        SemanticNode::Landmark { children, .. } => render_children(children, width, style, pass),
+        SemanticNode::Form(form) => render_children(&form.children, width, style, pass),
         SemanticNode::Input(input) => {
-            render_input(input, style, width, width_config, field_overlay)
+            render_input(input, style, width, width_config, pass.field_overlay())
         }
         SemanticNode::Textarea(textarea) => {
-            let overlay_value = field_overlay.and_then(|overlay| overlay.get(textarea.id));
+            let overlay_value = pass
+                .field_overlay()
+                .and_then(|overlay| overlay.get(textarea.id));
             mark_field(
                 single_row(clip_line(
                     &input_placeholder(textarea.label.as_deref(), false, overlay_value),
@@ -226,7 +296,9 @@ fn node_rows(
             )
         }
         SemanticNode::Select(select) => {
-            let overlay_value = field_overlay.and_then(|overlay| overlay.get(select.id));
+            let overlay_value = pass
+                .field_overlay()
+                .and_then(|overlay| overlay.get(select.id));
             mark_field(
                 single_row(clip_line(
                     &select_placeholder(select.label.as_deref(), &select.options, overlay_value),
@@ -249,7 +321,9 @@ fn node_rows(
             width,
             width_config,
         )),
-        SemanticNode::TableRow { .. } | SemanticNode::TableCell { .. } => Vec::new(),
+        SemanticNode::TableRow { .. }
+        | SemanticNode::TableCell { .. }
+        | SemanticNode::AnchorTarget { .. } => Vec::new(),
     }
 }
 
@@ -270,6 +344,9 @@ fn wrap_runs(
 
 pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
     let mut cells: Vec<Cell> = Vec::new();
+    // A run whose text is empty produces no cell to mark, so its names move on to the
+    // first cell that does appear rather than being dropped.
+    let mut pending_anchors: Vec<String> = Vec::new();
     for run in runs {
         let style = computed_run_style(*base, run);
         let text = transform_text(&run.text, style.text_transform);
@@ -285,11 +362,12 @@ pub(crate) fn runs_to_cells(runs: &[InlineRun], base: &TextStyle) -> Vec<Cell> {
                 cell.set_citation_url(url.clone());
             }
         }
-        if !run.anchors.is_empty() {
-            if let Some(first) = cells.get_mut(start) {
-                first.set_anchor_names(run.anchors.clone());
-            }
-        }
+        push_unique_anchor_names(&mut pending_anchors, &run.anchors);
+        let Some(first) = cells.get_mut(start) else {
+            continue;
+        };
+        first.push_anchor_names(&pending_anchors);
+        pending_anchors.clear();
     }
     cells
 }
@@ -380,21 +458,14 @@ fn render_quote(
     children: &[SemanticNode],
     style: &TextStyle,
     width: usize,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) -> Vec<Vec<Cell>> {
     let indent = quote_indent(width);
     let content_width = width - indent;
-    trim_trailing_blanks(render_children(
-        children,
-        content_width,
-        style,
-        width_config,
-        field_overlay,
-    ))
-    .into_iter()
-    .map(|row| indent_row(row, indent, style))
-    .collect()
+    trim_trailing_blanks(render_children(children, content_width, style, pass))
+        .into_iter()
+        .map(|row| indent_row(row, indent, style))
+        .collect()
 }
 
 fn quote_indent(width: usize) -> usize {
@@ -408,14 +479,12 @@ fn quote_indent(width: usize) -> usize {
 /// `N. ` number for an ordered list), then lay the item's block children out and indent
 /// them under the item text. Ordered numbering is 1-based within this list; a nested
 /// list is rendered by its own call, so its numbering restarts from one.
-#[allow(clippy::too_many_arguments)]
 fn render_list(
     ordered: bool,
     items: &[SemanticNode],
     width: usize,
     inherited: &TextStyle,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) -> Vec<Vec<Cell>> {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     let mut ordinal = 1usize;
@@ -429,8 +498,7 @@ fn render_list(
             &list_marker(ordered, ordinal),
             width,
             inherited,
-            width_config,
-            field_overlay,
+            pass,
         );
         ordinal += 1;
     }
@@ -444,30 +512,23 @@ fn render_list(
 /// Trailing blank rows from the last child are stripped so consecutive list items run
 /// tight without gaps between them. The blank that follows the whole list comes from the
 /// list node's own spacing_after.
-#[allow(clippy::too_many_arguments)]
 fn append_list_item_rows(
     rows: &mut Vec<Vec<Cell>>,
     item: &SemanticNode,
     marker: &str,
     width: usize,
     inherited: &TextStyle,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) {
     let SemanticNode::ListItem { children, .. } = item else {
         return;
     };
     let style = cascade(inherited, item);
     let marker_cells = graphemes_to_cells(marker, &style);
-    let marker_columns = count_columns(&marker_cells, width_config);
+    let marker_columns = count_columns(&marker_cells, pass.width_config());
     let content_width = list_content_width(width, marker_columns);
-    let children_rows = trim_trailing_blanks(render_children(
-        children,
-        content_width,
-        &style,
-        width_config,
-        field_overlay,
-    ));
+    let children_rows =
+        trim_trailing_blanks(render_children(children, content_width, &style, pass));
     for (index, row) in children_rows.into_iter().enumerate() {
         rows.push(decorate_list_row(
             index,
@@ -574,12 +635,11 @@ fn render_figure(
     caption: &Option<Vec<InlineRun>>,
     style: &TextStyle,
     width: usize,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) -> Vec<Vec<Cell>> {
-    let mut rows = render_children(children, width, style, width_config, field_overlay);
+    let mut rows = render_children(children, width, style, pass);
     if let Some(runs) = caption {
-        rows.extend(wrap_runs(runs, style, width, width_config));
+        rows.extend(wrap_runs(runs, style, width, pass.width_config()));
     }
     rows
 }

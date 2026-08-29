@@ -239,6 +239,13 @@ pub(crate) struct UiState {
     settings_text_edit: Option<SettingsTextEdit>,
     settings_return_mode: InteractionMode,
     pending_fragment: Option<String>,
+    /// Viewport offsets to return to, one per same-page anchor jump not yet undone.
+    ///
+    /// A stack rather than one slot: a reader who follows three table-of-contents links in
+    /// a row expects three Backs to retrace each jump in turn, the way every mainstream
+    /// browser behaves. The offsets are rows in one particular rendered buffer, so they are
+    /// meaningless once another page loads and are cleared when the page changes.
+    anchor_return_offsets: Vec<u16>,
     search_enabled: bool,
 }
 
@@ -271,6 +278,7 @@ impl UiState {
             settings_text_edit: None,
             settings_return_mode: InteractionMode::Reading,
             pending_fragment: None,
+            anchor_return_offsets: Vec::new(),
             search_enabled,
         }
     }
@@ -290,6 +298,26 @@ impl UiState {
     /// Takes the fragment waiting to be applied, leaving none behind.
     pub(crate) fn take_pending_fragment(&mut self) -> Option<String> {
         self.pending_fragment.take()
+    }
+
+    /// Remembers the viewport offset an anchor jump is leaving, so Back can return to it.
+    pub(crate) fn push_anchor_return(&mut self, offset: u16) {
+        self.anchor_return_offsets.push(offset);
+    }
+
+    /// Whether a same-page anchor jump is waiting to be undone.
+    pub(crate) fn has_anchor_return(&self) -> bool {
+        !self.anchor_return_offsets.is_empty()
+    }
+
+    /// Takes the offset of the most recent anchor jump, or `None` when none is outstanding.
+    pub(crate) fn pop_anchor_return(&mut self) -> Option<u16> {
+        self.anchor_return_offsets.pop()
+    }
+
+    /// Forgets every outstanding anchor jump, called when the rendered page changes.
+    pub(crate) fn clear_anchor_returns(&mut self) {
+        self.anchor_return_offsets.clear();
     }
 
     pub(crate) fn is_in_command_mode(&self) -> bool {

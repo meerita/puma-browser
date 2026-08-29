@@ -7,9 +7,9 @@ use browser_css::{cascade, Emphasis, TextStyle};
 use browser_html::{InlineRun, SemanticNode};
 
 use crate::cell::Cell;
-use crate::field_overlay::FieldOverlay;
 use crate::render::{
     count_columns, graphemes_to_cells, render_children, runs_to_cells, space_cells, wrap_cells,
+    RenderPass,
 };
 use crate::width::{grapheme_columns, WidthConfig};
 
@@ -41,12 +41,12 @@ pub(crate) fn render_table(
     rows: &[SemanticNode],
     base: &TextStyle,
     width: usize,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) -> Vec<Vec<Cell>> {
     if is_layout_table(rows) {
-        return render_layout_table(rows, base, width, width_config, field_overlay);
+        return render_layout_table(rows, base, width, pass);
     }
+    let width_config = pass.width_config();
     let grid = build_grid(rows, base, width_config);
     if grid.is_empty() {
         return Vec::new();
@@ -99,8 +99,7 @@ fn render_layout_table(
     rows: &[SemanticNode],
     base: &TextStyle,
     width: usize,
-    width_config: &WidthConfig,
-    field_overlay: Option<&FieldOverlay>,
+    pass: &mut RenderPass<'_>,
 ) -> Vec<Vec<Cell>> {
     let mut output: Vec<Vec<Cell>> = Vec::new();
     for row in rows {
@@ -108,20 +107,24 @@ fn render_layout_table(
             continue;
         };
         for cell in children {
-            let SemanticNode::TableCell { children, .. } = cell else {
-                continue;
-            };
-            let cell_style = cascade(base, cell);
-            output.extend(render_children(
-                children,
-                width,
-                &cell_style,
-                width_config,
-                field_overlay,
-            ));
+            append_layout_cell_rows(&mut output, cell, base, width, pass);
         }
     }
     output
+}
+
+fn append_layout_cell_rows(
+    output: &mut Vec<Vec<Cell>>,
+    cell: &SemanticNode,
+    base: &TextStyle,
+    width: usize,
+    pass: &mut RenderPass<'_>,
+) {
+    let SemanticNode::TableCell { children, .. } = cell else {
+        return;
+    };
+    let cell_style = cascade(base, cell);
+    output.extend(render_children(children, width, &cell_style, pass));
 }
 
 /// A table cell reduced to a single styled line of content and its display width.
@@ -210,7 +213,19 @@ fn collect_node_runs(node: &SemanticNode, runs: &mut Vec<InlineRun>) {
         SemanticNode::List { children, .. }
         | SemanticNode::ListItem { children, .. }
         | SemanticNode::Quote { children, .. } => append_children_runs(runs, children),
+        SemanticNode::AnchorTarget { names } => runs.push(anchor_only_run(names)),
         _ => {}
+    }
+}
+
+/// A text-less run carrying a fragment target's names.
+///
+/// A grid cell is composed from runs rather than from laid-out rows, so a target declared
+/// inside the cell reaches the composed cells only by travelling as a run of its own.
+fn anchor_only_run(names: &[String]) -> InlineRun {
+    InlineRun {
+        anchors: names.to_vec(),
+        ..InlineRun::plain(String::new())
     }
 }
 

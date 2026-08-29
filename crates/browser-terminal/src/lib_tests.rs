@@ -11,7 +11,7 @@ use super::{
     action_refreshes_suggestions, advance_interactive_focus, build_settings_model,
     cell_is_selected, clamped_document_coordinate, copied_message, decode_fragment,
     document_coordinate, handle_mouse_event, handle_navigation_action, max_scroll_offset,
-    parse_history_request, resolve_anchor_row, retreat_interactive_focus,
+    navigate_back, parse_history_request, resolve_anchor_row, retreat_interactive_focus,
     sanitize_fragment_for_display, unique_interactive_targets, CachedPage, CommandOutcome,
     EnvOverrides, HistoryRequest, InputAction, InteractiveTarget, LoadState, NavigationRequest,
     ScrollState, SettingsModel, SettingsMutation, TerminalApp, TerminalSettings, TextSelection,
@@ -2346,4 +2346,255 @@ async fn activating_a_post_forms_submit_button_opens_confirmation_and_waits_for_
         wide_bounds(),
     );
     assert!(matches!(submit_request, Some(NavigationRequest::Submit(id)) if id == submit_button));
+}
+
+/// A cached page whose three later paragraphs each carry an anchor, so successive jumps
+/// land on distinct rows and each return offset is observable.
+fn cache_with_three_anchors() -> CachedPage {
+    let mut nodes = vec![SemanticNode::Paragraph {
+        runs: vec![InlineRun::plain("Table of contents".to_string())],
+        inline_style: None,
+    }];
+    for name in ["one", "two", "three"] {
+        nodes.push(SemanticNode::Paragraph {
+            runs: vec![InlineRun {
+                text: format!("Section {name}"),
+                emphasis: InlineEmphasis::none(),
+                link: None,
+                citation: None,
+                anchors: vec![name.to_string()],
+            }],
+            inline_style: None,
+        });
+    }
+    let document = Document::new(nodes, None, 0);
+    let buffer = render_document(&document, 40, &WidthConfig::default(), None)
+        .expect("document must lay out for the anchor return test");
+    CachedPage { width: 40, buffer }
+}
+
+#[test]
+fn a_resolved_anchor_jump_records_the_offset_it_left() {
+    let application = terminal_app();
+    let cache = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new(true);
+
+    application.jump_to_anchor(
+        Some("target"),
+        &cache,
+        &mut scroll,
+        80,
+        &mut ui_state,
+        Instant::now(),
+    );
+
+    assert!(ui_state.has_anchor_return());
+    assert_eq!(ui_state.pop_anchor_return(), Some(0));
+}
+
+#[test]
+fn a_missing_anchor_jump_records_nothing_to_return_to() {
+    let application = terminal_app();
+    let cache = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new(true);
+
+    application.jump_to_anchor(
+        Some("absent"),
+        &cache,
+        &mut scroll,
+        80,
+        &mut ui_state,
+        Instant::now(),
+    );
+
+    assert!(!ui_state.has_anchor_return());
+}
+
+#[test]
+fn back_after_an_anchor_jump_restores_the_offset_and_stays_on_the_page() {
+    let mut application = terminal_app();
+    let mut cache = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new(true);
+    scroll.scroll_to(1, 80);
+    application.jump_to_anchor(
+        Some("target"),
+        &cache,
+        &mut scroll,
+        80,
+        &mut ui_state,
+        Instant::now(),
+    );
+    let jumped_to = scroll.offset();
+
+    navigate_back(
+        &mut application.controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut application.view_state,
+        80,
+    );
+
+    assert_ne!(jumped_to, 1, "the jump must have moved the viewport");
+    assert_eq!(scroll.offset(), 1);
+    assert!(
+        cache.is_some(),
+        "undoing a jump must not leave the page or drop its rendered buffer"
+    );
+}
+
+#[test]
+fn three_anchor_jumps_retrace_in_reverse_order_across_three_backs() {
+    let mut application = terminal_app();
+    let mut cache = Some(cache_with_three_anchors());
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new(true);
+    let mut offsets_left = Vec::new();
+    for name in ["one", "two", "three"] {
+        offsets_left.push(scroll.offset());
+        application.jump_to_anchor(
+            Some(name),
+            &cache,
+            &mut scroll,
+            80,
+            &mut ui_state,
+            Instant::now(),
+        );
+    }
+
+    let mut restored = Vec::new();
+    for _ in 0..3 {
+        navigate_back(
+            &mut application.controller,
+            &mut ui_state,
+            &mut cache,
+            &mut scroll,
+            &mut application.view_state,
+            80,
+        );
+        restored.push(scroll.offset());
+    }
+
+    offsets_left.reverse();
+    assert_eq!(restored, offsets_left);
+    assert!(!ui_state.has_anchor_return());
+    assert!(
+        cache.is_some(),
+        "the three Backs undo the three jumps without leaving the page"
+    );
+}
+
+#[test]
+fn a_fourth_back_leaves_the_page_once_every_jump_is_undone() {
+    let mut application = terminal_app();
+    let mut cache = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new(true);
+    application.jump_to_anchor(
+        Some("target"),
+        &cache,
+        &mut scroll,
+        80,
+        &mut ui_state,
+        Instant::now(),
+    );
+    navigate_back(
+        &mut application.controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut application.view_state,
+        80,
+    );
+
+    navigate_back(
+        &mut application.controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut application.view_state,
+        80,
+    );
+
+    assert!(!ui_state.has_anchor_return());
+    assert_eq!(
+        scroll.offset(),
+        0,
+        "with no jump left to undo and no history, Back leaves the viewport alone"
+    );
+}
+
+#[test]
+fn a_page_change_drops_the_offsets_so_back_leaves_the_page() {
+    let mut application = terminal_app();
+    let mut cache = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new(true);
+    application.jump_to_anchor(
+        Some("target"),
+        &cache,
+        &mut scroll,
+        80,
+        &mut ui_state,
+        Instant::now(),
+    );
+
+    // What a completed load does: the newly rendered buffer makes the old rows meaningless.
+    ui_state.clear_anchor_returns();
+    scroll = ScrollState::new();
+    navigate_back(
+        &mut application.controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut application.view_state,
+        80,
+    );
+
+    assert_eq!(scroll.offset(), 0);
+    assert!(!ui_state.has_anchor_return());
+}
+
+#[test]
+fn back_with_no_jump_and_no_history_leaves_the_viewport_untouched() {
+    let mut application = terminal_app();
+    let mut cache: Option<CachedPage> = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new(true);
+    scroll.scroll_to(3, 80);
+
+    navigate_back(
+        &mut application.controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut application.view_state,
+        80,
+    );
+
+    assert_eq!(scroll.offset(), 3);
+    assert!(cache.is_some());
+}
+
+#[test]
+fn a_recorded_offset_beyond_the_new_maximum_clamps_instead_of_scrolling_past_it() {
+    let mut application = terminal_app();
+    let mut cache = Some(cache_with_anchor("target"));
+    let mut scroll = ScrollState::new();
+    let mut ui_state = UiState::new(true);
+    ui_state.push_anchor_return(50);
+
+    navigate_back(
+        &mut application.controller,
+        &mut ui_state,
+        &mut cache,
+        &mut scroll,
+        &mut application.view_state,
+        10,
+    );
+
+    assert_eq!(scroll.offset(), 10);
 }

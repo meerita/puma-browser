@@ -133,10 +133,19 @@ impl Cell {
         self.citation_url.as_deref()
     }
 
-    /// Records the anchor names whose run begins at this cell, used only by layout to
-    /// extract anchor spans. Set on the run's first grapheme so an anchor marks one row.
-    pub(crate) fn set_anchor_names(&mut self, names: Vec<String>) {
-        self.anchor_names = names;
+    /// Records the anchor names whose target begins at this cell, used only by layout to
+    /// extract anchor spans. Set on the first grapheme so an anchor marks one row.
+    ///
+    /// Names already present are not added again, and existing names are kept, because a
+    /// cell can be named both by the run it belongs to and by a target declared on the
+    /// block that starts here. Overwriting would drop one of the two.
+    pub(crate) fn push_anchor_names(&mut self, names: &[String]) {
+        for name in names {
+            if self.anchor_names.iter().any(|present| present == name) {
+                continue;
+            }
+            self.anchor_names.push(name.clone());
+        }
     }
 
     /// The anchor names whose run begins at this cell, empty when no anchor starts here.

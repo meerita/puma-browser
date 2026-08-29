@@ -85,6 +85,9 @@ fn node_to_text(node: &SemanticNode) -> String {
         SemanticNode::Separator => "---".to_string(),
         SemanticNode::EmbeddedContent { label } => format!("[Embedded: {}]", label),
         SemanticNode::Warning { message } => format!("[Warning: {}]", message),
+        // A fragment target renders nothing, so it contributes no text. Its names come
+        // from remote markup and must never reach an agent as page content.
+        SemanticNode::AnchorTarget { .. } => String::new(),
         SemanticNode::Input(input) => input.label.as_deref().unwrap_or("").to_string(),
         SemanticNode::Select(select) => select.label.as_deref().unwrap_or("").to_string(),
         SemanticNode::Textarea(textarea) => textarea.label.as_deref().unwrap_or("").to_string(),
@@ -141,7 +144,8 @@ fn collect_links(node: &SemanticNode, output: &mut Vec<LinkEntry>) {
         | SemanticNode::Warning { .. }
         | SemanticNode::Input(_)
         | SemanticNode::Select(_)
-        | SemanticNode::Textarea(_) => {}
+        | SemanticNode::Textarea(_)
+        | SemanticNode::AnchorTarget { .. } => {}
     }
 }
 

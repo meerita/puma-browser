@@ -455,6 +455,13 @@ struct TreeExtractor<'a> {
     /// built and absorbs it. The buffer persists across the block boundary so an `id` on a
     /// container reaches the first run of the block nested inside it.
     pending_anchors: Vec<String>,
+    /// The element whose anchor names the block walk last emitted as a marker.
+    ///
+    /// The block walk and the inline walk both read an element's `id`: `handle_element`
+    /// reads it, and `block_runs` on the same element reaches it again through
+    /// `gather_element_segments`. Remembering which element is already placed lets the
+    /// inline walk leave it alone, so one attribute produces one anchor rather than two.
+    element_with_emitted_marker: Option<usize>,
     /// The next value [`allocate_node_id`](Self::allocate_node_id) hands out.
     ///
     /// Ids are assigned in document order as forms and controls are visited; they are not
@@ -470,6 +477,7 @@ impl<'a> TreeExtractor<'a> {
             script_count: 0,
             base_url,
             pending_anchors: Vec::new(),
+            element_with_emitted_marker: None,
             next_node_id: 0,
         }
     }
@@ -521,6 +529,20 @@ impl<'a> TreeExtractor<'a> {
         )))
     }
 
+    /// Drain the anchors pending at a block boundary onto a marker node.
+    ///
+    /// The marker fixes the anchor at the position the document declared it, so it is
+    /// pushed before the node the element produces. An element that produces no node at
+    /// all still names a position, so the marker is emitted either way.
+    fn emit_anchor_marker(&mut self, output: &mut Vec<SemanticNode>) {
+        if self.pending_anchors.is_empty() {
+            return;
+        }
+        output.push(SemanticNode::AnchorTarget {
+            names: std::mem::take(&mut self.pending_anchors),
+        });
+    }
+
     fn script_count(&self) -> usize {
         self.script_count
     }
@@ -551,6 +573,8 @@ impl<'a> TreeExtractor<'a> {
 
     fn handle_element(&mut self, element: usize, output: &mut Vec<SemanticNode>) {
         self.enter_anchor_names(element);
+        self.emit_anchor_marker(output);
+        self.element_with_emitted_marker = Some(element);
         let tag = local_name(&self.arena[element].name).to_string();
         if let Some(level) = heading_level(&tag) {
             self.push_heading(element, level, output);
@@ -730,7 +754,11 @@ impl<'a> TreeExtractor<'a> {
         // colspan and rowspan are ignored: each cell occupies exactly one column
         // position, so a spanned cell is rendered as a single cell rather than widened.
         // Honoring spans needs a grid model that a later table milestone will add.
-        let children = self.block_children(node);
+        self.enter_anchor_names(node);
+        let mut children = Vec::new();
+        self.emit_anchor_marker(&mut children);
+        self.element_with_emitted_marker = Some(node);
+        children.extend(self.block_children(node));
         cells.push(SemanticNode::TableCell {
             header,
             children,
@@ -877,7 +905,9 @@ impl<'a> TreeExtractor<'a> {
         context: &InlineContext,
         segments: &mut Vec<Segment>,
     ) {
-        self.enter_anchor_names(element);
+        if self.element_with_emitted_marker != Some(element) {
+            self.enter_anchor_names(element);
+        }
         let tag = local_name(&self.arena[element].name).to_string();
         if tag == "script" {
             self.script_count += 1;
