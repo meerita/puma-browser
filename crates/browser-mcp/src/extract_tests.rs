@@ -182,3 +182,56 @@ fn extract_text_includes_the_literal_quote_marks_synthesized_in_run_text() {
         "got: {text:?}"
     );
 }
+
+#[test]
+fn an_anchor_target_contributes_no_text() {
+    let nodes = vec![
+        SemanticNode::AnchorTarget {
+            names: vec!["secret-target-name".to_string()],
+        },
+        SemanticNode::Paragraph {
+            runs: vec![plain_run("Body")],
+            inline_style: None,
+        },
+    ];
+
+    assert_eq!(extract_text(&nodes), "Body");
+}
+
+#[test]
+fn an_anchor_target_adds_no_blank_line_between_blocks() {
+    let with_target = vec![
+        SemanticNode::Paragraph {
+            runs: vec![plain_run("First")],
+            inline_style: None,
+        },
+        SemanticNode::AnchorTarget {
+            names: vec!["between".to_string()],
+        },
+        SemanticNode::Paragraph {
+            runs: vec![plain_run("Second")],
+            inline_style: None,
+        },
+    ];
+    let without_target = vec![
+        SemanticNode::Paragraph {
+            runs: vec![plain_run("First")],
+            inline_style: None,
+        },
+        SemanticNode::Paragraph {
+            runs: vec![plain_run("Second")],
+            inline_style: None,
+        },
+    ];
+
+    assert_eq!(extract_text(&with_target), extract_text(&without_target));
+}
+
+#[test]
+fn an_anchor_target_contributes_no_link() {
+    let nodes = vec![SemanticNode::AnchorTarget {
+        names: vec!["target".to_string()],
+    }];
+
+    assert!(extract_links(&nodes).is_empty());
+}

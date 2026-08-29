@@ -101,4 +101,15 @@ pub enum SemanticNode {
     Warning {
         message: String,
     },
+    /// A fragment target declared at this position in the document.
+    ///
+    /// The marker renders nothing. It exists so an anchor keeps the position the document
+    /// declared it at instead of the position of whatever text happens to follow, which is
+    /// what a link to `#name` scrolls to. Every consumer that walks nodes for output must
+    /// skip it: it contributes no text, no cell, and no link, and its names are
+    /// remote-sourced, so letting one reach rendered output would put untrusted text on
+    /// screen that the page never wrote.
+    AnchorTarget {
+        names: Vec<String>,
+    },
 }
